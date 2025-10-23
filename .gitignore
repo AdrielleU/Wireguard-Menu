@@ -1,0 +1,55 @@
+# System files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Log files
+*.log
+
+# Backup files
+*.backup
+*.bak
+*.old
+
+# Test files
+test/
+tests/
+.test/
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# OS-specific
+.Trash-*
+.directory
+
+# Personal notes
+TODO.txt
+NOTES.txt
+notes/
+
+# Virtual environments (if adding any automation)
+venv/
+env/
+.env
+
+# Build artifacts (if adding compilation later)
+dist/
+build/
+
+# Sensitive data - NEVER commit these!
+*.key
+*.pem
+*.conf
+privatekey*
+publickey*
+*.qr
+*.png
+
+# Exception: Keep example configs
+!example.conf
+!*.example.conf
