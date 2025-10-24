@@ -64,7 +64,12 @@ detect_servers() {
     local servers=()
 
     if [[ -d "$WG_CONFIG_DIR" ]]; then
-        for conf in "$WG_CONFIG_DIR"/*.conf; do
+        # Use nullglob to handle case where no .conf files exist
+        shopt -s nullglob
+        local conf_files=("$WG_CONFIG_DIR"/*.conf)
+        shopt -u nullglob
+
+        for conf in "${conf_files[@]}"; do
             [[ ! -f "$conf" ]] && continue
             local iface_name=$(basename "$conf" .conf)
             servers+=("$iface_name")
@@ -91,10 +96,9 @@ select_server() {
         return
     fi
 
-    # If only one server exists, use it automatically
+    # If only one server exists, use it automatically (silently)
     if [[ $server_count -eq 1 ]]; then
         WG_INTERFACE="${servers[0]}"
-        print_success "Auto-detected server: ${WG_INTERFACE}"
         return
     fi
 
@@ -117,7 +121,7 @@ select_server() {
             is_running="${YELLOW}[STOPPED]${NC}"
         fi
 
-        echo -e "  ${BLUE}${i})${NC} ${iface} $is_running - ${conf_ip}, Port ${conf_port}"
+        printf "  ${BLUE}%d)${NC} %s %b - %s, Port %s\n" "$i" "$iface" "$is_running" "$conf_ip" "$conf_port"
         ((i++))
     done
 
@@ -149,16 +153,17 @@ list_clients() {
         clients="${clients[@]}"
     fi
 
-    if [[ -z "$clients" ]]; then
-        error_exit "No clients found in ${WG_INTERFACE}"
-    fi
-
     echo "$clients"
 }
 
 select_client() {
     local clients=($(list_clients))
     local client_count=${#clients[@]}
+
+    # Check if any clients exist
+    if [[ $client_count -eq 0 ]]; then
+        error_exit "No clients found in ${WG_INTERFACE}"
+    fi
 
     # If client specified via argument, validate it
     if [[ -n "$CLIENT_NAME" ]]; then
@@ -173,17 +178,19 @@ select_client() {
 
     # Show client selection menu
     echo ""
+    print_info "Select a client to regenerate encryption keys for security"
+    echo ""
     echo "Clients in ${WG_INTERFACE}:"
     echo ""
 
     local i=1
     for client in "${clients[@]}"; do
-        echo -e "  ${BLUE}${i})${NC} ${client}"
+        printf "  ${BLUE}%d)${NC} %s\n" "$i" "$client"
         ((i++))
     done
 
     echo ""
-    read -p "Select client to rotate keys (1-${client_count}): " selection
+    read -p "Select client (1-${client_count}): " selection
 
     # Validate selection
     if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$client_count" ]; then
@@ -232,6 +239,9 @@ get_current_client_info() {
 
     if [[ -z "$SERVER_ENDPOINT" ]]; then
         print_warning "Could not determine server endpoint from existing config"
+        echo ""
+        echo "Server Endpoint: Your server's public IP or domain name"
+        echo "  Examples: 203.0.113.50, vpn.example.com"
         read -p "Enter server public IP/domain: " SERVER_ENDPOINT
     fi
 
@@ -263,15 +273,18 @@ generate_new_keys() {
 
 update_server_config() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local backup_file="${config_file}.backup.$(date +%Y%m%d_%H%M%S)"
 
     print_info "Updating server configuration with new public key..."
 
-    # Backup server config
-    cp "$config_file" "$backup_file"
+    # Backup original permissions
+    local original_perms=$(stat -c '%a' "$config_file" 2>/dev/null || echo "600")
+    local original_owner=$(stat -c '%U:%G' "$config_file" 2>/dev/null || echo "root:root")
 
     # Find and update the client's public key
     local temp_file=$(mktemp)
+    # Ensure temp file is cleaned up on exit or error
+    trap "rm -f '$temp_file'" EXIT ERR
+
     local in_client_section=0
 
     while IFS= read -r line; do
@@ -288,17 +301,38 @@ update_server_config() {
         fi
     done < "$config_file"
 
-    # Replace original config
+    # Replace original config with proper permissions and ownership
     mv "$temp_file" "$config_file"
-    chmod 600 "$config_file"
+    chmod "$original_perms" "$config_file"
+    chown "$original_owner" "$config_file"
+
+    # Clear the trap since we successfully moved the file
+    trap - EXIT ERR
 
     print_success "Server config updated"
-    print_info "Backup saved to: $backup_file"
 }
 
 create_new_client_config() {
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
     local client_config_file="${keys_dir}/${CLIENT_NAME}.conf"
+
+    # Try to preserve existing AllowedIPs from current config
+    local allowed_ips=""
+    if [[ -f "$client_config_file" ]]; then
+        allowed_ips=$(grep -E "^AllowedIPs\s*=" "$client_config_file" | awk '{print $3}')
+    fi
+
+    # If no existing config or AllowedIPs not found, default to VPN network only
+    if [[ -z "$allowed_ips" ]]; then
+        local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+        local server_address=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')
+        local network_base=$(echo "$server_address" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3".0"}')
+        local network_cidr=$(echo "$server_address" | cut -d'/' -f2)
+        allowed_ips="${network_base}/${network_cidr}"
+        print_warning "No existing routing config found, defaulting to VPN network only"
+    else
+        print_info "Preserving existing routing configuration: ${allowed_ips}"
+    fi
 
     print_info "Creating new client configuration..."
 
@@ -311,7 +345,7 @@ DNS = 8.8.8.8
 [Peer]
 PublicKey = ${SERVER_PUBLIC_KEY}
 Endpoint = ${SERVER_ENDPOINT}:${SERVER_PORT}
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = ${allowed_ips}
 PersistentKeepalive = 25
 EOF
 
@@ -324,10 +358,30 @@ reload_server() {
     print_info "Reloading WireGuard configuration without dropping connections..."
 
     # Use wg syncconf to reload config without disrupting active connections
-    wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}") || error_exit "Failed to reload ${WG_INTERFACE}"
+    if ! wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}"); then
+        print_error "Failed to reload ${WG_INTERFACE} with wg syncconf"
+        echo ""
+        print_warning "Attempting full restart instead..."
 
-    print_success "WireGuard configuration reloaded for ${WG_INTERFACE}"
-    print_info "Other active connections remain intact"
+        systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+        sleep 1
+
+        if ! systemctl start "wg-quick@${WG_INTERFACE}"; then
+            print_error "Failed to restart ${WG_INTERFACE}"
+            echo ""
+            print_info "Service status:"
+            systemctl status "wg-quick@${WG_INTERFACE}" --no-pager -l || true
+            echo ""
+            print_info "Check logs with:"
+            echo "  journalctl -xeu wg-quick@${WG_INTERFACE}.service"
+            error_exit "Could not reload/restart WireGuard service"
+        fi
+
+        print_success "WireGuard server restarted (all connections were reset)"
+    else
+        print_success "WireGuard configuration reloaded for ${WG_INTERFACE}"
+        print_info "Other active connections remain intact"
+    fi
 }
 
 show_summary() {

@@ -60,7 +60,12 @@ detect_servers() {
     local servers=()
 
     if [[ -d "$WG_CONFIG_DIR" ]]; then
-        for conf in "$WG_CONFIG_DIR"/*.conf; do
+        # Use nullglob to handle case where no .conf files exist
+        shopt -s nullglob
+        local conf_files=("$WG_CONFIG_DIR"/*.conf)
+        shopt -u nullglob
+
+        for conf in "${conf_files[@]}"; do
             [[ ! -f "$conf" ]] && continue
             local iface_name=$(basename "$conf" .conf)
             servers+=("$iface_name")
@@ -87,10 +92,9 @@ select_server() {
         return
     fi
 
-    # If only one server exists, use it automatically
+    # If only one server exists, use it automatically (silently)
     if [[ $server_count -eq 1 ]]; then
         WG_INTERFACE="${servers[0]}"
-        print_success "Auto-detected server: ${WG_INTERFACE}"
         return
     fi
 
@@ -113,7 +117,7 @@ select_server() {
             is_running="${YELLOW}[STOPPED]${NC}"
         fi
 
-        echo -e "  ${BLUE}${i})${NC} ${iface} $is_running - ${conf_ip}, Port ${conf_port}"
+        printf "  ${BLUE}%d)${NC} %s %b - %s, Port %s\n" "$i" "$iface" "$is_running" "$conf_ip" "$conf_port"
         ((i++))
     done
 
@@ -145,16 +149,17 @@ list_clients() {
         clients="${clients[@]}"
     fi
 
-    if [[ -z "$clients" ]]; then
-        error_exit "No clients found in ${WG_INTERFACE}"
-    fi
-
     echo "$clients"
 }
 
 select_client() {
     local clients=($(list_clients))
     local client_count=${#clients[@]}
+
+    # Check if any clients exist
+    if [[ $client_count -eq 0 ]]; then
+        error_exit "No clients found in ${WG_INTERFACE}"
+    fi
 
     # If client specified via argument, validate it
     if [[ -n "$CLIENT_NAME" ]]; then
@@ -169,17 +174,19 @@ select_client() {
 
     # Show client selection menu
     echo ""
+    print_info "Select a client to view connection status and statistics"
+    echo ""
     echo "Clients in ${WG_INTERFACE}:"
     echo ""
 
     local i=1
     for client in "${clients[@]}"; do
-        echo -e "  ${BLUE}${i})${NC} ${client}"
+        printf "  ${BLUE}%d)${NC} %s\n" "$i" "$client"
         ((i++))
     done
 
     echo ""
-    read -p "Select client to view status (1-${client_count}): " selection
+    read -p "Select client (1-${client_count}): " selection
 
     # Validate selection
     if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$client_count" ]; then

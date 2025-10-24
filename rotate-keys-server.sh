@@ -59,7 +59,12 @@ detect_servers() {
     local servers=()
 
     if [[ -d "$WG_CONFIG_DIR" ]]; then
-        for conf in "$WG_CONFIG_DIR"/*.conf; do
+        # Use nullglob to handle case where no .conf files exist
+        shopt -s nullglob
+        local conf_files=("$WG_CONFIG_DIR"/*.conf)
+        shopt -u nullglob
+
+        for conf in "${conf_files[@]}"; do
             [[ ! -f "$conf" ]] && continue
             local iface_name=$(basename "$conf" .conf)
             servers+=("$iface_name")
@@ -86,10 +91,9 @@ select_server() {
         return
     fi
 
-    # If only one server exists, use it automatically
+    # If only one server exists, use it automatically (silently)
     if [[ $server_count -eq 1 ]]; then
         WG_INTERFACE="${servers[0]}"
-        print_success "Auto-detected server: ${WG_INTERFACE}"
         return
     fi
 
@@ -112,7 +116,7 @@ select_server() {
             is_running="${YELLOW}[STOPPED]${NC}"
         fi
 
-        echo -e "  ${BLUE}${i})${NC} ${iface} $is_running - ${conf_ip}, Port ${conf_port}"
+        printf "  ${BLUE}%d)${NC} %s %b - %s, Port %s\n" "$i" "$iface" "$is_running" "$conf_ip" "$conf_port"
         ((i++))
     done
 
@@ -204,20 +208,17 @@ update_server_config() {
 
     print_info "Updating server configuration..."
 
-    # Read current config and update PrivateKey
-    local temp_file=$(mktemp)
+    # Backup original permissions
+    local original_perms=$(stat -c '%a' "$config_file" 2>/dev/null || echo "600")
+    local original_owner=$(stat -c '%U:%G' "$config_file" 2>/dev/null || echo "root:root")
 
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^PrivateKey ]]; then
-            echo "PrivateKey = ${SERVER_PRIVATE_KEY}" >> "$temp_file"
-        else
-            echo "$line" >> "$temp_file"
-        fi
-    done < "$config_file"
+    # Use sed to replace PrivateKey line in-place
+    # This preserves file ownership and permissions
+    sed -i "s|^PrivateKey.*|PrivateKey = ${SERVER_PRIVATE_KEY}|" "$config_file"
 
-    # Replace original config
-    mv "$temp_file" "$config_file"
-    chmod 600 "$config_file"
+    # Ensure correct permissions just in case
+    chmod "$original_perms" "$config_file"
+    chown "$original_owner" "$config_file"
 
     print_success "Server config updated with new private key"
 }
@@ -236,6 +237,11 @@ regenerate_all_client_configs() {
 
     # Get server info
     local server_port=$(grep -E "^ListenPort\s*=" "$config_file" | head -n1 | awk '{print $3}')
+    local server_address=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')
+    # Extract network from server address (e.g., 10.188.128.1/24 -> 10.188.128.0/24)
+    local network_base=$(echo "$server_address" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3".0"}')
+    local network_cidr=$(echo "$server_address" | cut -d'/' -f2)
+    local vpn_network="${network_base}/${network_cidr}"
 
     for client in "${clients[@]}"; do
         local client_ip=$(get_client_info "$client")
@@ -257,8 +263,22 @@ regenerate_all_client_configs() {
         fi
 
         if [[ -z "$server_endpoint" ]]; then
-            print_warning "Could not determine endpoint for ${client}, using placeholder"
+            print_warning "Could not determine server endpoint for ${client}"
+            echo "  Using placeholder 'YOUR_SERVER_IP' - you must manually edit the config"
+            echo "  Replace with your server's public IP or domain name"
             server_endpoint="YOUR_SERVER_IP"
+        fi
+
+        # Try to preserve existing AllowedIPs from current config
+        local allowed_ips=""
+        if [[ -f "$client_config" ]]; then
+            allowed_ips=$(grep -E "^AllowedIPs\s*=" "$client_config" | awk '{print $3}')
+        fi
+
+        # If no existing AllowedIPs, default to VPN network only
+        if [[ -z "$allowed_ips" ]]; then
+            allowed_ips="${vpn_network}"
+            print_warning "No existing routing config for ${client}, defaulting to VPN network only"
         fi
 
         # Regenerate client config with new server public key
@@ -271,7 +291,7 @@ DNS = 8.8.8.8
 [Peer]
 PublicKey = ${SERVER_PUBLIC_KEY}
 Endpoint = ${server_endpoint}:${server_port}
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = ${allowed_ips}
 PersistentKeepalive = 25
 EOF
 
@@ -288,8 +308,26 @@ reload_server() {
     # Stop the service
     systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
 
+    # Wait a moment for clean shutdown
+    sleep 1
+
     # Start with new keys
-    systemctl start "wg-quick@${WG_INTERFACE}" || error_exit "Failed to start ${WG_INTERFACE}"
+    if ! systemctl start "wg-quick@${WG_INTERFACE}"; then
+        print_error "Failed to start ${WG_INTERFACE}"
+        echo ""
+        print_info "Service status:"
+        systemctl status "wg-quick@${WG_INTERFACE}" --no-pager -l || true
+        echo ""
+        print_info "Check logs with:"
+        echo "  journalctl -xeu wg-quick@${WG_INTERFACE}.service"
+        error_exit "Could not restart WireGuard service"
+    fi
+
+    # Wait a moment and verify it's actually running
+    sleep 1
+    if ! systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
+        error_exit "${WG_INTERFACE} service is not active after restart"
+    fi
 
     print_success "WireGuard server restarted with new keys"
     print_warning "All clients are now disconnected and need updated configs!"

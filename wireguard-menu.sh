@@ -83,10 +83,11 @@ show_menu() {
     echo -e "${BLUE}Server Setup & Management:${NC}"
     echo "  7) Setup WireGuard Server        (setup-wireguard.sh)"
     echo "  8) Rotate Server Keys            (rotate-keys-server.sh)"
+    echo "  9) Reset/Cleanup WireGuard       (reset-wireguard.sh)"
     echo ""
 
     echo -e "${BLUE}System:${NC}"
-    echo "  9) Exit"
+    echo "  10) Exit"
     echo ""
     echo "=========================================="
     echo ""
@@ -136,7 +137,7 @@ main() {
     while true; do
         show_menu
 
-        read -p "Select an option (1-9): " choice
+        read -p "Select an option (1-10): " choice
 
         case $choice in
             1)
@@ -164,13 +165,16 @@ main() {
                 run_script "rotate-keys-server.sh" "Rotate Server Keys"
                 ;;
             9)
+                run_script "reset-wireguard.sh" "Reset/Cleanup WireGuard"
+                ;;
+            10)
                 echo ""
                 print_info "Exiting WireGuard Management Menu"
                 echo ""
                 exit 0
                 ;;
             *)
-                print_error "Invalid selection. Please choose 1-9."
+                print_error "Invalid selection. Please choose 1-10."
                 echo ""
                 read -p "Press Enter to continue..."
                 ;;

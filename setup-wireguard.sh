@@ -314,6 +314,62 @@ check_interface_conflicts() {
     return 0
 }
 
+get_next_available_interface() {
+    # Find next available wgN interface
+    local n=0
+    while [[ -f "${WG_CONFIG_DIR}/wg${n}.conf" ]] || ip link show "wg${n}" &>/dev/null; do
+        ((n++))
+    done
+    echo "wg${n}"
+}
+
+get_next_available_port() {
+    # Find next available port starting from 51820
+    local port=51820
+    local used_ports=()
+
+    # Get all used ports from existing configs
+    if [[ -d "$WG_CONFIG_DIR" ]]; then
+        for conf in "$WG_CONFIG_DIR"/*.conf; do
+            [[ ! -f "$conf" ]] && continue
+            local conf_port=$(grep -E "^ListenPort\s*=" "$conf" | head -n1 | awk '{print $3}')
+            [[ -n "$conf_port" ]] && used_ports+=("$conf_port")
+        done
+    fi
+
+    # Find next available port
+    while [[ " ${used_ports[@]} " =~ " ${port} " ]] || ss -ulnp 2>/dev/null | grep -q ":${port} "; do
+        ((port++))
+    done
+    echo "$port"
+}
+
+get_next_available_network() {
+    # Find next available 10.0.N.0/24 network
+    local n=0
+    local used_networks=()
+
+    # Get all used networks from existing configs
+    if [[ -d "$WG_CONFIG_DIR" ]]; then
+        for conf in "$WG_CONFIG_DIR"/*.conf; do
+            [[ ! -f "$conf" ]] && continue
+            local conf_network=$(grep -E "^Address\s*=" "$conf" | head -n1 | awk '{print $3}' | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3".0/24"}')
+            [[ -n "$conf_network" ]] && used_networks+=("$conf_network")
+        done
+    fi
+
+    # Find next available 10.0.N.0/24
+    while [[ " ${used_networks[@]} " =~ " 10.0.${n}.0/24 " ]]; do
+        ((n++))
+        # Prevent infinite loop, max 255 networks
+        if [[ $n -gt 255 ]]; then
+            echo "10.0.0.0/24"
+            return
+        fi
+    done
+    echo "10.0.${n}.0/24"
+}
+
 list_existing_wireguard_servers() {
     print_info "Existing WireGuard servers on this system:"
 
@@ -352,16 +408,24 @@ prompt_user_config() {
     # Show existing WireGuard servers
     list_existing_wireguard_servers
 
+    # Auto-detect smart defaults based on existing servers
+    local suggested_interface=$(get_next_available_interface)
+    local suggested_port=$(get_next_available_port)
+    local suggested_network=$(get_next_available_network)
+
     # Prompt for interface name if not set
     if [[ -z "$WG_INTERFACE" ]]; then
+        echo "Interface Name: Network interface identifier for WireGuard"
+        echo "  Suggested: ${suggested_interface} (next available)"
+        echo "  For multiple servers: Use wg1, wg2, wg3..."
         while true; do
-            read -p "Enter WireGuard interface name [${DEFAULT_WG_INTERFACE}]: " input_interface
-            WG_INTERFACE="${input_interface:-$DEFAULT_WG_INTERFACE}"
+            read -p "Enter interface name [${suggested_interface}]: " input_interface
+            WG_INTERFACE="${input_interface:-$suggested_interface}"
 
             if check_interface_conflicts "$WG_INTERFACE"; then
                 break
             else
-                print_error "Please choose a different interface name"
+                print_error "Interface '${WG_INTERFACE}' already exists. Please choose a different name"
             fi
         done
     else
@@ -370,11 +434,17 @@ prompt_user_config() {
         fi
     fi
 
+    echo ""
+
     # Prompt for port if not set
     if [[ -z "$WG_PORT" ]]; then
+        echo "Listen Port: UDP port where WireGuard listens for connections"
+        echo "  Suggested: ${suggested_port} (next available)"
+        echo "  For multiple servers: Each needs a unique port"
+        echo "  Note: Clients need to know this port to connect"
         while true; do
-            read -p "Enter WireGuard listen port [${DEFAULT_WG_PORT}]: " input_port
-            WG_PORT="${input_port:-$DEFAULT_WG_PORT}"
+            read -p "Enter listen port [${suggested_port}]: " input_port
+            WG_PORT="${input_port:-$suggested_port}"
 
             if ! validate_port "$WG_PORT"; then
                 print_error "Invalid port number. Must be between 1 and 65535."
@@ -384,7 +454,7 @@ prompt_user_config() {
             if check_port_conflicts "$WG_PORT"; then
                 break
             else
-                print_error "Please choose a different port"
+                print_error "Port ${WG_PORT} is already in use. Please choose a different port"
             fi
         done
     else
@@ -396,21 +466,24 @@ prompt_user_config() {
         fi
     fi
 
-    # Prompt for server IP if not set
-    if [[ -z "$SERVER_IP" ]]; then
-        while true; do
-            read -p "Enter server IP address with CIDR [${DEFAULT_SERVER_IP}]: " input_server_ip
-            SERVER_IP="${input_server_ip:-$DEFAULT_SERVER_IP}"
+    echo ""
 
-            if ! validate_ip_cidr "$SERVER_IP"; then
-                print_error "Invalid IP/CIDR format. Example: 10.0.0.1/24"
+    # Prompt for network CIDR first if not set
+    if [[ -z "$SERVER_NETWORK" ]]; then
+        echo "VPN Network Range: Private IP range for the VPN tunnel"
+        echo "  Suggested: ${suggested_network} (next available)"
+        echo "  Common ranges: 10.0.0.0/24, 10.0.1.0/24, 10.0.2.0/24"
+        echo "  For multiple servers: Use different subnets"
+        while true; do
+            read -p "Enter VPN network CIDR [${suggested_network}]: " input_network
+            SERVER_NETWORK="${input_network:-$suggested_network}"
+
+            if ! validate_network_cidr "$SERVER_NETWORK"; then
+                print_error "Invalid network CIDR format. Example: 10.0.0.0/24"
                 continue
             fi
 
-            # Extract just the network part for conflict checking
-            local network_check=$(echo "$SERVER_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3".0/"}')"$(echo "$SERVER_IP" | cut -d'/' -f2)"
-
-            if check_network_conflicts "$network_check"; then
+            if check_network_conflicts "$SERVER_NETWORK"; then
                 break
             else
                 print_warning "This network may conflict with existing interfaces"
@@ -422,26 +495,60 @@ prompt_user_config() {
             fi
         done
     else
-        if ! validate_ip_cidr "$SERVER_IP"; then
-            error_exit "Invalid IP/CIDR format: $SERVER_IP"
+        if ! validate_network_cidr "$SERVER_NETWORK"; then
+            error_exit "Invalid network CIDR format: $SERVER_NETWORK"
         fi
     fi
 
-    # Prompt for network if not set
-    if [[ -z "$SERVER_NETWORK" ]]; then
-        while true; do
-            read -p "Enter VPN network CIDR [${DEFAULT_SERVER_NETWORK}]: " input_network
-            SERVER_NETWORK="${input_network:-$DEFAULT_SERVER_NETWORK}"
+    echo ""
 
-            if validate_network_cidr "$SERVER_NETWORK"; then
-                break
-            else
-                print_error "Invalid network CIDR format. Example: 10.0.0.0/24"
+    # Prompt for server IP if not set (auto-derive default from network)
+    if [[ -z "$SERVER_IP" ]]; then
+        # Extract network base and CIDR from SERVER_NETWORK
+        local network_base=$(echo "$SERVER_NETWORK" | cut -d'/' -f1)
+        local network_cidr=$(echo "$SERVER_NETWORK" | cut -d'/' -f2)
+
+        # Derive default server IP: change last octet to 1
+        local derived_server_ip=$(echo "$network_base" | awk -F. '{print $1"."$2"."$3".1"}')"/${network_cidr}"
+
+        echo "Server VPN IP: The server's IP address inside the VPN tunnel"
+        echo "  Suggested: ${derived_server_ip} (automatically derived from network)"
+        echo "  Convention: Usually .1 is used for the server/gateway"
+        echo "  Clients will use: .2, .3, .4, etc."
+        while true; do
+            read -p "Enter server VPN IP [${derived_server_ip}]: " input_server_ip
+            SERVER_IP="${input_server_ip:-$derived_server_ip}"
+
+            if ! validate_ip_cidr "$SERVER_IP"; then
+                print_error "Invalid IP/CIDR format. Example: 10.0.0.1/24"
+                continue
             fi
+
+            # Validate that server IP is within the network range
+            local server_ip_base=$(echo "$SERVER_IP" | cut -d'/' -f1)
+            local server_network_prefix=$(echo "$server_ip_base" | cut -d'.' -f1-3)
+            local network_prefix=$(echo "$network_base" | cut -d'.' -f1-3)
+
+            if [[ "$server_network_prefix" != "$network_prefix" ]]; then
+                print_error "Server IP must be within the network range ${SERVER_NETWORK}"
+                continue
+            fi
+
+            break
         done
     else
-        if ! validate_network_cidr "$SERVER_NETWORK"; then
-            error_exit "Invalid network CIDR format: $SERVER_NETWORK"
+        if ! validate_ip_cidr "$SERVER_IP"; then
+            error_exit "Invalid IP/CIDR format: $SERVER_IP"
+        fi
+
+        # Validate that server IP matches network when both are provided via arguments
+        local server_ip_base=$(echo "$SERVER_IP" | cut -d'/' -f1)
+        local server_network_prefix=$(echo "$server_ip_base" | cut -d'.' -f1-3)
+        local network_base=$(echo "$SERVER_NETWORK" | cut -d'/' -f1)
+        local network_prefix=$(echo "$network_base" | cut -d'.' -f1-3)
+
+        if [[ "$server_network_prefix" != "$network_prefix" ]]; then
+            error_exit "Server IP $SERVER_IP must be within the network range ${SERVER_NETWORK}"
         fi
     fi
 

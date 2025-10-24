@@ -60,7 +60,12 @@ detect_servers() {
     local servers=()
 
     if [[ -d "$WG_CONFIG_DIR" ]]; then
-        for conf in "$WG_CONFIG_DIR"/*.conf; do
+        # Use nullglob to handle case where no .conf files exist
+        shopt -s nullglob
+        local conf_files=("$WG_CONFIG_DIR"/*.conf)
+        shopt -u nullglob
+
+        for conf in "${conf_files[@]}"; do
             [[ ! -f "$conf" ]] && continue
             local iface_name=$(basename "$conf" .conf)
             servers+=("$iface_name")
@@ -87,10 +92,9 @@ select_server() {
         return
     fi
 
-    # If only one server exists, use it automatically
+    # If only one server exists, use it automatically (silently)
     if [[ $server_count -eq 1 ]]; then
         WG_INTERFACE="${servers[0]}"
-        print_success "Auto-detected server: ${WG_INTERFACE}"
         return
     fi
 
@@ -113,7 +117,7 @@ select_server() {
             is_running="${YELLOW}[STOPPED]${NC}"
         fi
 
-        echo -e "  ${BLUE}${i})${NC} ${iface} $is_running - ${conf_ip}, Port ${conf_port}"
+        printf "  ${BLUE}%d)${NC} %s %b - %s, Port %s\n" "$i" "$iface" "$is_running" "$conf_ip" "$conf_port"
         ((i++))
     done
 
@@ -133,16 +137,17 @@ list_clients() {
     # Use list-clients.sh to get clients
     local clients=$(./list-clients.sh "${WG_INTERFACE}" --format array 2>/dev/null)
 
-    if [[ -z "$clients" ]]; then
-        error_exit "No clients found in ${WG_INTERFACE}"
-    fi
-
     echo "$clients"
 }
 
 select_client() {
     local clients=($(list_clients))
     local client_count=${#clients[@]}
+
+    # Check if any clients exist
+    if [[ $client_count -eq 0 ]]; then
+        error_exit "No clients found in ${WG_INTERFACE}"
+    fi
 
     # If client specified via argument, validate it using list-clients.sh
     if [[ -n "$CLIENT_NAME" ]]; then
@@ -155,6 +160,8 @@ select_client() {
     fi
 
     # Show client selection menu using list-clients.sh interactive mode
+    print_info "Select a client to remove from the VPN server"
+    echo ""
     ./list-clients.sh "${WG_INTERFACE}" --format interactive
 
     read -p "Select client to remove (1-${client_count}): " selection
@@ -181,6 +188,13 @@ remove_client_from_config() {
     # Remove client peer section
     # Find the client comment line and remove it + the [Peer] section + PublicKey + AllowedIPs
     local temp_file=$(mktemp)
+    # Ensure temp file is cleaned up on exit or error
+    trap "rm -f '$temp_file'" EXIT ERR
+
+    # Backup original permissions
+    local original_perms=$(stat -c '%a' "$config_file" 2>/dev/null || echo "600")
+    local original_owner=$(stat -c '%U:%G' "$config_file" 2>/dev/null || echo "root:root")
+
     local in_client_section=0
 
     while IFS= read -r line; do
@@ -211,7 +225,11 @@ remove_client_from_config() {
 
     # Replace original config with cleaned version
     mv "$temp_file" "$config_file"
-    chmod 600 "$config_file"
+    chmod "$original_perms" "$config_file"
+    chown "$original_owner" "$config_file"
+
+    # Clear the trap since we successfully moved the file
+    trap - EXIT ERR
 
     print_success "Client removed from ${config_file}"
 }
@@ -271,9 +289,6 @@ show_summary() {
     echo "  - Client peer from ${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     echo "  - Client keys from ${WG_CONFIG_DIR}/${WG_INTERFACE}/"
     echo "  - Client config file"
-    echo ""
-    print_info "Backup created:"
-    echo "  ${WG_CONFIG_DIR}/${WG_INTERFACE}.conf.backup.*"
     echo ""
     echo "=========================================="
     echo ""

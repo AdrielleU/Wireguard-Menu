@@ -86,6 +86,63 @@ get_client_public_key() {
     echo "$client_key"
 }
 
+detect_servers() {
+    local servers=()
+
+    if [[ -d "$WG_CONFIG_DIR" ]]; then
+        shopt -s nullglob
+        local conf_files=("$WG_CONFIG_DIR"/*.conf)
+        shopt -u nullglob
+
+        for conf in "${conf_files[@]}"; do
+            [[ ! -f "$conf" ]] && continue
+            local iface_name=$(basename "$conf" .conf)
+            servers+=("$iface_name")
+        done
+    fi
+
+    if [[ ${#servers[@]} -eq 0 ]]; then
+        error_exit "No WireGuard servers found. Run setup-wireguard.sh first."
+    fi
+
+    echo "${servers[@]}"
+}
+
+select_server() {
+    local servers=($(detect_servers))
+    local server_count=${#servers[@]}
+
+    # If only one server exists, use it automatically (silently)
+    if [[ $server_count -eq 1 ]]; then
+        WG_INTERFACE="${servers[0]}"
+        return
+    fi
+
+    # Multiple servers - show selection menu
+    print_info "Multiple WireGuard servers detected"
+    echo ""
+    echo "Available servers:"
+    echo ""
+
+    local i=1
+    for iface in "${servers[@]}"; do
+        local conf_ip=$(grep -E "^Address\s*=" "${WG_CONFIG_DIR}/${iface}.conf" | head -n1 | awk '{print $3}')
+        local conf_port=$(grep -E "^ListenPort\s*=" "${WG_CONFIG_DIR}/${iface}.conf" | head -n1 | awk '{print $3}')
+        printf "  ${BLUE}%d)${NC} %s - %s, Port %s\n" "$i" "$iface" "$conf_ip" "$conf_port"
+        ((i++))
+    done
+
+    echo ""
+    read -p "Select server (1-${server_count}): " selection
+
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$server_count" ]; then
+        error_exit "Invalid selection"
+    fi
+
+    WG_INTERFACE="${servers[$((selection-1))]}"
+    print_success "Selected server: ${WG_INTERFACE}"
+}
+
 check_client_exists() {
     local client_name="$1"
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
@@ -132,7 +189,11 @@ output_interactive() {
     local i=1
     for client in "${clients[@]}"; do
         local client_ip=$(get_client_ip "$client")
-        echo -e "  ${BLUE}${i})${NC} ${client} ${client_ip:+- ${client_ip}}" >&2
+        if [[ -n "$client_ip" ]]; then
+            printf "  ${BLUE}%d)${NC} %s - %s\n" "$i" "$client" "$client_ip" >&2
+        else
+            printf "  ${BLUE}%d)${NC} %s\n" "$i" "$client" >&2
+        fi
         ((i++))
     done
 
@@ -166,43 +227,25 @@ output_detailed() {
     for client in "${clients[@]}"; do
         local client_ip=$(get_client_ip "$client")
         local client_key=$(get_client_public_key "$client")
-        echo -e "${BLUE}Client:${NC} ${client}" >&2
-        echo -e "  IP: ${client_ip}" >&2
-        echo -e "  Public Key: ${client_key:0:20}...${client_key: -20}" >&2
+        printf "${BLUE}Client:${NC} %s\n" "$client" >&2
+        printf "  IP: %s\n" "$client_ip" >&2
+        printf "  Public Key: %s...%s\n" "${client_key:0:20}" "${client_key: -20}" >&2
         echo "" >&2
     done
 }
 
 parse_arguments() {
-    # First argument should be the interface (required)
-    if [[ $# -eq 0 ]]; then
-        echo "Usage: $0 <interface> [OPTIONS]" >&2
-        echo "" >&2
-        echo "Arguments:" >&2
-        echo "  interface              WireGuard interface (e.g., wg0)" >&2
-        echo "" >&2
-        echo "Options:" >&2
-        echo "  --format FORMAT        Output format: interactive, names-only, array, detailed" >&2
-        echo "  --check NAME           Check if client NAME exists (exit 0 if yes, 1 if no)" >&2
-        echo "  --count                Return client count only" >&2
-        echo "  -h, --help            Show this help" >&2
-        echo "" >&2
-        echo "Examples:" >&2
-        echo "  $0 wg0                                  # Interactive list" >&2
-        echo "  $0 wg0 --format names-only              # Just names" >&2
-        echo "  $0 wg0 --format array                   # Space-separated array" >&2
-        echo "  $0 wg0 --format detailed                # With public keys" >&2
-        echo "  $0 wg0 --check laptop                   # Check if 'laptop' exists" >&2
-        echo "  $0 wg0 --count                          # Count clients" >&2
-        exit 1
-    fi
-
-    WG_INTERFACE="$1"
-    shift
-
     local check_client=""
     local count_only=false
 
+    # Check if first argument is an interface name or an option
+    if [[ $# -gt 0 ]] && [[ ! "$1" =~ ^-- ]] && [[ "$1" != "-h" ]]; then
+        # First argument is interface
+        WG_INTERFACE="$1"
+        shift
+    fi
+
+    # Parse remaining options
     while [[ $# -gt 0 ]]; do
         case $1 in
             --format)
@@ -218,7 +261,26 @@ parse_arguments() {
                 shift
                 ;;
             -h|--help)
-                parse_arguments  # Will trigger usage message
+                echo "Usage: $0 [interface] [OPTIONS]" >&2
+                echo "" >&2
+                echo "Arguments:" >&2
+                echo "  interface              WireGuard interface (e.g., wg0) - optional, will auto-detect" >&2
+                echo "" >&2
+                echo "Options:" >&2
+                echo "  --format FORMAT        Output format: interactive, names-only, array, detailed" >&2
+                echo "  --check NAME           Check if client NAME exists (exit 0 if yes, 1 if no)" >&2
+                echo "  --count                Return client count only" >&2
+                echo "  -h, --help            Show this help" >&2
+                echo "" >&2
+                echo "Examples:" >&2
+                echo "  $0                                      # Auto-detect server, interactive list" >&2
+                echo "  $0 wg0                                  # List clients for wg0" >&2
+                echo "  $0 wg0 --format names-only              # Just names" >&2
+                echo "  $0 wg0 --format array                   # Space-separated array" >&2
+                echo "  $0 wg0 --format detailed                # With public keys" >&2
+                echo "  $0 wg0 --check laptop                   # Check if 'laptop' exists" >&2
+                echo "  $0 wg0 --count                          # Count clients" >&2
+                exit 0
                 ;;
             *)
                 echo "Unknown option: $1" >&2
@@ -226,6 +288,11 @@ parse_arguments() {
                 ;;
         esac
     done
+
+    # If interface not specified, auto-detect
+    if [[ -z "$WG_INTERFACE" ]]; then
+        select_server
+    fi
 
     # Handle --check flag
     if [[ -n "$check_client" ]]; then

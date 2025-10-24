@@ -18,6 +18,8 @@ CLIENT_IP=""
 SERVER_PUBLIC_KEY=""
 SERVER_ENDPOINT=""
 SERVER_PORT=""
+ALLOWED_IPS=""
+ROUTING_DESC=""
 
 ################################################################################
 # COLORS
@@ -64,7 +66,12 @@ detect_servers() {
     local servers=()
 
     if [[ -d "$WG_CONFIG_DIR" ]]; then
-        for conf in "$WG_CONFIG_DIR"/*.conf; do
+        # Use nullglob to handle case where no .conf files exist
+        shopt -s nullglob
+        local conf_files=("$WG_CONFIG_DIR"/*.conf)
+        shopt -u nullglob
+
+        for conf in "${conf_files[@]}"; do
             [[ ! -f "$conf" ]] && continue
             local iface_name=$(basename "$conf" .conf)
             servers+=("$iface_name")
@@ -91,10 +98,9 @@ select_server() {
         return
     fi
 
-    # If only one server exists, use it automatically
+    # If only one server exists, use it automatically (silently)
     if [[ $server_count -eq 1 ]]; then
         WG_INTERFACE="${servers[0]}"
-        print_success "Auto-detected server: ${WG_INTERFACE}"
         return
     fi
 
@@ -117,7 +123,7 @@ select_server() {
             is_running="${YELLOW}[STOPPED]${NC}"
         fi
 
-        echo -e "  ${BLUE}${i})${NC} ${iface} $is_running - ${conf_ip}, Port ${conf_port}"
+        printf "  ${BLUE}%d)${NC} %s %b - %s, Port %s\n" "$i" "$iface" "$is_running" "$conf_ip" "$conf_port"
         ((i++))
     done
 
@@ -163,10 +169,61 @@ get_server_info() {
         error_exit "Server public key not found at ${keys_dir}/server-publickey"
     fi
 
-    print_info "Server network: ${server_network}.0/24"
-    print_info "Server port: ${SERVER_PORT}"
-
     echo "$server_network"
+}
+
+get_primary_interface_network() {
+    # Detect primary network interface (same as setup-wireguard.sh)
+    local primary_iface=$(ip route | grep default | awk '{print $5}' | head -n1)
+
+    if [[ -z "$primary_iface" ]]; then
+        echo ""
+        return
+    fi
+
+    # Get the IP/CIDR from primary interface
+    local iface_ip=$(ip -4 addr show "$primary_iface" | grep -oP 'inet \K[\d.]+/\d+' | head -n1)
+
+    if [[ -z "$iface_ip" ]]; then
+        echo ""
+        return
+    fi
+
+    # Convert to network address (e.g., 192.168.1.50/24 -> 192.168.1.0/24)
+    local ip_addr=$(echo "$iface_ip" | cut -d'/' -f1)
+    local cidr=$(echo "$iface_ip" | cut -d'/' -f2)
+    local network_base=$(echo "$ip_addr" | awk -F. '{print $1"."$2"."$3".0"}')
+
+    echo "${network_base}/${cidr}"
+}
+
+get_public_ip() {
+    # Try multiple services to detect public IP
+    local public_ip=""
+
+    # Try ipify.org (fast and reliable)
+    public_ip=$(curl -s --connect-timeout 3 --max-time 5 https://api.ipify.org 2>/dev/null)
+    if [[ -n "$public_ip" ]] && [[ "$public_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$public_ip"
+        return
+    fi
+
+    # Try icanhazip.com as fallback
+    public_ip=$(curl -s --connect-timeout 3 --max-time 5 https://icanhazip.com 2>/dev/null | tr -d '\n')
+    if [[ -n "$public_ip" ]] && [[ "$public_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$public_ip"
+        return
+    fi
+
+    # Try ifconfig.me as second fallback
+    public_ip=$(curl -s --connect-timeout 3 --max-time 5 https://ifconfig.me 2>/dev/null)
+    if [[ -n "$public_ip" ]] && [[ "$public_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "$public_ip"
+        return
+    fi
+
+    # Could not detect
+    echo ""
 }
 
 get_next_available_ip() {
@@ -194,9 +251,17 @@ prompt_client_info() {
     # Get server network
     local server_network=$(get_server_info)
 
+    # Display server info first
+    print_info "Server network: ${server_network}.0/24"
+    print_info "Server port: ${SERVER_PORT}"
+    echo ""
+
     # Prompt for client name
     if [[ -z "$CLIENT_NAME" ]]; then
-        read -p "Enter client name (e.g., laptop, phone, john): " CLIENT_NAME
+        echo "Client name: A unique identifier for this device/user"
+        echo "  Examples: laptop, phone, alice-laptop, bob-phone"
+        echo ""
+        read -p "Enter client name: " CLIENT_NAME
     fi
 
     # Validate client name
@@ -206,6 +271,7 @@ prompt_client_info() {
 
     # Check if client already exists using list-clients.sh
     if ./list-clients.sh "${WG_INTERFACE}" --check "${CLIENT_NAME}" 2>/dev/null; then
+        echo ""
         print_warning "Client '${CLIENT_NAME}' already exists for ${WG_INTERFACE}"
         read -p "Do you want to regenerate keys? (y/N): " -n 1 -r
         echo
@@ -214,34 +280,141 @@ prompt_client_info() {
         fi
     fi
 
+    echo ""
+
     # Get next available IP
     local suggested_ip=$(get_next_available_ip "$server_network")
 
-    # Prompt for client IP
+    # Prompt for client IP with auto-assignment
     if [[ -z "$CLIENT_IP" ]]; then
-        read -p "Enter client IP address [${suggested_ip}]: " input_ip
+        echo "Client VPN IP: Internal IP address for this client on the VPN network"
+        echo "  Suggested: ${suggested_ip} (next available)"
+        echo "  Range: ${server_network}.2 - ${server_network}.254"
+        echo ""
+        read -p "Enter client VPN IP [${suggested_ip}]: " input_ip
         CLIENT_IP="${input_ip:-$suggested_ip}"
     fi
 
     # Validate IP is in correct network
     local client_network=$(echo "$CLIENT_IP" | awk -F. '{print $1"."$2"."$3}')
     if [[ "$client_network" != "$server_network" ]]; then
+        echo ""
         error_exit "Client IP must be in the ${server_network}.0/24 network"
     fi
 
+    echo ""
+
     # Prompt for server endpoint
     if [[ -z "$SERVER_ENDPOINT" ]]; then
-        print_info "Enter the server's public IP address or domain name"
-        read -p "Server endpoint: " SERVER_ENDPOINT
+        echo "Server Endpoint: The public IP or domain name where clients connect"
+        echo "  This is your server's EXTERNAL/PUBLIC address (not VPN address)"
+        echo ""
+
+        # Try to detect public IP
+        local detected_public_ip=$(get_public_ip)
+
+        if [[ -n "$detected_public_ip" ]]; then
+            print_info "Detected public IP: ${detected_public_ip}"
+            echo "  You can use this or enter a custom domain/IP"
+            echo "  Examples: vpn.example.com, custom-ip-address"
+            echo ""
+            read -p "Enter server public IP or domain [${detected_public_ip}]: " SERVER_ENDPOINT
+            SERVER_ENDPOINT="${SERVER_ENDPOINT:-$detected_public_ip}"
+        else
+            print_warning "Could not auto-detect public IP"
+            echo "  Examples: 203.0.113.50, vpn.example.com, my-server.dyndns.org"
+            echo ""
+            read -p "Enter server public IP or domain: " SERVER_ENDPOINT
+        fi
     fi
 
     if [[ -z "$SERVER_ENDPOINT" ]]; then
         error_exit "Server endpoint cannot be empty"
     fi
 
-    print_success "Client name: ${CLIENT_NAME}"
-    print_success "Client IP: ${CLIENT_IP}/32"
-    print_success "Server endpoint: ${SERVER_ENDPOINT}:${SERVER_PORT}"
+    echo ""
+
+    # Prompt for routing mode (if not set via command-line)
+    if [[ -z "$ALLOWED_IPS" ]]; then
+        echo "Traffic Routing: Choose what traffic should go through the VPN tunnel"
+        echo ""
+        echo "  1) VPN + Server's internal network [RECOMMENDED]"
+        echo "     Access VPN clients AND server's internal LAN"
+        echo ""
+        echo "  2) All traffic (0.0.0.0/0) - Use VPN as exit node"
+        echo "     Routes ALL internet traffic through VPN for privacy/security"
+        echo ""
+        read -p "Select routing mode (1-2) [1]: " routing_choice
+        routing_choice="${routing_choice:-1}"
+
+        case "$routing_choice" in
+            1)
+                # Question 1: Include VPN network in trusted networks?
+                echo ""
+                echo "1) Include VPN network (${server_network}.0/24) in allowed routes?"
+                read -p "   Allow VPN client-to-client traffic? (Y/n) [Y]: " include_vpn
+                include_vpn="${include_vpn:-Y}"
+
+                if [[ "$include_vpn" =~ ^[Yy]$ ]]; then
+                    ALLOWED_IPS="${server_network}.0/24"
+                else
+                    ALLOWED_IPS=""
+                fi
+
+                # Question 2: What is the server's internal network?
+                local detected_network=$(get_primary_interface_network)
+                echo ""
+                echo "2) Server's internal network (LAN) to access through VPN"
+                if [[ -n "$detected_network" ]]; then
+                    print_info "Detected primary network: ${detected_network}"
+                    echo "   Examples: 192.168.1.0/24, 10.0.0.0/24"
+                    echo ""
+                    read -p "   Enter internal network CIDR [${detected_network}]: " internal_network
+                    internal_network="${internal_network:-$detected_network}"
+                else
+                    echo "   Examples: 192.168.1.0/24, 10.0.0.0/24"
+                    echo ""
+                    read -p "   Enter internal network CIDR: " internal_network
+                fi
+
+                # Combine networks
+                if [[ -n "$ALLOWED_IPS" ]] && [[ -n "$internal_network" ]]; then
+                    ALLOWED_IPS="${ALLOWED_IPS},${internal_network}"
+                    ROUTING_DESC="VPN network + Internal LAN (${internal_network})"
+                elif [[ -n "$internal_network" ]]; then
+                    ALLOWED_IPS="${internal_network}"
+                    ROUTING_DESC="Internal LAN only (${internal_network})"
+                elif [[ -n "$ALLOWED_IPS" ]]; then
+                    ROUTING_DESC="VPN network only"
+                else
+                    error_exit "At least one network must be configured"
+                fi
+                ;;
+            2)
+                ALLOWED_IPS="0.0.0.0/0"
+                ROUTING_DESC="All traffic through VPN (exit node)"
+                ;;
+            *)
+                error_exit "Invalid routing mode selection"
+                ;;
+        esac
+    elif [[ "$ALLOWED_IPS" == "vpn-only" ]]; then
+        # Handle --route-vpn-only flag
+        ALLOWED_IPS="${server_network}.0/24"
+        ROUTING_DESC="VPN network only"
+    fi
+
+    echo ""
+    echo "=========================================="
+    print_success "Configuration Summary:"
+    echo "  Client name: ${CLIENT_NAME}"
+    echo "  Client VPN IP: ${CLIENT_IP}/32"
+    echo "  Server endpoint: ${SERVER_ENDPOINT}:${SERVER_PORT}"
+    echo "  Server VPN IP: ${server_network}.1/24"
+    echo "  Traffic routing: ${ROUTING_DESC}"
+    echo "  AllowedIPs: ${ALLOWED_IPS}"
+    echo "=========================================="
+    echo ""
 }
 
 generate_client_keys() {
@@ -297,13 +470,14 @@ DNS = 8.8.8.8
 [Peer]
 PublicKey = ${SERVER_PUBLIC_KEY}
 Endpoint = ${SERVER_ENDPOINT}:${SERVER_PORT}
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = ${ALLOWED_IPS}
 PersistentKeepalive = 25
 EOF
 
     chmod 600 "$client_config_file"
 
     print_success "Client config created: ${client_config_file}"
+    print_info "Traffic routing: ${ROUTING_DESC}"
 }
 
 reload_server() {
@@ -369,6 +543,21 @@ parse_arguments() {
                 SERVER_ENDPOINT="$2"
                 shift 2
                 ;;
+            --route-all)
+                ALLOWED_IPS="0.0.0.0/0"
+                ROUTING_DESC="All traffic through VPN (exit node)"
+                shift
+                ;;
+            --route-vpn-only)
+                # Will be set to VPN network in prompt_client_info
+                ALLOWED_IPS="vpn-only"
+                shift
+                ;;
+            --route-custom)
+                ALLOWED_IPS="$2"
+                ROUTING_DESC="Custom routing"
+                shift 2
+                ;;
             -h|--help)
                 echo "Usage: sudo $0 [OPTIONS]"
                 echo ""
@@ -377,10 +566,14 @@ parse_arguments() {
                 echo "  -c, --client NAME       Client name"
                 echo "  --ip IP                 Client IP address"
                 echo "  -e, --endpoint ADDR     Server public IP/domain"
+                echo "  --route-all             Route all traffic (0.0.0.0/0) - VPN exit node"
+                echo "  --route-vpn-only        Route only VPN network traffic"
+                echo "  --route-custom CIDR     Custom AllowedIPs (e.g., '10.0.0.0/24,192.168.1.0/24')"
                 echo "  -h, --help             Show this help"
                 echo ""
-                echo "Example:"
-                echo "  sudo $0 --interface wg0 --client laptop"
+                echo "Examples:"
+                echo "  sudo $0 --interface wg0 --client laptop --route-all"
+                echo "  sudo $0 --interface wg0 --client phone --route-custom '10.188.128.0/24,192.168.1.0/24'"
                 exit 0
                 ;;
             *)
