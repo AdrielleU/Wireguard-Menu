@@ -1,7 +1,7 @@
 #!/bin/bash
 ################################################################################
-# WireGuard Client Status Script
-# Description: Show detailed connection status for a specific client
+# WireGuard Client/Site Status Script
+# Description: Show detailed connection status for a specific client or site
 # Usage: sudo ./client-status.sh [OPTIONS]
 ################################################################################
 
@@ -174,9 +174,9 @@ select_client() {
 
     # Show client selection menu
     echo ""
-    print_info "Select a client to view connection status and statistics"
+    print_info "Select a client or site to view connection status and statistics"
     echo ""
-    echo "Clients in ${WG_INTERFACE}:"
+    echo "Clients/Sites in ${WG_INTERFACE}:"
     echo ""
 
     local i=1

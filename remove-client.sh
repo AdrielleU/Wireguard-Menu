@@ -1,7 +1,7 @@
 #!/bin/bash
 ################################################################################
-# WireGuard Remove Client Script
-# Description: Safely remove a client from a specific WireGuard server
+# WireGuard Remove Client/Site Script
+# Description: Safely remove a client or site from a specific WireGuard server
 # Usage: sudo ./remove-client.sh [OPTIONS]
 ################################################################################
 
@@ -160,7 +160,7 @@ select_client() {
     fi
 
     # Show client selection menu using list-clients.sh interactive mode
-    print_info "Select a client to remove from the VPN server"
+    print_info "Select a client or site to remove from the VPN server"
     echo ""
     ./list-clients.sh "${WG_INTERFACE}" --format interactive
 
@@ -179,14 +179,14 @@ remove_client_from_config() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local backup_file="${config_file}.backup.$(date +%Y%m%d_%H%M%S)"
 
-    print_info "Removing client from server configuration..."
+    print_info "Removing peer from server configuration..."
 
     # Backup config
     cp "$config_file" "$backup_file"
     print_info "Backed up config to: $backup_file"
 
-    # Remove client peer section
-    # Find the client comment line and remove it + the [Peer] section + PublicKey + AllowedIPs
+    # Remove peer section (works for both Client and Site)
+    # Find the comment line (# Client: NAME or # Site: NAME) and remove it + [Peer] section
     local temp_file=$(mktemp)
     # Ensure temp file is cleaned up on exit or error
     trap "rm -f '$temp_file'" EXIT ERR
@@ -195,27 +195,27 @@ remove_client_from_config() {
     local original_perms=$(stat -c '%a' "$config_file" 2>/dev/null || echo "600")
     local original_owner=$(stat -c '%U:%G' "$config_file" 2>/dev/null || echo "root:root")
 
-    local in_client_section=0
+    local in_peer_section=0
 
     while IFS= read -r line; do
-        # Check if this is our client comment
-        if [[ "$line" =~ ^#\ Client:\ ${CLIENT_NAME}$ ]]; then
-            in_client_section=1
+        # Check if this is our client or site comment
+        if [[ "$line" =~ ^#\ (Client|Site):\ ${CLIENT_NAME}$ ]]; then
+            in_peer_section=1
             continue
         fi
 
-        # Skip lines while in client section
-        if [[ $in_client_section -eq 1 ]]; then
-            # Skip [Peer], PublicKey, AllowedIPs lines
-            if [[ "$line" =~ ^\[Peer\]$ ]] || [[ "$line" =~ ^PublicKey ]] || [[ "$line" =~ ^AllowedIPs ]]; then
+        # Skip lines while in peer section
+        if [[ $in_peer_section -eq 1 ]]; then
+            # Skip [Peer], PublicKey, AllowedIPs, PersistentKeepalive lines
+            if [[ "$line" =~ ^\[Peer\]$ ]] || [[ "$line" =~ ^PublicKey ]] || [[ "$line" =~ ^AllowedIPs ]] || [[ "$line" =~ ^PersistentKeepalive ]]; then
                 continue
             # Skip empty lines immediately after
             elif [[ -z "$line" ]]; then
-                in_client_section=0
+                in_peer_section=0
                 continue
             else
                 # Found next section, stop skipping
-                in_client_section=0
+                in_peer_section=0
             fi
         fi
 
@@ -231,7 +231,7 @@ remove_client_from_config() {
     # Clear the trap since we successfully moved the file
     trap - EXIT ERR
 
-    print_success "Client removed from ${config_file}"
+    print_success "Peer removed from ${config_file}"
 }
 
 remove_client_keys() {

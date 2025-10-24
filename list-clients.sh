@@ -1,7 +1,7 @@
 #!/bin/bash
 ################################################################################
-# WireGuard List Clients Script
-# Description: List all clients for a specific WireGuard server
+# WireGuard List Clients/Sites Script
+# Description: List all clients and sites for a specific WireGuard server
 # Usage: ./list-clients.sh <interface> [--format FORMAT]
 ################################################################################
 
@@ -147,10 +147,10 @@ check_client_exists() {
     local client_name="$1"
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
 
-    if grep -q "^# Client: ${client_name}$" "$config_file" 2>/dev/null; then
-        return 0  # Client exists
+    if grep -qE "^# (Client|Site): ${client_name}$" "$config_file" 2>/dev/null; then
+        return 0  # Client/Site exists
     else
-        return 1  # Client doesn't exist
+        return 1  # Client/Site doesn't exist
     fi
 }
 
@@ -163,11 +163,11 @@ list_clients() {
         error_exit "WireGuard server '${WG_INTERFACE}' not found"
     fi
 
-    # Extract client names from comments in config
+    # Extract client and site names from comments in config
     while IFS= read -r line; do
-        if [[ "$line" =~ ^#\ Client:\ (.+)$ ]]; then
-            local client_name="${BASH_REMATCH[1]}"
-            clients+=("$client_name")
+        if [[ "$line" =~ ^#\ (Client|Site):\ (.+)$ ]]; then
+            local peer_name="${BASH_REMATCH[2]}"
+            clients+=("$peer_name")
         fi
     done < "$config_file"
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 ################################################################################
 # WireGuard Show QR Code Script
-# Description: Display client config as QR code for mobile devices
+# Description: Display client or site config as QR code for mobile devices
 # Usage: sudo ./qr-show.sh [OPTIONS]
 ################################################################################
 
@@ -180,9 +180,9 @@ select_client() {
 
     # Show client selection menu
     echo ""
-    print_info "Select a client to display its QR code (for mobile devices)"
+    print_info "Select a client or site to display its QR code (for mobile devices)"
     echo ""
-    echo "Clients in ${WG_INTERFACE}:"
+    echo "Clients/Sites in ${WG_INTERFACE}:"
     echo ""
 
     local i=1
