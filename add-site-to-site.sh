@@ -189,37 +189,18 @@ get_next_tunnel_ip() {
     local server_address=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')
     local network_base=$(echo "$server_address" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
 
-    local used_ips=()
+    # Get all used IPs from config (same logic as add-client.sh)
+    local used_ips=$(grep -E "AllowedIPs\s*=" "$config_file" | awk '{print $3}' | cut -d',' -f1 | cut -d'/' -f1 | cut -d'.' -f4 | sort -n)
 
-    # Get server IP
-    local server_ip=$(echo "$server_address" | cut -d'/' -f1 | awk -F. '{print $4}')
-    used_ips+=("$server_ip")
-
-    # Get all client/peer IPs
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^AllowedIPs\ =\ ([0-9.]+)(/32)?$ ]]; then
-            local ip=$(echo "${BASH_REMATCH[1]}" | awk -F. '{print $4}')
-            used_ips+=("$ip")
-        fi
-    done < "$config_file"
-
-    # Find next available IP
+    # Find next available IP (start from .2, server is usually .1)
     for i in {2..254}; do
-        local found=0
-        for used in "${used_ips[@]}"; do
-            if [[ "$i" == "$used" ]]; then
-                found=1
-                break
-            fi
-        done
-
-        if [[ $found -eq 0 ]]; then
-            echo "${network_base}.${i}/32"
+        if ! echo "$used_ips" | grep -q "^${i}$"; then
+            echo "${network_base}.${i}"
             return
         fi
     done
 
-    error_exit "No available IP addresses in the network"
+    error_exit "No available IP addresses in the ${network_base}.0/24 range"
 }
 
 get_public_ip() {
@@ -276,26 +257,42 @@ prompt_site_config() {
 
     # Tunnel IP (next available from VPN network)
     if [[ -z "$TUNNEL_IP" ]]; then
+        local server_network=$(echo "$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
         local suggested_ip=$(get_next_tunnel_ip)
         echo ""
         echo "Tunnel IP: IP address to assign to remote site on VPN tunnel"
-        echo "  Suggested: ${suggested_ip}"
-        read -p "Enter tunnel IP [${suggested_ip}]: " TUNNEL_IP
-        TUNNEL_IP="${TUNNEL_IP:-$suggested_ip}"
+        echo "  Suggested: ${suggested_ip} (next available)"
+        echo "  Range: ${server_network}.2 - ${server_network}.254"
+        echo ""
+        read -p "Enter tunnel IP [${suggested_ip}]: " input_ip
+        TUNNEL_IP="${input_ip:-$suggested_ip}"
     fi
 
-    # Validate tunnel IP
+    # Add /32 if not already present
+    if [[ ! "$TUNNEL_IP" =~ /32$ ]]; then
+        TUNNEL_IP="${TUNNEL_IP}/32"
+    fi
+
+    # Validate tunnel IP format
     if ! validate_cidr "$TUNNEL_IP"; then
         error_exit "Invalid tunnel IP format. Use CIDR notation (e.g., 10.0.0.2/32)"
+    fi
+
+    # Validate IP is in correct network
+    local tunnel_network=$(echo "$TUNNEL_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+    local server_network=$(echo "$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+    if [[ "$tunnel_network" != "$server_network" ]]; then
+        error_exit "Tunnel IP must be in the ${server_network}.0/24 network"
     fi
 
     # Remote Network (REQUIRED)
     if [[ -z "$REMOTE_NETWORK" ]]; then
         echo ""
-        echo "Remote Site's LAN Network: The network behind the remote site"
+        echo "Remote Site's LAN Network: The network behind the remote site (Site B)"
+        echo "  This is what Site A (this server) will route TO"
         echo "  Examples: 192.168.50.0/24, 10.100.0.0/16, 172.16.5.0/24"
-        print_warning "This is REQUIRED - the network you want to route to"
-        read -p "Enter remote network CIDR: " REMOTE_NETWORK
+        print_warning "This is REQUIRED - the remote LAN you want to access"
+        read -p "Enter remote site's LAN network CIDR: " REMOTE_NETWORK
 
         if [[ -z "$REMOTE_NETWORK" ]]; then
             error_exit "Remote network CIDR is required for site-to-site VPN"
@@ -309,6 +306,15 @@ prompt_site_config() {
 
     # Get server info for remote site config
     SERVER_PORT=$(grep -E "^ListenPort\s*=" "$config_file" | head -n1 | awk '{print $3}')
+
+    # Get server public key
+    local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
+    if [[ -f "${keys_dir}/server-publickey" ]]; then
+        SERVER_PUBLIC_KEY=$(cat "${keys_dir}/server-publickey")
+    else
+        error_exit "Server public key not found at ${keys_dir}/server-publickey"
+    fi
+
     local server_public_ip=$(get_public_ip)
 
     if [[ -n "$server_public_ip" ]]; then
@@ -371,71 +377,64 @@ create_remote_site_config() {
 
     print_info "Creating configuration for remote site..."
 
-    # Get this server's public key
-    if [[ -f "${keys_dir}/server-publickey" ]]; then
-        SERVER_PUBLIC_KEY=$(cat "${keys_dir}/server-publickey")
-    else
-        error_exit "Server public key not found"
-    fi
-
     # Configure routing for remote site (if not already set via command-line)
     local vpn_network=$(get_local_network)
+    local local_network=""
 
     if [[ -z "$ALLOWED_IPS" ]]; then
         echo ""
-        echo "Traffic Routing: Choose what traffic remote site should route through VPN"
+        print_info "Configuring what Site B (remote) can access on Site A (this server)"
         echo ""
-        echo "  1) VPN + Server's internal network [RECOMMENDED]"
+        echo "Traffic Routing: Choose what networks remote site should access"
+        echo ""
+        echo "  1) VPN tunnel network + Server's LAN [RECOMMENDED for site-to-site]"
         echo "     Remote site can access VPN clients AND server's internal LAN"
         echo ""
-        echo "  2) All traffic (0.0.0.0/0) - Use VPN as exit node"
+        echo "  2) VPN tunnel network only"
+        echo "     Remote site can only access other VPN clients"
+        echo ""
+        echo "  3) All traffic (0.0.0.0/0) - Use VPN as exit node"
         echo "     Routes ALL remote site's internet traffic through VPN"
         echo ""
-        read -p "Select routing mode (1-2) [1]: " routing_choice
+        read -p "Select routing mode (1-3) [1]: " routing_choice
         routing_choice="${routing_choice:-1}"
 
         case "$routing_choice" in
             1)
-                # Question 1: Include VPN network?
-                echo ""
-                echo "1) Include VPN network (${vpn_network}) in allowed routes?"
-                read -p "   Allow remote site to reach VPN clients? (Y/n) [Y]: " include_vpn
-                include_vpn="${include_vpn:-Y}"
+                # Site-to-site: VPN network + Local LAN
+                ALLOWED_IPS="${vpn_network}"
 
-                if [[ "$include_vpn" =~ ^[Yy]$ ]]; then
-                    ALLOWED_IPS="${vpn_network}"
-                fi
-
-                # Question 2: Server's internal network
+                # Get Site A's local network
                 local detected_network=$(get_primary_interface_network)
                 echo ""
-                echo "2) Server's internal network (LAN) for remote site to access"
+                echo "Site A's (this server's) internal LAN network:"
+                echo "  This is the local network that Site B will be able to access"
                 if [[ -n "$detected_network" ]]; then
                     print_info "Detected primary network: ${detected_network}"
-                    echo "   Examples: 192.168.1.0/24, 10.0.0.0/24"
+                    echo "  Examples: 192.168.1.0/24, 10.0.0.0/24"
                     echo ""
-                    read -p "   Enter internal network CIDR [${detected_network}]: " internal_network
-                    internal_network="${internal_network:-$detected_network}"
+                    read -p "Enter Site A's LAN network CIDR [${detected_network}]: " local_network
+                    local_network="${local_network:-$detected_network}"
                 else
-                    echo "   Examples: 192.168.1.0/24, 10.0.0.0/24"
+                    echo "  Examples: 192.168.1.0/24, 10.0.0.0/24"
                     echo ""
-                    read -p "   Enter internal network CIDR: " internal_network
+                    read -p "Enter Site A's LAN network CIDR: " local_network
                 fi
 
-                # Combine networks
-                if [[ -n "$ALLOWED_IPS" ]] && [[ -n "$internal_network" ]]; then
-                    ALLOWED_IPS="${ALLOWED_IPS}, ${internal_network}"
-                    ROUTING_DESC="VPN network + Internal LAN (${internal_network})"
-                elif [[ -n "$internal_network" ]]; then
-                    ALLOWED_IPS="${internal_network}"
-                    ROUTING_DESC="Internal LAN only (${internal_network})"
-                elif [[ -n "$ALLOWED_IPS" ]]; then
-                    ROUTING_DESC="VPN network only"
+                if [[ -n "$local_network" ]]; then
+                    ALLOWED_IPS="${ALLOWED_IPS}, ${local_network}"
+                    ROUTING_DESC="VPN network (${vpn_network}) + Site A LAN (${local_network})"
                 else
-                    error_exit "At least one network must be configured"
+                    ROUTING_DESC="VPN network only (${vpn_network})"
                 fi
                 ;;
             2)
+                # VPN network only
+                ALLOWED_IPS="${vpn_network}"
+                ROUTING_DESC="VPN tunnel network only (${vpn_network})"
+                ;;
+            3)
+                # All traffic
                 ALLOWED_IPS="0.0.0.0/0"
                 ROUTING_DESC="All traffic through VPN (exit node)"
                 ;;
@@ -471,7 +470,7 @@ EOF
     chmod 600 "$site_config_file"
 
     print_success "Remote site config created: ${site_config_file}"
-    print_info "Remote site will route: ${ALLOWED_IPS}"
+    print_info "Site B (remote) will be able to access: ${ALLOWED_IPS}"
 }
 
 reload_server() {
@@ -494,33 +493,46 @@ show_summary() {
     print_success "Site-to-Site VPN Created!"
     echo "=========================================="
     echo ""
-    print_info "Server (This Side):"
+    print_info "Site A - Server (This Side):"
     echo "  Interface: ${WG_INTERFACE}"
-    echo "  VPN Network: ${local_vpn_network}"
+    echo "  VPN Tunnel Network: ${local_vpn_network}"
     echo "  Public Endpoint: ${SERVER_ENDPOINT}:${SERVER_PORT}"
-    echo "  Routes to: ${REMOTE_NETWORK}"
+    echo "  Can route to Site B: ${TUNNEL_IP}, ${REMOTE_NETWORK}"
     echo ""
-    print_info "Remote Site Configuration:"
+    print_info "Site B - Remote Site:"
     echo "  Name: ${SITE_NAME}"
     echo "  Tunnel IP: ${TUNNEL_IP}"
     echo "  LAN Network: ${REMOTE_NETWORK}"
+    echo "  Can route to Site A: ${ALLOWED_IPS}"
     echo "  Config File: ${site_config_file}"
+    echo ""
+    print_info "Routing Summary:"
+    echo "  ${ROUTING_DESC}"
     echo ""
     print_warning "NEXT STEPS - Deploy config to remote site:"
     echo ""
     echo "1. Copy configuration to remote site:"
-    echo "   scp root@server:${site_config_file} remote-site:/etc/wireguard/wg-client.conf"
+    echo "   scp root@server:${site_config_file} remote-site:/etc/wireguard/wg-s2s.conf"
     echo ""
-    echo "2. On the remote site, start WireGuard:"
-    echo "   sudo wg-quick up wg-client"
-    echo "   sudo systemctl enable wg-quick@wg-client"
+    echo "2. On the remote site, use setup-site-remote.sh to complete setup:"
+    echo "   sudo ./setup-site-remote.sh --config /etc/wireguard/wg-s2s.conf"
     echo ""
-    echo "3. Test connectivity from this server:"
+    echo "   Or manually:"
+    echo "   sudo wg-quick up wg-s2s"
+    echo "   sudo systemctl enable wg-quick@wg-s2s"
+    echo ""
+    echo "3. Test connectivity from this server (Site A):"
     echo "   ping ${TUNNEL_IP%/*}  # Ping remote tunnel IP"
     echo "   ping <IP-in-${REMOTE_NETWORK}>  # Ping device on remote LAN"
     echo ""
-    print_info "The remote site will connect TO this server"
-    print_info "Routing: This server <-> ${TUNNEL_IP%/*} <-> ${REMOTE_NETWORK}"
+    echo "4. Test connectivity from remote site (Site B):"
+    echo "   ping ${local_vpn_network%/*}1  # Ping this server's tunnel IP"
+    if [[ "$ALLOWED_IPS" =~ "," ]]; then
+        echo "   ping <IP-in-Site-A-LAN>  # Ping device on this server's LAN"
+    fi
+    echo ""
+    print_info "Traffic Flow: Site A LAN <-> VPN Tunnel <-> Site B LAN"
+    print_info "For LAN relay (Site B devices routing through VPN): Use setup-site-remote.sh"
     echo ""
     echo "=========================================="
     echo ""

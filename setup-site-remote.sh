@@ -73,12 +73,8 @@ remove_existing_wireguard() {
         systemctl disable "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
     fi
 
-    # Backup existing config before removal
+    # Remove config file
     if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
-        local backup_file="/etc/wireguard/${WG_INTERFACE}.conf.backup.$(date +%Y%m%d_%H%M%S)"
-        print_info "Backing up config to: ${backup_file}"
-        cp "/etc/wireguard/${WG_INTERFACE}.conf" "${backup_file}"
-
         print_info "Removing config file..."
         rm -f "/etc/wireguard/${WG_INTERFACE}.conf"
     fi
@@ -90,6 +86,7 @@ remove_existing_wireguard() {
 check_existing_wireguard() {
     local config_exists=false
     local interface_running=false
+    local service_exists=false
 
     # Check if WireGuard config already exists
     if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
@@ -101,11 +98,25 @@ check_existing_wireguard() {
         interface_running=true
     fi
 
-    # If either exists, prompt user to remove or exit
-    if [[ "$config_exists" == true ]] || [[ "$interface_running" == true ]]; then
+    # Check if systemd service exists
+    if systemctl list-unit-files | grep -q "wg-quick@${WG_INTERFACE}.service"; then
+        service_exists=true
+    fi
+
+    # If any exists, prompt user to remove or exit
+    if [[ "$config_exists" == true ]] || [[ "$interface_running" == true ]] || [[ "$service_exists" == true ]]; then
         echo ""
         print_warning "WireGuard site setup already exists for interface '${WG_INTERFACE}'"
         echo ""
+
+        if [[ "$service_exists" == true ]]; then
+            print_info "Systemd service exists: wg-quick@${WG_INTERFACE}.service"
+            local service_status=$(systemctl is-active "wg-quick@${WG_INTERFACE}" 2>/dev/null || echo "inactive")
+            local service_enabled=$(systemctl is-enabled "wg-quick@${WG_INTERFACE}" 2>/dev/null || echo "disabled")
+            echo "  Status: ${service_status}"
+            echo "  Enabled: ${service_enabled}"
+            echo ""
+        fi
 
         if [[ "$interface_running" == true ]]; then
             print_info "Interface is currently running:"
@@ -119,7 +130,7 @@ check_existing_wireguard() {
         fi
 
         echo "Options:"
-        echo "  1. Remove existing setup and continue (config will be backed up)"
+        echo "  1. Remove existing setup and continue"
         echo "  2. Cancel and exit"
         echo "  3. Use a different interface name"
         echo ""

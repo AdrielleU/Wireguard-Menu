@@ -15,6 +15,7 @@ WG_CONFIG_DIR="/etc/wireguard"
 CLIENT_NAME=""
 WG_INTERFACE=""
 CLIENT_IP=""
+SERVER_NETWORK=""
 SERVER_PUBLIC_KEY=""
 SERVER_ENDPOINT=""
 SERVER_PORT=""
@@ -156,7 +157,7 @@ get_server_info() {
 
     # Get server network
     local server_ip=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')
-    local server_network=$(echo "$server_ip" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+    SERVER_NETWORK=$(echo "$server_ip" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
 
     # Get server port
     SERVER_PORT=$(grep -E "^ListenPort\s*=" "$config_file" | head -n1 | awk '{print $3}')
@@ -168,8 +169,6 @@ get_server_info() {
     else
         error_exit "Server public key not found at ${keys_dir}/server-publickey"
     fi
-
-    echo "$server_network"
 }
 
 get_primary_interface_network() {
@@ -248,8 +247,9 @@ prompt_client_info() {
     print_info "Client Configuration"
     echo ""
 
-    # Get server network
-    local server_network=$(get_server_info)
+    # Get server network and info (don't use command substitution to preserve global vars)
+    get_server_info
+    local server_network="${SERVER_NETWORK}"
 
     # Display server info first
     print_info "Server network: ${server_network}.0/24"

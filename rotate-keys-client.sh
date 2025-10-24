@@ -142,12 +142,13 @@ list_clients() {
     if [[ -x "./list-clients.sh" ]]; then
         local clients=$(./list-clients.sh "${WG_INTERFACE}" --format array 2>/dev/null)
     else
-        # Fallback: extract from config directly
+        # Fallback: extract from config directly (both Client and Site entries)
         local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
         local clients=()
         while IFS= read -r line; do
-            if [[ "$line" =~ ^#\ Client:\ (.+)$ ]]; then
-                clients+=("${BASH_REMATCH[1]}")
+            # Match both "# Client: name" and "# Site: name"
+            if [[ "$line" =~ ^#[[:space:]]*(Client|Site):[[:space:]]*(.+)$ ]]; then
+                clients+=("${BASH_REMATCH[2]}")
             fi
         done < "$config_file"
         clients="${clients[@]}"
@@ -207,19 +208,32 @@ get_current_client_info() {
 
     print_info "Reading current client configuration..."
 
-    # Get client IP from server config
+    # Get client IP from server config (match both Client and Site entries)
     local found_client=0
     while IFS= read -r line; do
-        if [[ "$line" =~ ^#\ Client:\ ${CLIENT_NAME}$ ]]; then
+        # Match both "# Client: name" and "# Site: name"
+        if [[ "$line" =~ ^#[[:space:]]*(Client|Site):[[:space:]]*${CLIENT_NAME}[[:space:]]*$ ]]; then
             found_client=1
-        elif [[ $found_client -eq 1 ]] && [[ "$line" =~ ^AllowedIPs\ =\ (.+)$ ]]; then
+        elif [[ $found_client -eq 1 ]] && [[ "$line" =~ ^[[:space:]]*AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]]; then
             CLIENT_IP="${BASH_REMATCH[1]}"
+            # Extract only the first IP (tunnel IP), ignore additional networks
+            # For sites: "10.0.0.5/32, 192.168.50.0/24" -> get "10.0.0.5/32"
+            CLIENT_IP=$(echo "$CLIENT_IP" | cut -d',' -f1 | xargs)
             break
         fi
     done < "$config_file"
 
     if [[ -z "$CLIENT_IP" ]]; then
-        error_exit "Could not find IP address for client ${CLIENT_NAME}"
+        print_error "Could not find IP address for client ${CLIENT_NAME}"
+        echo ""
+        print_info "Debugging information:"
+        echo "  Config file: ${config_file}"
+        echo "  Looking for client: ${CLIENT_NAME}"
+        echo ""
+        print_info "Clients/Sites found in config:"
+        grep -E "^#[[:space:]]*(Client|Site):" "$config_file" || echo "  (none)"
+        echo ""
+        error_exit "Client/Site '${CLIENT_NAME}' not found or missing AllowedIPs configuration"
     fi
 
     # Get server info
@@ -262,6 +276,13 @@ generate_new_keys() {
     local private_key_file="${keys_dir}/${CLIENT_NAME}-privatekey"
     local public_key_file="${keys_dir}/${CLIENT_NAME}-publickey"
 
+    # Store old public key for comparison
+    local old_public_key=""
+    if [[ -f "$public_key_file" ]]; then
+        old_public_key=$(cat "$public_key_file")
+    fi
+
+    # Generate NEW keys (this OVERWRITES the old ones)
     wg genkey | tee "$private_key_file" | wg pubkey > "$public_key_file" || error_exit "Failed to generate keys"
     chmod 600 "$private_key_file" "$public_key_file"
 
@@ -269,6 +290,15 @@ generate_new_keys() {
     CLIENT_PUBLIC_KEY=$(cat "$public_key_file")
 
     print_success "New keys generated"
+
+    if [[ -n "$old_public_key" ]] && [[ "$old_public_key" == "$CLIENT_PUBLIC_KEY" ]]; then
+        print_error "WARNING: New public key matches old key (this should never happen!)"
+        echo "  Old: ${old_public_key}"
+        echo "  New: ${CLIENT_PUBLIC_KEY}"
+    elif [[ -n "$old_public_key" ]]; then
+        print_info "Old public key: ${old_public_key:0:20}..."
+        print_info "New public key: ${CLIENT_PUBLIC_KEY:0:20}..."
+    fi
 }
 
 update_server_config() {
@@ -288,12 +318,12 @@ update_server_config() {
     local in_client_section=0
 
     while IFS= read -r line; do
-        # Check if this is our client comment
-        if [[ "$line" =~ ^#\ Client:\ ${CLIENT_NAME}$ ]]; then
+        # Check if this is our client/site comment
+        if [[ "$line" =~ ^#[[:space:]]*(Client|Site):[[:space:]]*${CLIENT_NAME}[[:space:]]*$ ]]; then
             in_client_section=1
             echo "$line" >> "$temp_file"
         # Update PublicKey if we're in this client's section
-        elif [[ $in_client_section -eq 1 ]] && [[ "$line" =~ ^PublicKey ]]; then
+        elif [[ $in_client_section -eq 1 ]] && [[ "$line" =~ ^[[:space:]]*PublicKey ]]; then
             echo "PublicKey = ${CLIENT_PUBLIC_KEY}" >> "$temp_file"
             in_client_section=0
         else
@@ -313,45 +343,111 @@ update_server_config() {
 }
 
 create_new_client_config() {
+    print_info "Starting create_new_client_config function..."
+
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
     local client_config_file="${keys_dir}/${CLIENT_NAME}.conf"
 
-    # Try to preserve existing AllowedIPs from current config
+    print_info "Config file path: ${client_config_file}"
+
+    # Try to preserve ALL settings from existing config
     local allowed_ips=""
+    local dns_servers=""
+    local persistent_keepalive=""
+
     if [[ -f "$client_config_file" ]]; then
-        allowed_ips=$(grep -E "^AllowedIPs\s*=" "$client_config_file" | awk '{print $3}')
+        print_info "Existing config file found, extracting settings..."
+        # Extract AllowedIPs (everything after "AllowedIPs = ")
+        allowed_ips=$(grep -E "^[[:space:]]*AllowedIPs[[:space:]]*=" "$client_config_file" | sed -E 's/^[[:space:]]*AllowedIPs[[:space:]]*=[[:space:]]*//' | sed -E 's/[[:space:]]*,?[[:space:]]*$//' || echo "")
+
+        # Extract DNS if present
+        dns_servers=$(grep -E "^[[:space:]]*DNS[[:space:]]*=" "$client_config_file" | sed -E 's/^[[:space:]]*DNS[[:space:]]*=[[:space:]]*//' | sed -E 's/[[:space:]]*$//' || echo "")
+
+        # Extract PersistentKeepalive if present
+        persistent_keepalive=$(grep -E "^[[:space:]]*PersistentKeepalive[[:space:]]*=" "$client_config_file" | sed -E 's/^[[:space:]]*PersistentKeepalive[[:space:]]*=[[:space:]]*//' | sed -E 's/[[:space:]]*$//' || echo "")
+    else
+        print_info "No existing config file found"
     fi
 
     # If no existing config or AllowedIPs not found, default to VPN network only
     if [[ -z "$allowed_ips" ]]; then
         local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-        local server_address=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')
-        local network_base=$(echo "$server_address" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3".0"}')
-        local network_cidr=$(echo "$server_address" | cut -d'/' -f2)
-        allowed_ips="${network_base}/${network_cidr}"
-        print_warning "No existing routing config found, defaulting to VPN network only"
+        local server_address=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' || echo "")
+
+        if [[ -n "$server_address" ]]; then
+            local network_base=$(echo "$server_address" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3".0"}')
+            local network_cidr=$(echo "$server_address" | cut -d'/' -f2)
+            allowed_ips="${network_base}/${network_cidr}"
+            print_warning "No existing routing config found, defaulting to VPN network only: ${allowed_ips}"
+        else
+            # Fallback if server config can't be read
+            allowed_ips="10.0.0.0/24"
+            print_warning "Could not determine VPN network, using default: ${allowed_ips}"
+        fi
     else
         print_info "Preserving existing routing configuration: ${allowed_ips}"
     fi
 
-    print_info "Creating new client configuration..."
+    # Default DNS if not found
+    if [[ -z "$dns_servers" ]]; then
+        dns_servers="8.8.8.8"
+    fi
 
+    # Default PersistentKeepalive if not found
+    if [[ -z "$persistent_keepalive" ]]; then
+        persistent_keepalive="25"
+    fi
+
+    print_info "Creating new client configuration..."
+    print_info "Writing to: ${client_config_file}"
+
+    # Store old private key for verification
+    local old_private_key=""
+    if [[ -f "$client_config_file" ]]; then
+        old_private_key=$(grep -E "^[[:space:]]*PrivateKey[[:space:]]*=" "$client_config_file" | sed -E 's/^[[:space:]]*PrivateKey[[:space:]]*=[[:space:]]*//')
+        print_info "Removing old config file..."
+        rm -f "$client_config_file"
+        if [[ -f "$client_config_file" ]]; then
+            print_error "Failed to remove old config file! Permission issue?"
+            ls -la "$client_config_file"
+            error_exit "Cannot overwrite config file"
+        fi
+        print_success "Old config removed"
+    fi
+
+    # Write new config file
     cat > "$client_config_file" <<EOF
 [Interface]
 PrivateKey = ${CLIENT_PRIVATE_KEY}
 Address = ${CLIENT_IP}
-DNS = 8.8.8.8
+DNS = ${dns_servers}
 
 [Peer]
 PublicKey = ${SERVER_PUBLIC_KEY}
 Endpoint = ${SERVER_ENDPOINT}:${SERVER_PORT}
 AllowedIPs = ${allowed_ips}
-PersistentKeepalive = 25
+PersistentKeepalive = ${persistent_keepalive}
 EOF
 
     chmod 600 "$client_config_file"
 
     print_success "New client config created: ${client_config_file}"
+
+    # Verify the file was actually written
+    if [[ -f "$client_config_file" ]]; then
+        local new_private_key=$(grep -E "^[[:space:]]*PrivateKey[[:space:]]*=" "$client_config_file" | sed -E 's/^[[:space:]]*PrivateKey[[:space:]]*=[[:space:]]*//')
+        if [[ "$new_private_key" == "$CLIENT_PRIVATE_KEY" ]]; then
+            print_success "Verified: New private key written to config"
+            if [[ -n "$old_private_key" ]] && [[ "$old_private_key" != "$new_private_key" ]]; then
+                print_info "Old private key: ${old_private_key:0:20}..."
+                print_info "New private key: ${new_private_key:0:20}..."
+            fi
+        else
+            print_error "WARNING: Private key in config doesn't match generated key!"
+        fi
+    else
+        print_error "WARNING: Config file was not created at ${client_config_file}"
+    fi
 }
 
 reload_server() {

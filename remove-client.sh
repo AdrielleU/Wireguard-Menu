@@ -177,13 +177,8 @@ select_client() {
 
 remove_client_from_config() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local backup_file="${config_file}.backup.$(date +%Y%m%d_%H%M%S)"
 
     print_info "Removing peer from server configuration..."
-
-    # Backup config
-    cp "$config_file" "$backup_file"
-    print_info "Backed up config to: $backup_file"
 
     # Remove peer section (works for both Client and Site)
     # Find the comment line (# Client: NAME or # Site: NAME) and remove it + [Peer] section
@@ -228,6 +223,11 @@ remove_client_from_config() {
     chmod "$original_perms" "$config_file"
     chown "$original_owner" "$config_file"
 
+    # Restore SELinux context if SELinux is enabled
+    if command -v restorecon &> /dev/null && sestatus 2>/dev/null | grep -q "enabled"; then
+        restorecon "$config_file" 2>/dev/null || true
+    fi
+
     # Clear the trap since we successfully moved the file
     trap - EXIT ERR
 
@@ -243,20 +243,20 @@ remove_client_keys() {
 
     # Remove private key
     if [[ -f "${keys_dir}/${CLIENT_NAME}-privatekey" ]]; then
-        rm -f "${keys_dir}/${CLIENT_NAME}-privatekey"
-        ((files_removed++))
+        rm -f "${keys_dir}/${CLIENT_NAME}-privatekey" || print_warning "Failed to remove private key"
+        ((files_removed++)) || true
     fi
 
     # Remove public key
     if [[ -f "${keys_dir}/${CLIENT_NAME}-publickey" ]]; then
-        rm -f "${keys_dir}/${CLIENT_NAME}-publickey"
-        ((files_removed++))
+        rm -f "${keys_dir}/${CLIENT_NAME}-publickey" || print_warning "Failed to remove public key"
+        ((files_removed++)) || true
     fi
 
     # Remove client config
     if [[ -f "${keys_dir}/${CLIENT_NAME}.conf" ]]; then
-        rm -f "${keys_dir}/${CLIENT_NAME}.conf"
-        ((files_removed++))
+        rm -f "${keys_dir}/${CLIENT_NAME}.conf" || print_warning "Failed to remove config"
+        ((files_removed++)) || true
     fi
 
     if [[ $files_removed -gt 0 ]]; then
@@ -267,13 +267,65 @@ remove_client_keys() {
 }
 
 reload_server() {
-    print_info "Reloading WireGuard configuration without dropping connections..."
+    local client_public_key="$1"
 
-    # Use wg syncconf to reload config without disrupting active connections
-    wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}") || error_exit "Failed to reload ${WG_INTERFACE}"
+    print_info "Restarting WireGuard interface to disconnect client..."
 
-    print_success "WireGuard configuration reloaded for ${WG_INTERFACE}"
-    print_info "Active connections remain intact"
+    # Stop the interface
+    print_info "Stopping ${WG_INTERFACE}..."
+
+    # Check if interface is currently running
+    if ! ip link show "${WG_INTERFACE}" &>/dev/null; then
+        print_info "Interface ${WG_INTERFACE} is already down"
+    else
+        # Try wg-quick down first
+        if wg-quick down "${WG_INTERFACE}"; then
+            print_success "Interface stopped with wg-quick"
+        elif systemctl stop "wg-quick@${WG_INTERFACE}"; then
+            print_success "Interface stopped with systemctl"
+        else
+            print_error "Failed to stop interface!"
+            error_exit "Could not stop ${WG_INTERFACE}"
+        fi
+
+        # Verify it's actually down
+        sleep 1
+        if ip link show "${WG_INTERFACE}" &>/dev/null; then
+            print_error "Interface ${WG_INTERFACE} is still running!"
+            error_exit "Failed to stop interface"
+        fi
+        print_success "Verified interface is stopped"
+    fi
+
+    # Brief pause to ensure clean shutdown
+    sleep 2
+
+    # Start the interface with updated config
+    print_info "Starting ${WG_INTERFACE}..."
+    local start_success=false
+
+    if wg-quick up "${WG_INTERFACE}" 2>&1; then
+        print_success "Interface started with wg-quick"
+        start_success=true
+    elif systemctl start "wg-quick@${WG_INTERFACE}" 2>&1; then
+        print_success "Interface started with systemctl"
+        start_success=true
+    fi
+
+    # Verify the interface is actually running
+    sleep 1
+    if ! systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
+        echo ""
+        print_error "WireGuard interface failed to start!"
+        echo ""
+        print_info "Checking for errors..."
+        journalctl -xeu "wg-quick@${WG_INTERFACE}.service" --no-pager -n 20
+        echo ""
+        error_exit "Failed to restart ${WG_INTERFACE}. Check the error logs above."
+    fi
+
+    print_success "WireGuard interface restarted successfully"
+    print_success "Removed client has been disconnected from VPN"
 }
 
 show_summary() {
@@ -344,15 +396,28 @@ main() {
 
     echo ""
     print_warning "This will remove client '${CLIENT_NAME}' from ${WG_INTERFACE}"
+    print_warning "The VPN server will restart - ALL clients will briefly disconnect"
+    echo ""
     read -p "Are you sure? (y/N): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         error_exit "Client removal cancelled"
     fi
 
+    # Get client public key before deletion (needed to kick them from active connection)
+    local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
+    local client_public_key=""
+    if [[ -f "${keys_dir}/${CLIENT_NAME}-publickey" ]]; then
+        client_public_key=$(cat "${keys_dir}/${CLIENT_NAME}-publickey")
+    fi
+
     remove_client_from_config
     remove_client_keys
-    reload_server
+
+    echo ""
+    print_info "Restarting VPN server..."
+    reload_server "$client_public_key"
+
     show_summary
 }
 

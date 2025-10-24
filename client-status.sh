@@ -138,12 +138,13 @@ list_clients() {
     if [[ -x "./list-clients.sh" ]]; then
         local clients=$(./list-clients.sh "${WG_INTERFACE}" --format array 2>/dev/null)
     else
-        # Fallback: extract from config directly
+        # Fallback: extract from config directly (match both Client and Site)
         local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
         local clients=()
         while IFS= read -r line; do
-            if [[ "$line" =~ ^#\ Client:\ (.+)$ ]]; then
-                clients+=("${BASH_REMATCH[1]}")
+            # Match both "# Client:" and "# Site:"
+            if [[ "$line" =~ ^#[[:space:]]*(Client|Site):[[:space:]]*(.+)$ ]]; then
+                clients+=("${BASH_REMATCH[2]}")
             fi
         done < "$config_file"
         clients="${clients[@]}"
@@ -200,21 +201,23 @@ select_client() {
 get_client_info() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
 
-    # Get client IP and public key from config
+    # Get client/site IP and public key from config
     local found_client=0
     while IFS= read -r line; do
-        if [[ "$line" =~ ^#\ Client:\ ${CLIENT_NAME}$ ]]; then
+        # Match both "# Client:" and "# Site:"
+        if [[ "$line" =~ ^#[[:space:]]*(Client|Site):[[:space:]]*${CLIENT_NAME}[[:space:]]*$ ]]; then
             found_client=1
-        elif [[ $found_client -eq 1 ]] && [[ "$line" =~ ^PublicKey\ =\ (.+)$ ]]; then
-            CLIENT_PUBLIC_KEY="${BASH_REMATCH[1]}"
-        elif [[ $found_client -eq 1 ]] && [[ "$line" =~ ^AllowedIPs\ =\ (.+)$ ]]; then
-            CLIENT_IP="${BASH_REMATCH[1]}"
+        elif [[ $found_client -eq 1 ]] && [[ "$line" =~ ^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            CLIENT_PUBLIC_KEY=$(echo "${BASH_REMATCH[1]}" | xargs)
+        elif [[ $found_client -eq 1 ]] && [[ "$line" =~ ^[[:space:]]*AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            # Extract full AllowedIPs (may include multiple networks for sites)
+            CLIENT_IP=$(echo "${BASH_REMATCH[1]}" | xargs)
             break
         fi
     done < "$config_file"
 
     if [[ -z "$CLIENT_IP" ]]; then
-        error_exit "Could not find client information for ${CLIENT_NAME}"
+        error_exit "Could not find client/site information for ${CLIENT_NAME}"
     fi
 }
 
@@ -274,14 +277,14 @@ get_live_status() {
 show_status() {
     echo ""
     echo "=========================================="
-    print_info "Client Status: ${CLIENT_NAME}"
+    print_info "Client/Site Status: ${CLIENT_NAME}"
     echo "=========================================="
     echo ""
 
     print_info "Configuration:"
-    echo "  Name:       ${CLIENT_NAME}"
-    echo "  IP:         ${CLIENT_IP}"
-    echo "  Public Key: ${CLIENT_PUBLIC_KEY:0:20}...${CLIENT_PUBLIC_KEY: -20}"
+    echo "  Name:          ${CLIENT_NAME}"
+    echo "  AllowedIPs:    ${CLIENT_IP}"
+    echo "  Public Key:    ${CLIENT_PUBLIC_KEY:0:20}...${CLIENT_PUBLIC_KEY: -20}"
     echo ""
 
     print_info "Connection:"
@@ -336,7 +339,7 @@ parse_arguments() {
 
 main() {
     echo "=========================================="
-    echo "  WireGuard Client Status"
+    echo "  WireGuard Client/Site Status"
     echo "=========================================="
     echo ""
 

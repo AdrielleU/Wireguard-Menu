@@ -137,12 +137,13 @@ get_all_clients() {
     if [[ -x "./list-clients.sh" ]]; then
         local clients=$(./list-clients.sh "${WG_INTERFACE}" --format array 2>/dev/null)
     else
-        # Fallback: extract from config directly
+        # Fallback: extract from config directly (match both Client and Site)
         local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
         local clients=()
         while IFS= read -r line; do
-            if [[ "$line" =~ ^#\ Client:\ (.+)$ ]]; then
-                clients+=("${BASH_REMATCH[1]}")
+            # Match both "# Client:" and "# Site:"
+            if [[ "$line" =~ ^#[[:space:]]*(Client|Site):[[:space:]]*(.+)$ ]]; then
+                clients+=("${BASH_REMATCH[2]}")
             fi
         done < "$config_file"
         clients="${clients[@]}"
@@ -158,10 +159,12 @@ get_client_info() {
     local client_ip=""
 
     while IFS= read -r line; do
-        if [[ "$line" =~ ^#\ Client:\ ${client_name}$ ]]; then
+        # Match both "# Client:" and "# Site:"
+        if [[ "$line" =~ ^#[[:space:]]*(Client|Site):[[:space:]]*${client_name}[[:space:]]*$ ]]; then
             found_client=1
-        elif [[ $found_client -eq 1 ]] && [[ "$line" =~ ^AllowedIPs\ =\ (.+)$ ]]; then
-            client_ip="${BASH_REMATCH[1]}"
+        elif [[ $found_client -eq 1 ]] && [[ "$line" =~ ^[[:space:]]*AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            # Extract only first IP (tunnel IP), ignore additional networks
+            client_ip=$(echo "${BASH_REMATCH[1]}" | cut -d',' -f1 | xargs)
             break
         fi
     done < "$config_file"
@@ -208,19 +211,49 @@ update_server_config() {
 
     print_info "Updating server configuration..."
 
-    # Backup original permissions
+    # Backup original permissions and ownership
     local original_perms=$(stat -c '%a' "$config_file" 2>/dev/null || echo "600")
     local original_owner=$(stat -c '%U:%G' "$config_file" 2>/dev/null || echo "root:root")
 
-    # Use sed to replace PrivateKey line in-place
-    # This preserves file ownership and permissions
-    sed -i "s|^PrivateKey.*|PrivateKey = ${SERVER_PRIVATE_KEY}|" "$config_file"
+    # Use temp file approach to preserve permissions
+    local temp_file=$(mktemp)
+    trap "rm -f '$temp_file'" EXIT ERR
 
-    # Ensure correct permissions just in case
+    # Replace PrivateKey line
+    sed "s|^PrivateKey.*|PrivateKey = ${SERVER_PRIVATE_KEY}|" "$config_file" > "$temp_file"
+
+    # Replace original with temp file
+    mv "$temp_file" "$config_file"
+
+    # Restore permissions and ownership
     chmod "$original_perms" "$config_file"
     chown "$original_owner" "$config_file"
 
+    # Restore SELinux context if SELinux is enabled
+    if command -v restorecon &> /dev/null && getenforce 2>/dev/null | grep -q "Enforcing\|Permissive"; then
+        print_info "Restoring SELinux context..."
+        restorecon -v "$config_file" || print_warning "Failed to restore SELinux context"
+    fi
+
+    # Verify permissions were set correctly
+    local actual_perms=$(stat -c '%a' "$config_file")
+    if [[ "$actual_perms" != "$original_perms" ]]; then
+        print_warning "Permission mismatch! Expected $original_perms, got $actual_perms. Forcing to 600..."
+        chmod 600 "$config_file"
+    fi
+
+    # Also ensure it's readable
+    if [[ ! -r "$config_file" ]]; then
+        print_error "Config file is not readable after update!"
+        ls -la "$config_file"
+        error_exit "Permission issue with config file"
+    fi
+
+    # Clear trap
+    trap - EXIT ERR
+
     print_success "Server config updated with new private key"
+    print_info "Final permissions: $(ls -la $config_file | awk '{print $1, $3, $4, $9}')"
 }
 
 regenerate_all_client_configs() {
@@ -272,7 +305,8 @@ regenerate_all_client_configs() {
         # Try to preserve existing AllowedIPs from current config
         local allowed_ips=""
         if [[ -f "$client_config" ]]; then
-            allowed_ips=$(grep -E "^AllowedIPs\s*=" "$client_config" | awk '{print $3}')
+            # Extract everything after "AllowedIPs = " and trim trailing comma/whitespace
+            allowed_ips=$(grep -E "^[[:space:]]*AllowedIPs[[:space:]]*=" "$client_config" | sed -E 's/^[[:space:]]*AllowedIPs[[:space:]]*=[[:space:]]*//' | sed -E 's/[[:space:]]*,?[[:space:]]*$//' || echo "")
         fi
 
         # If no existing AllowedIPs, default to VPN network only
@@ -308,8 +342,22 @@ reload_server() {
     # Stop the service
     systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
 
-    # Wait a moment for clean shutdown
+    # Wait for service to stop
     sleep 1
+
+    # Force remove interface if it still exists
+    if ip link show "${WG_INTERFACE}" &>/dev/null; then
+        print_info "Manually removing lingering interface..."
+        wg-quick down "${WG_INTERFACE}" 2>/dev/null || true
+        sleep 1
+    fi
+
+    # Double-check interface is gone
+    if ip link show "${WG_INTERFACE}" &>/dev/null; then
+        print_warning "Interface still exists, forcing deletion..."
+        ip link delete "${WG_INTERFACE}" 2>/dev/null || true
+        sleep 1
+    fi
 
     # Start with new keys
     if ! systemctl start "wg-quick@${WG_INTERFACE}"; then
