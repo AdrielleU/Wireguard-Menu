@@ -395,6 +395,10 @@ main() {
     select_client
 
     echo ""
+    print_info "NOTE: No automatic backup is created"
+    echo "  To backup manually before removal:"
+    echo "    sudo cp /etc/wireguard/${WG_INTERFACE}.conf /etc/wireguard/${WG_INTERFACE}.conf.backup"
+    echo ""
     print_warning "This will remove client '${CLIENT_NAME}' from ${WG_INTERFACE}"
     print_warning "The VPN server will restart - ALL clients will briefly disconnect"
     echo ""

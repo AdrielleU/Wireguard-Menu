@@ -179,6 +179,12 @@ get_primary_interface_network() {
     # Convert to network address (e.g., 192.168.1.50/24 -> 192.168.1.0/24)
     local ip_addr=$(echo "$iface_ip" | cut -d'/' -f1)
     local cidr=$(echo "$iface_ip" | cut -d'/' -f2)
+
+    # If CIDR is empty, not set properly, or /32 (single host), default to /24
+    if [[ -z "$cidr" ]] || [[ "$cidr" == "32" ]]; then
+        cidr="24"
+    fi
+
     local network_base=$(echo "$ip_addr" | awk -F. '{print $1"."$2"."$3".0"}')
 
     echo "${network_base}/${cidr}"
@@ -255,37 +261,7 @@ prompt_site_config() {
         fi
     fi
 
-    # Tunnel IP (next available from VPN network)
-    if [[ -z "$TUNNEL_IP" ]]; then
-        local server_network=$(echo "$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-        local suggested_ip=$(get_next_tunnel_ip)
-        echo ""
-        echo "Tunnel IP: IP address to assign to remote site on VPN tunnel"
-        echo "  Suggested: ${suggested_ip} (next available)"
-        echo "  Range: ${server_network}.2 - ${server_network}.254"
-        echo ""
-        read -p "Enter tunnel IP [${suggested_ip}]: " input_ip
-        TUNNEL_IP="${input_ip:-$suggested_ip}"
-    fi
-
-    # Add /32 if not already present
-    if [[ ! "$TUNNEL_IP" =~ /32$ ]]; then
-        TUNNEL_IP="${TUNNEL_IP}/32"
-    fi
-
-    # Validate tunnel IP format
-    if ! validate_cidr "$TUNNEL_IP"; then
-        error_exit "Invalid tunnel IP format. Use CIDR notation (e.g., 10.0.0.2/32)"
-    fi
-
-    # Validate IP is in correct network
-    local tunnel_network=$(echo "$TUNNEL_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-    local server_network=$(echo "$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-    if [[ "$tunnel_network" != "$server_network" ]]; then
-        error_exit "Tunnel IP must be in the ${server_network}.0/24 network"
-    fi
-
-    # Remote Network (REQUIRED)
+    # Remote Network (REQUIRED) - Ask this FIRST before tunnel IP
     if [[ -z "$REMOTE_NETWORK" ]]; then
         echo ""
         echo "Remote Site's LAN Network: The network behind the remote site (Site B)"
@@ -302,6 +278,39 @@ prompt_site_config() {
     # Validate remote network
     if ! validate_cidr "$REMOTE_NETWORK"; then
         error_exit "Invalid remote network CIDR format (e.g., 192.168.50.0/24)"
+    fi
+
+    # Tunnel IP (next available from VPN network) - Ask AFTER remote network
+    if [[ -z "$TUNNEL_IP" ]]; then
+        local server_network=$(echo "$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+        local server_cidr=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' | cut -d'/' -f2)
+        local suggested_ip=$(get_next_tunnel_ip)
+        echo ""
+        echo "Tunnel IP: IP address to assign to remote site on VPN tunnel"
+        echo "  Suggested: ${suggested_ip}/${server_cidr} (next available)"
+        echo "  Range: ${server_network}.2 - ${server_network}.254"
+        echo "  Note: CIDR should match server's VPN network (/${server_cidr})"
+        echo ""
+        read -p "Enter tunnel IP with CIDR [${suggested_ip}/${server_cidr}]: " input_ip
+        TUNNEL_IP="${input_ip:-${suggested_ip}/${server_cidr}}"
+    fi
+
+    # Add CIDR if not already present (use server's CIDR, not /32)
+    if [[ ! "$TUNNEL_IP" =~ / ]]; then
+        local server_cidr=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' | cut -d'/' -f2)
+        TUNNEL_IP="${TUNNEL_IP}/${server_cidr}"
+    fi
+
+    # Validate tunnel IP format
+    if ! validate_cidr "$TUNNEL_IP"; then
+        error_exit "Invalid tunnel IP format. Use CIDR notation (e.g., 10.0.0.2/24)"
+    fi
+
+    # Validate IP is in correct network
+    local tunnel_network=$(echo "$TUNNEL_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+    local server_network=$(echo "$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+    if [[ "$tunnel_network" != "$server_network" ]]; then
+        error_exit "Tunnel IP must be in the ${server_network}.0/24 network"
     fi
 
     # Get server info for remote site config
@@ -358,13 +367,16 @@ add_peer_to_server() {
 
     print_info "Adding remote site peer to server configuration..."
 
-    # Add peer configuration - tunnel IP + remote network
+    # Extract just the IP without CIDR for AllowedIPs on server side
+    local tunnel_ip_only=$(echo "$TUNNEL_IP" | cut -d'/' -f1)
+
+    # Add peer configuration - tunnel IP as /32 + remote network
     cat >> "$config_file" <<EOF
 
 # Site: ${SITE_NAME}
 [Peer]
 PublicKey = ${SITE_PUBLIC_KEY}
-AllowedIPs = ${TUNNEL_IP}, ${REMOTE_NETWORK}
+AllowedIPs = ${tunnel_ip_only}/32, ${REMOTE_NETWORK}
 EOF
 
     print_success "Peer added to ${config_file}"
@@ -487,6 +499,7 @@ show_summary() {
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
     local site_config_file="${keys_dir}/${SITE_NAME}.conf"
     local local_vpn_network=$(get_local_network)
+    local tunnel_ip_only=$(echo "$TUNNEL_IP" | cut -d'/' -f1)
 
     echo ""
     echo "=========================================="
@@ -497,7 +510,7 @@ show_summary() {
     echo "  Interface: ${WG_INTERFACE}"
     echo "  VPN Tunnel Network: ${local_vpn_network}"
     echo "  Public Endpoint: ${SERVER_ENDPOINT}:${SERVER_PORT}"
-    echo "  Can route to Site B: ${TUNNEL_IP}, ${REMOTE_NETWORK}"
+    echo "  Can route to Site B: ${tunnel_ip_only}/32, ${REMOTE_NETWORK}"
     echo ""
     print_info "Site B - Remote Site:"
     echo "  Name: ${SITE_NAME}"
@@ -522,7 +535,7 @@ show_summary() {
     echo "   sudo systemctl enable wg-quick@wg-s2s"
     echo ""
     echo "3. Test connectivity from this server (Site A):"
-    echo "   ping ${TUNNEL_IP%/*}  # Ping remote tunnel IP"
+    echo "   ping ${tunnel_ip_only}  # Ping remote tunnel IP"
     echo "   ping <IP-in-${REMOTE_NETWORK}>  # Ping device on remote LAN"
     echo ""
     echo "4. Test connectivity from remote site (Site B):"

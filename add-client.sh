@@ -191,6 +191,12 @@ get_primary_interface_network() {
     # Convert to network address (e.g., 192.168.1.50/24 -> 192.168.1.0/24)
     local ip_addr=$(echo "$iface_ip" | cut -d'/' -f1)
     local cidr=$(echo "$iface_ip" | cut -d'/' -f2)
+
+    # If CIDR is empty, not set properly, or /32 (single host), default to /24
+    if [[ -z "$cidr" ]] || [[ "$cidr" == "32" ]]; then
+        cidr="24"
+    fi
+
     local network_base=$(echo "$ip_addr" | awk -F. '{print $1"."$2"."$3".0"}')
 
     echo "${network_base}/${cidr}"

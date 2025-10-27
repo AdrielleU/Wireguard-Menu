@@ -84,6 +84,10 @@ remove_existing_wireguard() {
         rm -f "/etc/wireguard/${WG_INTERFACE}.conf"
     fi
 
+    # Remove old firewall rules to prevent conflicts
+    print_info "Cleaning up old firewall rules..."
+    remove_all_firewall_rules 2>/dev/null || true
+
     print_success "Existing setup removed"
     echo ""
 }
