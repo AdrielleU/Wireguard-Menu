@@ -175,6 +175,73 @@ select_client() {
     print_success "Selected client: ${CLIENT_NAME}"
 }
 
+get_peer_allowed_ips() {
+    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    local in_peer_section=0
+    local allowed_ips=""
+
+    while IFS= read -r line; do
+        # Check if this is our client or site comment
+        if [[ "$line" =~ ^#\ (Client|Site):\ ${CLIENT_NAME}$ ]]; then
+            in_peer_section=1
+            continue
+        fi
+
+        # Extract AllowedIPs from peer section
+        if [[ $in_peer_section -eq 1 ]]; then
+            if [[ "$line" =~ ^AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+                allowed_ips="${BASH_REMATCH[1]}"
+            elif [[ -z "$line" ]] || [[ "$line" =~ ^#\ (Client|Site): ]]; then
+                # End of this peer section
+                break
+            fi
+        fi
+    done < "$config_file"
+
+    echo "$allowed_ips"
+}
+
+remove_routes_for_peer() {
+    local allowed_ips="$1"
+
+    if [[ -z "$allowed_ips" ]]; then
+        print_info "No AllowedIPs found for peer, skipping route removal"
+        return
+    fi
+
+    print_info "Checking for routes to remove..."
+
+    # Parse AllowedIPs (comma-separated)
+    IFS=',' read -ra IP_ARRAY <<< "$allowed_ips"
+    local routes_removed=0
+
+    for ip in "${IP_ARRAY[@]}"; do
+        ip=$(echo "$ip" | xargs)  # Trim whitespace
+
+        # Skip single host IPs (/32)
+        if [[ "$ip" =~ /32$ ]]; then
+            continue
+        fi
+
+        # Check if route exists for this network
+        if ip route show "$ip" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
+            print_info "Removing route: $ip dev ${WG_INTERFACE}"
+            if ip route del "$ip" dev "${WG_INTERFACE}" 2>/dev/null; then
+                print_success "Route removed: $ip"
+                ((routes_removed++))
+            else
+                print_warning "Failed to remove route for $ip"
+            fi
+        fi
+    done
+
+    if [[ $routes_removed -gt 0 ]]; then
+        print_success "Removed $routes_removed route(s)"
+    else
+        print_info "No routes to remove (client had no network routes)"
+    fi
+}
+
 remove_client_from_config() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
 
@@ -395,12 +462,11 @@ main() {
     select_client
 
     echo ""
-    print_info "NOTE: No automatic backup is created"
-    echo "  To backup manually before removal:"
-    echo "    sudo cp /etc/wireguard/${WG_INTERFACE}.conf /etc/wireguard/${WG_INTERFACE}.conf.backup"
-    echo ""
     print_warning "This will remove client '${CLIENT_NAME}' from ${WG_INTERFACE}"
     print_warning "The VPN server will restart - ALL clients will briefly disconnect"
+    echo ""
+    print_info "To backup before removal, run:"
+    echo "  sudo cp /etc/wireguard/${WG_INTERFACE}.conf /etc/wireguard/${WG_INTERFACE}.conf.backup"
     echo ""
     read -p "Are you sure? (y/N): " -n 1 -r
     echo
@@ -415,12 +481,20 @@ main() {
         client_public_key=$(cat "${keys_dir}/${CLIENT_NAME}-publickey")
     fi
 
+    # Get AllowedIPs before removing from config (needed for route cleanup)
+    print_info "Extracting peer network information..."
+    local peer_allowed_ips=$(get_peer_allowed_ips)
+
     remove_client_from_config
     remove_client_keys
 
     echo ""
     print_info "Restarting VPN server..."
     reload_server "$client_public_key"
+
+    # Remove routes after interface restart
+    echo ""
+    remove_routes_for_peer "$peer_allowed_ips"
 
     show_summary
 }

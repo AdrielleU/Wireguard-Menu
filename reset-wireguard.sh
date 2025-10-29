@@ -25,7 +25,6 @@ set -euo pipefail
 
 WG_CONFIG_DIR="/etc/wireguard"
 LOG_FILE="/var/log/wireguard-reset.log"
-BACKUP_DIR="/var/backups/wireguard-$(date +%Y%m%d_%H%M%S)"
 
 # Options
 SELECTIVE_MODE=true
@@ -264,35 +263,6 @@ select_servers_to_remove() {
     fi
 }
 
-################################################################################
-# BACKUP INSTRUCTIONS
-################################################################################
-
-show_backup_instructions() {
-    echo ""
-    print_warning "IMPORTANT: No automatic backup will be created!"
-    echo ""
-    echo "To backup before deletion, run these commands in another terminal:"
-    echo ""
-
-    if [[ "$SELECTIVE_MODE" == true ]] && [[ ${#SELECTED_SERVERS[@]} -gt 0 ]]; then
-        # Show backup commands for selected servers
-        for iface in "${SELECTED_SERVERS[@]}"; do
-            echo "  # Backup ${iface}:"
-            echo "  sudo cp /etc/wireguard/${iface}.conf /tmp/${iface}.conf.backup"
-            echo "  sudo cp -r /etc/wireguard/${iface} /tmp/${iface}-keys.backup"
-            echo ""
-        done
-    else
-        # Show backup command for all servers
-        echo "  # Backup all WireGuard configurations:"
-        echo "  sudo cp -r /etc/wireguard /tmp/wireguard-backup-\$(date +%Y%m%d_%H%M%S)"
-        echo ""
-    fi
-
-    echo "Press Enter when ready to continue, or Ctrl+C to cancel"
-    read -r
-}
 
 ################################################################################
 # CLEANUP FUNCTIONS
@@ -314,8 +284,45 @@ stop_wireguard_service() {
     fi
 }
 
+remove_routes_for_interface() {
+    local iface="$1"
+
+    print_info "Removing routes for interface: $iface"
+
+    # Get all routes for this interface
+    local routes=$(ip route show dev "$iface" 2>/dev/null)
+
+    if [[ -z "$routes" ]]; then
+        print_info "No routes found for $iface"
+        return
+    fi
+
+    local routes_removed=0
+
+    # Remove each route
+    while IFS= read -r route; do
+        # Extract the network (first field)
+        local network=$(echo "$route" | awk '{print $1}')
+
+        if [[ -n "$network" ]]; then
+            print_info "Removing route: $network dev $iface"
+            if ip route del "$network" dev "$iface" 2>/dev/null; then
+                ((routes_removed++))
+                log "Removed route: $network dev $iface"
+            fi
+        fi
+    done <<< "$routes"
+
+    if [[ $routes_removed -gt 0 ]]; then
+        print_success "Removed $routes_removed route(s) for $iface"
+    fi
+}
+
 remove_wireguard_interface() {
     local iface="$1"
+
+    # Remove routes first (before interface goes down)
+    remove_routes_for_interface "$iface"
 
     if ip link show "$iface" &>/dev/null; then
         print_info "Removing network interface: $iface"
@@ -368,10 +375,25 @@ remove_all_servers() {
         stop_wireguard_service "$iface"
     done
 
-    print_info "Removing all network interfaces..."
+    print_info "Removing all network interfaces and routes..."
     for iface in "${all_interfaces[@]}"; do
         remove_wireguard_interface "$iface"
     done
+
+    # Clean up any orphaned WireGuard routes (in case interface was removed but routes remain)
+    print_info "Checking for orphaned WireGuard routes..."
+    local orphaned_routes=$(ip route show | grep -E "dev (wg[0-9]+|wg-)" 2>/dev/null || true)
+    if [[ -n "$orphaned_routes" ]]; then
+        print_warning "Found orphaned routes, cleaning up..."
+        while IFS= read -r route; do
+            local network=$(echo "$route" | awk '{print $1}')
+            local dev=$(echo "$route" | grep -oP 'dev \K\S+')
+            if [[ -n "$network" ]] && [[ -n "$dev" ]]; then
+                print_info "Removing orphaned route: $network dev $dev"
+                ip route del "$network" dev "$dev" 2>/dev/null || true
+            fi
+        done <<< "$orphaned_routes"
+    fi
 
     print_info "Removing all configurations..."
     if [[ -d "$WG_CONFIG_DIR" ]]; then
@@ -379,7 +401,7 @@ remove_all_servers() {
         rmdir "$WG_CONFIG_DIR" 2>/dev/null || print_info "WireGuard directory not empty or in use"
     fi
 
-    print_success "Removed all WireGuard servers"
+    print_success "Removed all WireGuard servers and routes"
 }
 
 remove_ip_forwarding() {
@@ -484,8 +506,24 @@ confirm_action() {
         print_warning "This will also UNINSTALL WireGuard packages!"
     fi
 
-    # Show backup instructions
-    show_backup_instructions
+    echo ""
+    print_info "To backup before deletion, run:"
+    echo ""
+
+    if [[ "$SELECTIVE_MODE" == true ]] && [[ ${#SELECTED_SERVERS[@]} -gt 0 ]]; then
+        # Show backup commands for selected servers
+        for iface in "${SELECTED_SERVERS[@]}"; do
+            echo "  # Backup ${iface}:"
+            echo "  sudo cp /etc/wireguard/${iface}.conf /tmp/${iface}.conf.backup"
+            echo "  sudo cp -r /etc/wireguard/${iface} /tmp/${iface}-keys.backup"
+            echo ""
+        done
+    else
+        # Show backup command for all servers
+        echo "  # Backup all WireGuard configurations:"
+        echo "  sudo cp -r /etc/wireguard /tmp/wireguard-backup-\$(date +%Y%m%d_%H%M%S)"
+        echo ""
+    fi
 
     echo ""
     read -p "Are you sure you want to continue? (type 'yes' to confirm): " confirmation

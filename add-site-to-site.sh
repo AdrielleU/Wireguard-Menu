@@ -495,6 +495,53 @@ reload_server() {
     print_info "Existing connections remain intact"
 }
 
+add_route_for_remote_network() {
+    print_info "Setting up route for remote network..."
+
+    # Check if REMOTE_NETWORK is set and valid
+    if [[ -z "$REMOTE_NETWORK" ]]; then
+        print_info "No remote network specified, skipping route setup"
+        return
+    fi
+
+    # Parse the remote network (could be comma-separated)
+    IFS=',' read -ra NETWORKS <<< "$REMOTE_NETWORK"
+    local routes_added=0
+
+    for network in "${NETWORKS[@]}"; do
+        network=$(echo "$network" | xargs)  # Trim whitespace
+
+        # Skip if it's the tunnel IP itself (ends in /32)
+        if [[ "$network" =~ /32$ ]]; then
+            continue
+        fi
+
+        # Check if route already exists
+        if ip route show "$network" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
+            print_info "Route already exists: $network dev ${WG_INTERFACE}"
+        else
+            print_info "Adding route: $network dev ${WG_INTERFACE}"
+            if ip route add "$network" dev "${WG_INTERFACE}" 2>/dev/null; then
+                print_success "Route added: $network → ${WG_INTERFACE}"
+                ((routes_added++))
+            else
+                print_warning "Failed to add route for $network (may already exist)"
+            fi
+        fi
+    done
+
+    if [[ $routes_added -gt 0 ]]; then
+        print_success "Added $routes_added route(s) for site-to-site connectivity"
+        echo ""
+        print_info "Route verification:"
+        ip route show | grep "${WG_INTERFACE}" | while read -r line; do
+            echo "  $line"
+        done
+    else
+        print_info "No new routes needed (already configured)"
+    fi
+}
+
 show_summary() {
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
     local site_config_file="${keys_dir}/${SITE_NAME}.conf"
@@ -645,6 +692,7 @@ main() {
     add_peer_to_server
     create_remote_site_config
     reload_server
+    add_route_for_remote_network
     show_summary
 }
 

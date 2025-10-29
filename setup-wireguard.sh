@@ -971,6 +971,85 @@ handle_selinux() {
     fi
 }
 
+setup_site_routes() {
+    print_info "Setting up routes for site-to-site connections..."
+
+    # Parse config file to find site-to-site peers (AllowedIPs with networks, not just single IPs)
+    local site_networks=()
+    local in_peer=false
+    local is_site_peer=false
+    local peer_networks=()
+
+    while IFS= read -r line; do
+        # Detect [Peer] section
+        if [[ "$line" =~ ^\[Peer\] ]]; then
+            # Process previous peer if it was a site
+            if [[ "$is_site_peer" == true ]] && [[ ${#peer_networks[@]} -gt 0 ]]; then
+                site_networks+=("${peer_networks[@]}")
+            fi
+
+            in_peer=true
+            is_site_peer=false
+            peer_networks=()
+            continue
+        fi
+
+        # Parse AllowedIPs in peer section
+        if [[ "$in_peer" == true ]] && [[ "$line" =~ ^AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+            local allowed_ips="${BASH_REMATCH[1]}"
+
+            # Split by comma
+            IFS=',' read -ra IP_ARRAY <<< "$allowed_ips"
+            for ip in "${IP_ARRAY[@]}"; do
+                ip=$(echo "$ip" | xargs)  # Trim whitespace
+
+                # Check if this is a network (not a /32 single host or VPN single IP)
+                if [[ "$ip" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/([0-9]+)$ ]]; then
+                    local network="${BASH_REMATCH[1]}"
+                    local prefix="${BASH_REMATCH[2]}"
+
+                    # If it's a site-to-site network (not /32 and not our VPN network)
+                    if [[ "$prefix" -ne 32 ]] && [[ "$ip" != "$SERVER_NETWORK" ]]; then
+                        # Check if it's within our VPN range - if not, it's a remote LAN
+                        local vpn_base=$(echo "$SERVER_NETWORK" | cut -d'/' -f1 | cut -d'.' -f1-3)
+                        local network_base=$(echo "$network" | cut -d'.' -f1-3)
+
+                        if [[ "$network_base" != "$vpn_base" ]]; then
+                            is_site_peer=true
+                            peer_networks+=("$ip")
+                        fi
+                    fi
+                fi
+            done
+        fi
+    done < "$WG_CONFIG_FILE"
+
+    # Process last peer
+    if [[ "$is_site_peer" == true ]] && [[ ${#peer_networks[@]} -gt 0 ]]; then
+        site_networks+=("${peer_networks[@]}")
+    fi
+
+    # Add routes for site networks
+    if [[ ${#site_networks[@]} -gt 0 ]]; then
+        print_info "Found ${#site_networks[@]} site-to-site network(s)"
+
+        for network in "${site_networks[@]}"; do
+            # Check if route already exists
+            if ip route show "$network" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
+                print_info "Route already exists: $network dev ${WG_INTERFACE}"
+            else
+                print_info "Adding route: $network dev ${WG_INTERFACE}"
+                ip route add "$network" dev "${WG_INTERFACE}" 2>/dev/null || print_warning "Failed to add route for $network"
+                log "Added site-to-site route: $network dev ${WG_INTERFACE}"
+            fi
+        done
+
+        print_success "Site-to-site routes configured"
+    else
+        print_info "No site-to-site networks found (only client peers)"
+    fi
+}
+
 start_services() {
     print_info "Starting WireGuard service..."
 
@@ -990,6 +1069,9 @@ start_services() {
     if wg show ${WG_INTERFACE} &>/dev/null; then
         print_success "WireGuard interface ${WG_INTERFACE} is up"
     fi
+
+    # Set up routes for site-to-site connections
+    setup_site_routes
 }
 
 ################################################################################

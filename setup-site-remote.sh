@@ -20,6 +20,7 @@ WG_CONFIG_FILE=""
 LAN_INTERFACE=""
 VPN_NETWORKS=""
 RESET_MODE=false
+FIX_MASQUERADE_MODE=false
 
 ################################################################################
 # COLORS
@@ -618,6 +619,150 @@ enable_ip_forwarding() {
     fi
 }
 
+check_incorrect_masquerade() {
+    print_info "Checking for incorrect masquerade rules on VPN interface..."
+
+    local found_issues=false
+
+    # Check firewalld
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        # Check if masquerade is enabled on trusted zone (where WG interface is)
+        if firewall-cmd --zone=trusted --query-masquerade 2>/dev/null; then
+            print_warning "Found masquerade on trusted zone (affects VPN interface)"
+            found_issues=true
+        fi
+    fi
+
+    # Check UFW before.rules
+    if command -v ufw &> /dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        local ufw_before="/etc/ufw/before.rules"
+        if grep -q "POSTROUTING -o ${WG_INTERFACE} -j MASQUERADE" "$ufw_before" 2>/dev/null; then
+            print_warning "Found masquerade rule for ${WG_INTERFACE} in ${ufw_before}"
+            found_issues=true
+        fi
+    fi
+
+    # Check iptables NAT rules
+    if command -v iptables &> /dev/null; then
+        if iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "${WG_INTERFACE}.*MASQUERADE"; then
+            print_warning "Found masquerade rule for ${WG_INTERFACE} in iptables"
+            found_issues=true
+        fi
+    fi
+
+    if [[ "$found_issues" == true ]]; then
+        echo ""
+        print_warning "DETECTED INCORRECT MASQUERADE CONFIGURATION!"
+        echo ""
+        echo "For site-to-site VPN, the WireGuard interface should NOT masquerade traffic."
+        echo "Masquerading hides the real source IP of the remote LAN from the main server."
+        echo ""
+        echo "This prevents the main server from:"
+        echo "  - Pinging devices on the remote LAN"
+        echo "  - Properly routing return traffic"
+        echo "  - Seeing real client IPs in logs"
+        echo ""
+        read -p "Fix masquerade issues automatically? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            fix_incorrect_masquerade
+        else
+            print_warning "Masquerade issues not fixed - site-to-site routing may not work"
+            echo "To fix manually later, run: sudo $0 --fix-masquerade"
+        fi
+    else
+        print_success "No incorrect masquerade rules found"
+    fi
+}
+
+fix_incorrect_masquerade() {
+    print_info "Fixing incorrect masquerade rules..."
+
+    local fixed_count=0
+
+    # Fix firewalld
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        if firewall-cmd --zone=trusted --query-masquerade 2>/dev/null; then
+            print_info "Removing masquerade from trusted zone..."
+            firewall-cmd --permanent --zone=trusted --remove-masquerade 2>/dev/null || true
+            firewall-cmd --reload 2>/dev/null || true
+            print_success "Fixed firewalld masquerade"
+            ((fixed_count++))
+        fi
+    fi
+
+    # Fix UFW
+    if command -v ufw &> /dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        local ufw_before="/etc/ufw/before.rules"
+        if grep -q "POSTROUTING -o ${WG_INTERFACE} -j MASQUERADE" "$ufw_before" 2>/dev/null; then
+            print_info "Removing masquerade from ${ufw_before}..."
+
+            # Backup
+            cp "$ufw_before" "${ufw_before}.backup-nomasq-$(date +%Y%m%d_%H%M%S)"
+
+            # Remove the masquerade rule
+            sed -i "/POSTROUTING -o ${WG_INTERFACE} -j MASQUERADE/d" "$ufw_before"
+
+            # Remove empty NAT section if it exists
+            sed -i '/# WireGuard Site NAT rules/,/COMMIT/{/# WireGuard Site NAT rules/d; /^\*nat/d; /:POSTROUTING ACCEPT/d; /COMMIT/d;}' "$ufw_before"
+
+            # Clean up extra blank lines
+            sed -i '/^$/N;/^\n$/D' "$ufw_before"
+
+            ufw reload 2>/dev/null || true
+            print_success "Fixed UFW masquerade (backup created)"
+            ((fixed_count++))
+        fi
+    fi
+
+    # Fix iptables
+    if command -v iptables &> /dev/null; then
+        if iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "${WG_INTERFACE}.*MASQUERADE"; then
+            print_info "Removing masquerade from iptables..."
+
+            # Remove all MASQUERADE rules for WG interface
+            while iptables -t nat -D POSTROUTING -o ${WG_INTERFACE} -j MASQUERADE 2>/dev/null; do
+                :
+            done
+
+            # Save rules
+            if [[ -f /etc/os-release ]]; then
+                source /etc/os-release
+                case "$ID" in
+                    rhel|centos|rocky|almalinux|fedora)
+                        if command -v iptables-save &> /dev/null; then
+                            iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+                        fi
+                        ;;
+                    ubuntu|debian)
+                        if command -v netfilter-persistent &> /dev/null; then
+                            netfilter-persistent save 2>/dev/null || true
+                        elif [[ -f /etc/iptables/rules.v4 ]]; then
+                            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+                        fi
+                        ;;
+                esac
+            fi
+
+            print_success "Fixed iptables masquerade"
+            ((fixed_count++))
+        fi
+    fi
+
+    if [[ $fixed_count -gt 0 ]]; then
+        echo ""
+        print_success "Fixed $fixed_count masquerade issue(s)"
+        echo ""
+        print_info "Changes applied:"
+        echo "  - Removed masquerade on ${WG_INTERFACE}"
+        echo "  - Forwarding rules remain intact"
+        echo ""
+        print_info "Site-to-site routing should now work correctly"
+    else
+        print_info "No masquerade issues found to fix"
+    fi
+}
+
 configure_firewall() {
     print_info "Configuring firewall rules..."
 
@@ -648,6 +793,10 @@ configure_firewall() {
             configure_iptables
             ;;
     esac
+
+    # Check for incorrect masquerade after initial setup
+    echo ""
+    check_incorrect_masquerade
 }
 
 configure_firewalld() {
@@ -656,17 +805,19 @@ configure_firewalld() {
     # Add WireGuard interface to trusted zone
     firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
 
-    # Enable masquerading on public zone (for LAN interface)
+    # IMPORTANT: Do NOT masquerade on WG interface for site-to-site
+    # The main server needs to see the real source IP of the remote LAN
+    # Enable masquerading on public zone only (for LAN -> WAN traffic)
     firewall-cmd --permanent --zone=public --add-masquerade
 
-    # Add forwarding rules
+    # Add forwarding rules (allow bidirectional traffic)
     firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT
     firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT
 
     # Reload firewall
     firewall-cmd --reload
 
-    print_success "Firewalld configured"
+    print_success "Firewalld configured (no masquerade on VPN interface)"
 }
 
 configure_ufw() {
@@ -675,28 +826,9 @@ configure_ufw() {
     # Enable forwarding in ufw config
     sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
 
-    # Add NAT rules to before.rules
-    local ufw_before="/etc/ufw/before.rules"
-
-    if ! grep -q "# WireGuard Site NAT rules" "$ufw_before" 2>/dev/null; then
-        # Backup before.rules
-        cp "$ufw_before" "${ufw_before}.backup.$(date +%Y%m%d_%H%M%S)"
-
-        # Add NAT rules at the top after *filter
-        cat > /tmp/wg-nat-rules <<EOF
-
-# WireGuard Site NAT rules
-*nat
-:POSTROUTING ACCEPT [0:0]
--A POSTROUTING -o ${WG_INTERFACE} -j MASQUERADE
-COMMIT
-
-EOF
-
-        # Insert after *filter line
-        sed -i '/^\*filter/r /tmp/wg-nat-rules' "$ufw_before"
-        rm /tmp/wg-nat-rules
-    fi
+    # IMPORTANT: Do NOT add MASQUERADE on WG interface for site-to-site
+    # The main server needs to see the real source IP of the remote LAN
+    # No NAT rules needed in before.rules
 
     # Allow forwarding between interfaces
     ufw allow in on ${WG_INTERFACE} 2>/dev/null || true
@@ -705,15 +837,15 @@ EOF
     # Reload ufw
     ufw reload 2>/dev/null || true
 
-    print_success "UFW configured"
+    print_success "UFW configured (no masquerade on VPN interface)"
 }
 
 configure_iptables() {
     print_info "Configuring iptables..."
 
-    # Add masquerading for VPN traffic
-    iptables -t nat -C POSTROUTING -o ${WG_INTERFACE} -j MASQUERADE 2>/dev/null || \
-        iptables -t nat -A POSTROUTING -o ${WG_INTERFACE} -j MASQUERADE
+    # IMPORTANT: Do NOT masquerade on WG interface for site-to-site
+    # The main server needs to see the real source IP of the remote LAN
+    # Only add forwarding rules (no NAT/MASQUERADE on VPN traffic)
 
     # Add forwarding rules
     iptables -C FORWARD -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || \
@@ -745,7 +877,7 @@ configure_iptables() {
         esac
     fi
 
-    print_success "Iptables configured"
+    print_success "Iptables configured (no masquerade on VPN interface)"
 }
 
 install_wireguard_config() {
@@ -765,6 +897,59 @@ install_wireguard_config() {
     print_success "Configuration installed: $dest"
 }
 
+add_routes_for_vpn_networks() {
+    print_info "Setting up routes for VPN networks..."
+
+    # Extract AllowedIPs from the config file (networks we can reach via VPN)
+    local config_file="/etc/wireguard/${WG_INTERFACE}.conf"
+    local allowed_ips=$(grep -E "^AllowedIPs\s*=" "$config_file" | awk '{print $3}' | head -n1)
+
+    if [[ -z "$allowed_ips" ]]; then
+        print_warning "No AllowedIPs found in config, skipping route setup"
+        return
+    fi
+
+    print_info "Networks accessible via VPN: $allowed_ips"
+
+    # Parse AllowedIPs (comma-separated)
+    IFS=',' read -ra NETWORKS <<< "$allowed_ips"
+    local routes_added=0
+
+    for network in "${NETWORKS[@]}"; do
+        network=$(echo "$network" | xargs)  # Trim whitespace
+
+        # Skip single host IPs (/32) - only add network routes
+        if [[ "$network" =~ /32$ ]]; then
+            print_info "Skipping /32 host route: $network (single IP)"
+            continue
+        fi
+
+        # Check if route already exists
+        if ip route show "$network" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
+            print_info "Route already exists: $network dev ${WG_INTERFACE}"
+        else
+            print_info "Adding route: $network dev ${WG_INTERFACE}"
+            if ip route add "$network" dev "${WG_INTERFACE}" 2>/dev/null; then
+                print_success "Route added: $network → ${WG_INTERFACE}"
+                ((routes_added++))
+            else
+                print_warning "Failed to add route for $network (may already exist)"
+            fi
+        fi
+    done
+
+    if [[ $routes_added -gt 0 ]]; then
+        print_success "Added $routes_added route(s) for VPN connectivity"
+        echo ""
+        print_info "Route verification:"
+        ip route show | grep "${WG_INTERFACE}" | while read -r line; do
+            echo "  $line"
+        done
+    else
+        print_info "No new routes needed (already configured)"
+    fi
+}
+
 start_wireguard() {
     print_info "Starting WireGuard..."
 
@@ -781,6 +966,10 @@ start_wireguard() {
     systemctl enable wg-quick@${WG_INTERFACE} 2>/dev/null || true
 
     print_success "WireGuard started and enabled on boot"
+
+    # Add routes for VPN networks
+    echo ""
+    add_routes_for_vpn_networks
 }
 
 show_routing_instructions() {
@@ -925,6 +1114,10 @@ parse_arguments() {
                 RESET_MODE=true
                 shift
                 ;;
+            --fix-masquerade)
+                FIX_MASQUERADE_MODE=true
+                shift
+                ;;
             --config|-c)
                 WG_CONFIG_FILE="$2"
                 # Validate immediately if provided via argument
@@ -947,6 +1140,7 @@ parse_arguments() {
                 echo "Modes:"
                 echo "  (default)                 Setup mode - configure WireGuard site"
                 echo "  --reset                   Reset mode - remove WireGuard client completely"
+                echo "  --fix-masquerade          Fix incorrect masquerade configuration"
                 echo ""
                 echo "Options:"
                 echo "  -c, --config FILE         WireGuard config file from main server"
@@ -958,8 +1152,14 @@ parse_arguments() {
                 echo "  Configures a remote site to connect to main WireGuard server"
                 echo "  - Installs WireGuard"
                 echo "  - Enables IP forwarding"
-                echo "  - Configures NAT/masquerading"
-                echo "  - Sets up firewall rules"
+                echo "  - Configures firewall rules (NO masquerade on VPN)"
+                echo "  - Checks for incorrect masquerade configuration"
+                echo ""
+                echo "Fix Masquerade Mode:"
+                echo "  Detects and fixes incorrect masquerade on WireGuard interface"
+                echo "  - For site-to-site VPN, masquerade breaks routing"
+                echo "  - Removes MASQUERADE rules from firewall"
+                echo "  - Keeps forwarding rules intact"
                 echo ""
                 echo "Reset Mode:"
                 echo "  Removes WireGuard client configuration completely"
@@ -973,6 +1173,8 @@ parse_arguments() {
                 echo "  sudo $0 --config /tmp/branch-office.conf --lan-interface eth0"
                 echo ""
                 echo "  sudo $0  # Interactive setup mode"
+                echo ""
+                echo "  sudo $0 --fix-masquerade  # Fix masquerade issues"
                 echo ""
                 echo "  sudo $0 --reset  # Remove WireGuard client"
                 echo ""
@@ -994,6 +1196,21 @@ parse_arguments() {
 main() {
     parse_arguments "$@"
     check_root
+
+    # Handle fix masquerade mode
+    if [[ "$FIX_MASQUERADE_MODE" == true ]]; then
+        echo "=========================================="
+        echo "  Fix Masquerade Configuration"
+        echo "=========================================="
+        echo ""
+        print_info "Checking for incorrect masquerade rules on ${WG_INTERFACE}..."
+        echo ""
+        check_incorrect_masquerade
+        echo ""
+        print_info "Done!"
+        echo ""
+        exit 0
+    fi
 
     # Handle reset mode
     if [[ "$RESET_MODE" == true ]]; then
