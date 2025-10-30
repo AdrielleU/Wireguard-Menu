@@ -451,33 +451,57 @@ EOF
 }
 
 reload_server() {
-    print_info "Reloading WireGuard configuration without dropping connections..."
+    print_info "Restarting WireGuard to apply new keys..."
+    print_warning "This will disconnect all clients briefly"
 
-    # Use wg syncconf to reload config without disrupting active connections
-    if ! wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}"); then
-        print_error "Failed to reload ${WG_INTERFACE} with wg syncconf"
+    # For key rotation, we MUST restart to ensure old keys are not accepted
+    # Hot reload would leave the old peer connection active with old keys!
+
+    systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+    sleep 1
+
+    if ! systemctl start "wg-quick@${WG_INTERFACE}"; then
+        print_error "Failed to restart ${WG_INTERFACE}"
         echo ""
-        print_warning "Attempting full restart instead..."
+        print_info "Service status:"
+        systemctl status "wg-quick@${WG_INTERFACE}" --no-pager -l || true
+        echo ""
+        print_info "Check logs with:"
+        echo "  journalctl -xeu wg-quick@${WG_INTERFACE}.service"
+        error_exit "Could not restart WireGuard service"
+    fi
 
-        systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+    # Verify the interface is actually running (with retries)
+    print_info "Verifying service is active..."
+    local max_attempts=3
+    local attempt=1
+    local service_active=false
+
+    while [[ $attempt -le $max_attempts ]]; do
         sleep 1
-
-        if ! systemctl start "wg-quick@${WG_INTERFACE}"; then
-            print_error "Failed to restart ${WG_INTERFACE}"
-            echo ""
-            print_info "Service status:"
-            systemctl status "wg-quick@${WG_INTERFACE}" --no-pager -l || true
-            echo ""
-            print_info "Check logs with:"
-            echo "  journalctl -xeu wg-quick@${WG_INTERFACE}.service"
-            error_exit "Could not reload/restart WireGuard service"
+        if systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
+            service_active=true
+            break
         fi
 
-        print_success "WireGuard server restarted (all connections were reset)"
-    else
-        print_success "WireGuard configuration reloaded for ${WG_INTERFACE}"
-        print_info "Other active connections remain intact"
+        if [[ $attempt -lt $max_attempts ]]; then
+            print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
+        fi
+        ((attempt++))
+    done
+
+    if [[ "$service_active" == false ]]; then
+        echo ""
+        print_error "WireGuard interface failed to start after $max_attempts attempts!"
+        echo ""
+        print_info "Checking for errors..."
+        journalctl -xeu "wg-quick@${WG_INTERFACE}.service" --no-pager -n 20
+        echo ""
+        error_exit "Failed to restart ${WG_INTERFACE}. Check the error logs above."
     fi
+
+    print_success "WireGuard server restarted successfully with new keys"
+    print_warning "All clients disconnected and must reconnect"
 }
 
 show_summary() {

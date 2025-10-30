@@ -371,13 +371,36 @@ reload_server() {
         error_exit "Could not restart WireGuard service"
     fi
 
-    # Wait a moment and verify it's actually running
-    sleep 1
-    if ! systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
-        error_exit "${WG_INTERFACE} service is not active after restart"
+    # Verify the interface is actually running (with retries)
+    print_info "Verifying service is active..."
+    local max_attempts=3
+    local attempt=1
+    local service_active=false
+
+    while [[ $attempt -le $max_attempts ]]; do
+        sleep 1
+        if systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
+            service_active=true
+            break
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
+        fi
+        ((attempt++))
+    done
+
+    if [[ "$service_active" == false ]]; then
+        echo ""
+        print_error "WireGuard interface failed to start after $max_attempts attempts!"
+        echo ""
+        print_info "Checking for errors..."
+        journalctl -xeu "wg-quick@${WG_INTERFACE}.service" --no-pager -n 20
+        echo ""
+        error_exit "Failed to restart ${WG_INTERFACE}. Check the error logs above."
     fi
 
-    print_success "WireGuard server restarted with new keys"
+    print_success "WireGuard server restarted successfully with new keys"
     print_warning "All clients are now disconnected and need updated configs!"
 }
 

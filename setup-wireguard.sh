@@ -1057,13 +1057,37 @@ start_services() {
     systemctl enable wg-quick@${WG_INTERFACE} || error_exit "Failed to enable WireGuard service"
     systemctl start wg-quick@${WG_INTERFACE} || error_exit "Failed to start WireGuard service"
 
-    # Verify it's running
-    if systemctl is-active --quiet wg-quick@${WG_INTERFACE}; then
-        print_success "WireGuard service is running"
-        log "WireGuard service started successfully"
-    else
-        error_exit "WireGuard service failed to start"
+    # Verify it's running (with retries)
+    print_info "Verifying service is active..."
+    local max_attempts=3
+    local attempt=1
+    local service_active=false
+
+    while [[ $attempt -le $max_attempts ]]; do
+        sleep 1
+        if systemctl is-active --quiet wg-quick@${WG_INTERFACE}; then
+            service_active=true
+            break
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
+        fi
+        ((attempt++))
+    done
+
+    if [[ "$service_active" == false ]]; then
+        echo ""
+        print_error "WireGuard interface failed to start after $max_attempts attempts!"
+        echo ""
+        print_info "Checking for errors..."
+        journalctl -xeu wg-quick@${WG_INTERFACE}.service --no-pager -n 20
+        echo ""
+        error_exit "Failed to start ${WG_INTERFACE}. Check the error logs above."
     fi
+
+    print_success "WireGuard service is running"
+    log "WireGuard service started successfully"
 
     # Show interface status
     if wg show ${WG_INTERFACE} &>/dev/null; then

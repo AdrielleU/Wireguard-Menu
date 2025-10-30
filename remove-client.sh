@@ -379,11 +379,28 @@ reload_server() {
         start_success=true
     fi
 
-    # Verify the interface is actually running
-    sleep 1
-    if ! systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
+    # Verify the interface is actually running (with retries)
+    print_info "Verifying service is active..."
+    local max_attempts=3
+    local attempt=1
+    local service_active=false
+
+    while [[ $attempt -le $max_attempts ]]; do
+        sleep 1
+        if systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
+            service_active=true
+            break
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
+        fi
+        ((attempt++))
+    done
+
+    if [[ "$service_active" == false ]]; then
         echo ""
-        print_error "WireGuard interface failed to start!"
+        print_error "WireGuard interface failed to start after $max_attempts attempts!"
         echo ""
         print_info "Checking for errors..."
         journalctl -xeu "wg-quick@${WG_INTERFACE}.service" --no-pager -n 20

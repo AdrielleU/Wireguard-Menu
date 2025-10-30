@@ -333,54 +333,188 @@ remove_wireguard_interface() {
 
 remove_server_config() {
     local iface="$1"
+    local config_file="${WG_CONFIG_DIR}/${iface}.conf"
+    local keys_dir="${WG_CONFIG_DIR}/${iface}"
 
     print_info "Removing configuration for: $iface"
+    echo ""
 
-    # Remove config file
-    if [[ -f "${WG_CONFIG_DIR}/${iface}.conf" ]]; then
-        rm -f "${WG_CONFIG_DIR}/${iface}.conf"
-        log "Removed config: ${iface}.conf"
+    # Count what we're removing
+    local client_count=0
+    local server_key_count=0
+    local client_key_count=0
+    local client_config_count=0
+    local removal_errors=0
+
+    # Count clients from server config
+    if [[ -f "$config_file" ]]; then
+        client_count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
+        local site_count=$(grep -c "^# Site:" "$config_file" 2>/dev/null || echo "0")
+        if [[ $site_count -gt 0 ]]; then
+            client_count=$((client_count + site_count))
+        fi
     fi
 
-    # Remove keys directory
-    if [[ -d "${WG_CONFIG_DIR}/${iface}" ]]; then
-        rm -rf "${WG_CONFIG_DIR}/${iface}"
-        log "Removed keys directory: ${iface}/"
+    # Count keys in directory
+    if [[ -d "$keys_dir" ]]; then
+        server_key_count=$(find "$keys_dir" -maxdepth 1 -name "server-*key" 2>/dev/null | wc -l)
+        client_key_count=$(find "$keys_dir" -maxdepth 1 -name "*-privatekey" -o -name "*-publickey" 2>/dev/null | grep -v "server" | wc -l)
+        client_config_count=$(find "$keys_dir" -maxdepth 1 -name "*.conf" 2>/dev/null | wc -l)
+
+        print_info "Found in ${iface}/ directory:"
+        echo "  - ${client_count} peer(s) in server config"
+        echo "  - ${client_config_count} client config file(s)"
+        echo "  - ${server_key_count} server key file(s)"
+        echo "  - $((client_key_count / 2)) client keypair(s)"
+        echo ""
     fi
 
-    print_success "Removed: $iface"
+    # Remove main server config file
+    if [[ -f "$config_file" ]]; then
+        print_info "Removing server config: ${iface}.conf"
+        if rm -f "$config_file" 2>/dev/null; then
+            log "Removed config: ${iface}.conf"
+            print_success "Removed server config"
+        else
+            print_error "Failed to remove ${config_file}"
+            log "ERROR: Failed to remove ${config_file}"
+            ((removal_errors++))
+        fi
+    else
+        print_info "No server config file found"
+    fi
+
+    # Remove keys directory with all client configs and keys
+    if [[ -d "$keys_dir" ]]; then
+        print_info "Removing keys directory with all client configs and keys..."
+
+        # Try to remove directory
+        if rm -rf "$keys_dir" 2>/dev/null; then
+            log "Removed keys directory: ${iface}/ (${client_config_count} configs, $((client_key_count / 2)) keypairs)"
+            print_success "Removed all client configs and keys"
+        else
+            print_error "Failed to remove ${keys_dir}"
+            log "ERROR: Failed to remove ${keys_dir}"
+            ((removal_errors++))
+        fi
+
+        # Verify removal
+        if [[ -d "$keys_dir" ]]; then
+            print_warning "Directory still exists: ${keys_dir}"
+            echo "  Checking for remaining files..."
+            local remaining_files=$(find "$keys_dir" -type f 2>/dev/null | wc -l)
+            if [[ $remaining_files -gt 0 ]]; then
+                print_error "${remaining_files} file(s) could not be removed"
+                echo "  Files that remain:"
+                find "$keys_dir" -type f 2>/dev/null | head -5 | while read -r file; do
+                    echo "    - $(basename "$file")"
+                done
+                ((removal_errors++))
+            fi
+        fi
+    else
+        print_info "No keys directory found"
+    fi
+
+    echo ""
+
+    if [[ $removal_errors -gt 0 ]]; then
+        print_error "Completed with $removal_errors error(s) for: $iface"
+        log "WARNING: Removal completed with $removal_errors error(s) for ${iface}"
+        return 1
+    else
+        print_success "Successfully removed all configs and keys for: $iface"
+        log "Successfully removed ${iface} (${client_count} clients, ${client_config_count} configs)"
+        return 0
+    fi
 }
 
 remove_selected_servers() {
     print_info "Removing selected WireGuard server(s)..."
     echo ""
 
+    local total_errors=0
+    local successful_removals=0
+
     for iface in "${SELECTED_SERVERS[@]}"; do
+        echo "=========================================="
         echo "Removing: ${iface}"
+        echo "=========================================="
+        echo ""
+
         stop_wireguard_service "$iface"
         remove_wireguard_interface "$iface"
-        remove_server_config "$iface"
+
+        if remove_server_config "$iface"; then
+            ((successful_removals++))
+        else
+            ((total_errors++))
+        fi
+
         echo ""
     done
 
-    print_success "Removed ${#SELECTED_SERVERS[@]} server(s)"
+    echo "=========================================="
+    if [[ $total_errors -eq 0 ]]; then
+        print_success "Successfully removed all ${#SELECTED_SERVERS[@]} server(s)"
+    else
+        print_warning "Removed ${successful_removals}/${#SELECTED_SERVERS[@]} server(s) successfully"
+        print_error "$total_errors server(s) had errors during removal"
+        echo ""
+        print_info "Check log for details: $LOG_FILE"
+    fi
+    echo "=========================================="
 }
 
 remove_all_servers() {
     local all_servers=($(detect_wireguard_servers))
     local all_interfaces=($(detect_wireguard_interfaces))
 
+    # Count what we're removing
+    echo ""
+    print_info "Analyzing WireGuard installation..."
+    echo ""
+
+    local total_clients=0
+    local total_configs=0
+    local total_keys=0
+
+    if [[ -d "$WG_CONFIG_DIR" ]]; then
+        # Count all client configs
+        total_configs=$(find "$WG_CONFIG_DIR" -name "*.conf" -type f 2>/dev/null | wc -l)
+        # Count all keys
+        total_keys=$(find "$WG_CONFIG_DIR" -name "*key" -type f 2>/dev/null | wc -l)
+        # Count all clients from all server configs
+        for iface in "${all_servers[@]}"; do
+            local config_file="${WG_CONFIG_DIR}/${iface}.conf"
+            if [[ -f "$config_file" ]]; then
+                local count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
+                local sites=$(grep -c "^# Site:" "$config_file" 2>/dev/null || echo "0")
+                total_clients=$((total_clients + count + sites))
+            fi
+        done
+    fi
+
+    print_info "Found:"
+    echo "  - ${#all_servers[@]} WireGuard server(s)"
+    echo "  - ${total_clients} total client/site peer(s)"
+    echo "  - ${total_configs} total config file(s)"
+    echo "  - ${total_keys} total key file(s)"
+    echo ""
+
     print_info "Stopping all WireGuard services..."
     for iface in "${all_servers[@]}"; do
         stop_wireguard_service "$iface"
     done
+    echo ""
 
     print_info "Removing all network interfaces and routes..."
     for iface in "${all_interfaces[@]}"; do
         remove_wireguard_interface "$iface"
     done
+    echo ""
 
-    # Clean up any orphaned WireGuard routes (in case interface was removed but routes remain)
+    # Clean up any orphaned WireGuard routes
     print_info "Checking for orphaned WireGuard routes..."
     local orphaned_routes=$(ip route show | grep -E "dev (wg[0-9]+|wg-)" 2>/dev/null || true)
     if [[ -n "$orphaned_routes" ]]; then
@@ -393,15 +527,52 @@ remove_all_servers() {
                 ip route del "$network" dev "$dev" 2>/dev/null || true
             fi
         done <<< "$orphaned_routes"
+    else
+        print_success "No orphaned routes found"
     fi
+    echo ""
 
-    print_info "Removing all configurations..."
+    print_info "Removing all server configs, client configs, and keys..."
+    local removal_errors=0
+
     if [[ -d "$WG_CONFIG_DIR" ]]; then
-        rm -rf "${WG_CONFIG_DIR:?}"/* 2>/dev/null || print_warning "Could not remove some config files"
-        rmdir "$WG_CONFIG_DIR" 2>/dev/null || print_info "WireGuard directory not empty or in use"
+        # Remove all contents
+        if rm -rf "${WG_CONFIG_DIR:?}"/* 2>/dev/null; then
+            log "Removed all WireGuard configs (${#all_servers[@]} servers, ${total_clients} clients)"
+            print_success "Removed all configuration files"
+        else
+            print_error "Failed to remove some config files"
+            log "ERROR: Failed to remove some files from ${WG_CONFIG_DIR}"
+            ((removal_errors++))
+        fi
+
+        # Verify removal
+        local remaining_files=$(find "$WG_CONFIG_DIR" -type f 2>/dev/null | wc -l)
+        if [[ $remaining_files -gt 0 ]]; then
+            print_warning "${remaining_files} file(s) could not be removed"
+            echo "  Remaining files:"
+            find "$WG_CONFIG_DIR" -type f 2>/dev/null | head -5 | while read -r file; do
+                echo "    - ${file}"
+            done
+            ((removal_errors++))
+        fi
+
+        # Try to remove directory
+        if rmdir "$WG_CONFIG_DIR" 2>/dev/null; then
+            print_success "Removed WireGuard directory"
+        else
+            print_info "WireGuard directory kept (may contain leftover files)"
+        fi
     fi
 
-    print_success "Removed all WireGuard servers and routes"
+    echo ""
+
+    if [[ $removal_errors -eq 0 ]]; then
+        print_success "Removed all WireGuard servers, routes, and configurations"
+    else
+        print_warning "Removal completed with $removal_errors error(s)"
+        print_info "Check log for details: $LOG_FILE"
+    fi
 }
 
 remove_ip_forwarding() {

@@ -15,7 +15,8 @@ set -euo pipefail
 # CONFIGURATION
 ################################################################################
 
-WG_INTERFACE="wg-client"
+WG_CONFIG_DIR="/etc/wireguard"
+WG_INTERFACE=""
 WG_CONFIG_FILE=""
 LAN_INTERFACE=""
 VPN_NETWORKS=""
@@ -61,6 +62,15 @@ check_root() {
     if [[ $EUID -ne 0 ]]; then
         error_exit "This script must be run as root (use sudo)"
     fi
+}
+
+get_next_available_interface() {
+    # Find next available wgN interface
+    local n=0
+    while [[ -f "${WG_CONFIG_DIR}/wg${n}.conf" ]] || ip link show "wg${n}" &>/dev/null; do
+        ((n++))
+    done
+    echo "wg${n}"
 }
 
 remove_existing_wireguard() {
@@ -496,25 +506,45 @@ check_existing_wireguard() {
         fi
 
         echo "Options:"
-        echo "  1. Remove existing setup and continue"
-        echo "  2. Cancel and exit"
-        echo "  3. Use a different interface name"
+        echo "  1. Replace config file only (keep same interface)"
+        echo "  2. Use a different interface name (create new: wg1, wg2, etc.)"
+        echo "  3. Remove existing setup completely and start fresh"
+        echo "  4. Cancel and exit"
         echo ""
-        read -p "Choose an option [1/2/3] (default: 2): " -n 1 -r
+        read -p "Choose an option [1/2/3/4] (default: 4): " -n 1 -r
         echo
         echo ""
 
         case "$REPLY" in
             1)
-                remove_existing_wireguard
+                print_info "Replacing configuration file only..."
+
+                # Stop interface if running
+                if ip link show "${WG_INTERFACE}" &>/dev/null; then
+                    print_info "Stopping interface..."
+                    wg-quick down "${WG_INTERFACE}" 2>/dev/null || true
+                    sleep 1
+                fi
+
+                # Backup old config
+                if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
+                    local backup_file="/etc/wireguard/${WG_INTERFACE}.conf.backup.$(date +%Y%m%d_%H%M%S)"
+                    cp "/etc/wireguard/${WG_INTERFACE}.conf" "$backup_file"
+                    print_success "Old config backed up to: $backup_file"
+                fi
+
+                print_success "Ready to replace config file"
                 ;;
-            3)
+            2)
                 echo "Use the --interface option to specify a different name:"
-                echo "  sudo $0 --interface wg-site2 --config <config-file>"
+                echo "  sudo $0 --interface wg1 --config <config-file>"
                 echo ""
                 exit 0
                 ;;
-            2|"")
+            3)
+                remove_existing_wireguard
+                ;;
+            4|"")
                 print_info "Setup cancelled. Existing configuration preserved."
                 echo ""
                 echo "To remove manually:"
@@ -965,6 +995,35 @@ start_wireguard() {
     # Enable on boot
     systemctl enable wg-quick@${WG_INTERFACE} 2>/dev/null || true
 
+    # Verify it's running (with retries)
+    print_info "Verifying service is active..."
+    local max_attempts=3
+    local attempt=1
+    local service_active=false
+
+    while [[ $attempt -le $max_attempts ]]; do
+        sleep 1
+        if systemctl is-active --quiet wg-quick@${WG_INTERFACE}; then
+            service_active=true
+            break
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
+        fi
+        ((attempt++))
+    done
+
+    if [[ "$service_active" == false ]]; then
+        echo ""
+        print_error "WireGuard interface failed to start after $max_attempts attempts!"
+        echo ""
+        print_info "Checking for errors..."
+        journalctl -xeu wg-quick@${WG_INTERFACE}.service --no-pager -n 20
+        echo ""
+        error_exit "Failed to start ${WG_INTERFACE}. Check the error logs above."
+    fi
+
     print_success "WireGuard started and enabled on boot"
 
     # Add routes for VPN networks
@@ -1145,7 +1204,7 @@ parse_arguments() {
                 echo "Options:"
                 echo "  -c, --config FILE         WireGuard config file from main server"
                 echo "  -l, --lan-interface NAME  LAN network interface (e.g., eth0)"
-                echo "  -i, --interface NAME      WireGuard interface name [wg-client]"
+                echo "  -i, --interface NAME      WireGuard interface name [auto: wg0, wg1, etc.]"
                 echo "  -h, --help               Show this help"
                 echo ""
                 echo "Description:"
@@ -1176,9 +1235,9 @@ parse_arguments() {
                 echo ""
                 echo "  sudo $0 --fix-masquerade  # Fix masquerade issues"
                 echo ""
-                echo "  sudo $0 --reset  # Remove WireGuard client"
+                echo "  sudo $0 --reset  # Remove WireGuard client (auto-detects wg0)"
                 echo ""
-                echo "  sudo $0 --reset --interface wg-site2  # Remove specific interface"
+                echo "  sudo $0 --reset --interface wg1  # Remove specific interface"
                 exit 0
                 ;;
             *)
@@ -1196,6 +1255,12 @@ parse_arguments() {
 main() {
     parse_arguments "$@"
     check_root
+
+    # Set default interface if not specified
+    if [[ -z "$WG_INTERFACE" ]]; then
+        WG_INTERFACE=$(get_next_available_interface)
+        print_info "Auto-detected next available interface: ${WG_INTERFACE}"
+    fi
 
     # Handle fix masquerade mode
     if [[ "$FIX_MASQUERADE_MODE" == true ]]; then
