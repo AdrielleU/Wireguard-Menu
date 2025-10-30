@@ -68,31 +68,30 @@ show_header() {
 show_menu() {
     show_header
 
-    echo -e "${BLUE}Client/Site Management:${NC}"
-    echo "  1) Add Client                    (add-client.sh)"
-    echo "  2) Remove Client/Site            (remove-client.sh)"
-    echo "  3) List Clients/Sites            (list-clients.sh)"
-    echo "  4) Show Client/Site Status       (client-status.sh)"
-    echo "  5) Add Site-to-Site              (add-site-to-site.sh)"
-    echo "  6) Rotate Client Keys            (rotate-keys-client.sh)"
+    echo -e "${BLUE}Peer Management:${NC}"
+    echo "  1) Add Peer (Client or Site)     (add-peer.sh)"
+    echo "  2) Remove Peer                   (remove-peer.sh)"
+    echo "  3) List Peers                    (list-clients.sh)"
+    echo "  4) Show Peer Status              (client-status.sh)"
+    echo "  5) Rotate Peer Keys              (rotate-keys-client.sh)"
     echo ""
 
-    echo -e "${BLUE}Client Configuration:${NC}"
-    echo "  7) Show QR Code for Client       (qr-show.sh)"
+    echo -e "${BLUE}Peer Configuration:${NC}"
+    echo "  6) Show QR Code for Client       (qr-show.sh)"
     echo ""
 
     echo -e "${BLUE}Server Setup & Management:${NC}"
-    echo "  8) Setup WireGuard Server        (setup-wireguard.sh)"
-    echo "  9) Rotate Server Keys            (rotate-keys-server.sh)"
-    echo " 10) Reset/Cleanup WireGuard       (reset-wireguard.sh)"
+    echo "  7) Setup WireGuard Server        (setup-wireguard.sh)"
+    echo "  8) Rotate Server Keys            (rotate-keys-server.sh)"
+    echo "  9) Reset/Cleanup WireGuard       (reset-wireguard.sh)"
     echo ""
 
     echo -e "${BLUE}Remote Site Configuration:${NC}"
-    echo " 11) Setup Remote Site             (setup-site-remote.sh)"
+    echo " 10) Setup Remote Site             (setup-site-remote.sh)"
     echo ""
 
     echo -e "${BLUE}System:${NC}"
-    echo " 12) Exit"
+    echo " 11) Exit"
     echo ""
     echo "=========================================="
     echo ""
@@ -142,50 +141,47 @@ main() {
     while true; do
         show_menu
 
-        read -p "Select an option (1-12): " choice
+        read -p "Select an option (1-11): " choice
 
         case $choice in
             1)
-                run_script "add-client.sh" "Add Client"
+                run_script "add-peer.sh" "Add Peer (Client or Site)"
                 ;;
             2)
-                run_script "remove-client.sh" "Remove Client or Site"
+                run_script "remove-peer.sh" "Remove Peer"
                 ;;
             3)
-                run_script "list-clients.sh" "List Clients and Sites"
+                run_script "list-clients.sh" "List Peers"
                 ;;
             4)
-                run_script "client-status.sh" "Show Client/Site Status"
+                run_script "client-status.sh" "Show Peer Status"
                 ;;
             5)
-                run_script "add-site-to-site.sh" "Add Site-to-Site VPN"
+                run_script "rotate-keys-client.sh" "Rotate Peer Keys"
                 ;;
             6)
-                run_script "rotate-keys-client.sh" "Rotate Client Keys"
-                ;;
-            7)
                 run_script "qr-show.sh" "Show QR Code for Client"
                 ;;
-            8)
+            7)
                 run_script "setup-wireguard.sh" "Setup WireGuard Server"
                 ;;
-            9)
+            8)
                 run_script "rotate-keys-server.sh" "Rotate Server Keys"
                 ;;
-            10)
+            9)
                 run_script "reset-wireguard.sh" "Reset/Cleanup WireGuard"
                 ;;
-            11)
+            10)
                 run_script "setup-site-remote.sh" "Setup Remote Site"
                 ;;
-            12)
+            11)
                 echo ""
                 print_info "Exiting WireGuard Management Menu"
                 echo ""
                 exit 0
                 ;;
             *)
-                print_error "Invalid selection. Please choose 1-12."
+                print_error "Invalid selection. Please choose 1-11."
                 echo ""
                 read -p "Press Enter to continue..."
                 ;;

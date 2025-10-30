@@ -1,8 +1,8 @@
 #!/bin/bash
 ################################################################################
-# WireGuard Remove Client/Site Script
-# Description: Safely remove a client or site from a specific WireGuard server
-# Usage: sudo ./remove-client.sh [OPTIONS]
+# WireGuard Remove Peer Script
+# Description: Safely remove a client or site peer from a WireGuard server
+# Usage: sudo ./remove-peer.sh [OPTIONS]
 ################################################################################
 
 set -euo pipefail
@@ -12,7 +12,7 @@ set -euo pipefail
 ################################################################################
 
 WG_CONFIG_DIR="/etc/wireguard"
-CLIENT_NAME=""
+PEER_NAME=""
 WG_INTERFACE=""
 
 ################################################################################
@@ -25,21 +25,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
-
-print_info() {
-    echo -e "${BLUE}[i]${NC} $1"
-}
+print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+print_error() { echo -e "${RED}[✗]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
+print_info() { echo -e "${BLUE}[i]${NC} $1"; }
 
 ################################################################################
 # HELPER FUNCTIONS
@@ -51,31 +40,24 @@ error_exit() {
 }
 
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        error_exit "This script must be run as root (use sudo)"
-    fi
+    [[ $EUID -eq 0 ]] || error_exit "This script must be run as root (use sudo)"
 }
 
 detect_servers() {
     local servers=()
 
     if [[ -d "$WG_CONFIG_DIR" ]]; then
-        # Use nullglob to handle case where no .conf files exist
         shopt -s nullglob
         local conf_files=("$WG_CONFIG_DIR"/*.conf)
         shopt -u nullglob
 
         for conf in "${conf_files[@]}"; do
             [[ ! -f "$conf" ]] && continue
-            local iface_name=$(basename "$conf" .conf)
-            servers+=("$iface_name")
+            servers+=("$(basename "$conf" .conf)")
         done
     fi
 
-    if [[ ${#servers[@]} -eq 0 ]]; then
-        error_exit "No WireGuard servers found. Run setup-wireguard.sh first."
-    fi
-
+    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found. Run setup-wireguard.sh first."
     echo "${servers[@]}"
 }
 
@@ -83,22 +65,17 @@ select_server() {
     local servers=($(detect_servers))
     local server_count=${#servers[@]}
 
-    # If interface specified via argument, validate it
     if [[ -n "$WG_INTERFACE" ]]; then
-        if [[ ! -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]]; then
-            error_exit "WireGuard server '${WG_INTERFACE}' not found."
-        fi
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || error_exit "WireGuard server '${WG_INTERFACE}' not found."
         print_success "Using server: ${WG_INTERFACE}"
         return
     fi
 
-    # If only one server exists, use it automatically (silently)
     if [[ $server_count -eq 1 ]]; then
         WG_INTERFACE="${servers[0]}"
         return
     fi
 
-    # Multiple servers - show selection menu
     print_info "Multiple WireGuard servers detected"
     print_warning "TIP: Use --interface wg0 to skip this menu"
     echo ""
@@ -124,7 +101,6 @@ select_server() {
     echo ""
     read -p "Select server (1-${server_count}): " selection
 
-    # Validate selection
     if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$server_count" ]; then
         error_exit "Invalid selection"
     fi
@@ -133,46 +109,37 @@ select_server() {
     print_success "Selected server: ${WG_INTERFACE}"
 }
 
-list_clients() {
-    # Use list-clients.sh to get clients
-    local clients=$(./list-clients.sh "${WG_INTERFACE}" --format array 2>/dev/null)
-
-    echo "$clients"
+list_peers() {
+    local peers=$(./list-clients.sh "${WG_INTERFACE}" --format array 2>/dev/null)
+    echo "$peers"
 }
 
-select_client() {
-    local clients=($(list_clients))
-    local client_count=${#clients[@]}
+select_peer() {
+    local peers=($(list_peers))
+    local peer_count=${#peers[@]}
 
-    # Check if any clients exist
-    if [[ $client_count -eq 0 ]]; then
-        error_exit "No clients found in ${WG_INTERFACE}"
-    fi
+    [[ $peer_count -gt 0 ]] || error_exit "No peers found in ${WG_INTERFACE}"
 
-    # If client specified via argument, validate it using list-clients.sh
-    if [[ -n "$CLIENT_NAME" ]]; then
-        if ! ./list-clients.sh "${WG_INTERFACE}" --check "${CLIENT_NAME}" 2>/dev/null; then
-            error_exit "Client '${CLIENT_NAME}' not found in ${WG_INTERFACE}"
+    if [[ -n "$PEER_NAME" ]]; then
+        if ! ./list-clients.sh "${WG_INTERFACE}" --check "${PEER_NAME}" 2>/dev/null; then
+            error_exit "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
         fi
-
-        print_success "Using client: ${CLIENT_NAME}"
+        print_success "Using peer: ${PEER_NAME}"
         return
     fi
 
-    # Show client selection menu using list-clients.sh interactive mode
-    print_info "Select a client or site to remove from the VPN server"
+    print_info "Select a peer (client or site) to remove from the VPN server"
     echo ""
     ./list-clients.sh "${WG_INTERFACE}" --format interactive
 
-    read -p "Select client to remove (1-${client_count}): " selection
+    read -p "Select peer to remove (1-${peer_count}): " selection
 
-    # Validate selection
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$client_count" ]; then
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$peer_count" ]; then
         error_exit "Invalid selection"
     fi
 
-    CLIENT_NAME="${clients[$((selection-1))]}"
-    print_success "Selected client: ${CLIENT_NAME}"
+    PEER_NAME="${peers[$((selection-1))]}"
+    print_success "Selected peer: ${PEER_NAME}"
 }
 
 get_peer_allowed_ips() {
@@ -181,18 +148,15 @@ get_peer_allowed_ips() {
     local allowed_ips=""
 
     while IFS= read -r line; do
-        # Check if this is our client or site comment
-        if [[ "$line" =~ ^#\ (Client|Site):\ ${CLIENT_NAME}$ ]]; then
+        if [[ "$line" =~ ^#\ (Client|Site):\ ${PEER_NAME}$ ]]; then
             in_peer_section=1
             continue
         fi
 
-        # Extract AllowedIPs from peer section
         if [[ $in_peer_section -eq 1 ]]; then
             if [[ "$line" =~ ^AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]]; then
                 allowed_ips="${BASH_REMATCH[1]}"
             elif [[ -z "$line" ]] || [[ "$line" =~ ^#\ (Client|Site): ]]; then
-                # End of this peer section
                 break
             fi
         fi
@@ -211,19 +175,13 @@ remove_routes_for_peer() {
 
     print_info "Checking for routes to remove..."
 
-    # Parse AllowedIPs (comma-separated)
     IFS=',' read -ra IP_ARRAY <<< "$allowed_ips"
     local routes_removed=0
 
     for ip in "${IP_ARRAY[@]}"; do
-        ip=$(echo "$ip" | xargs)  # Trim whitespace
+        ip=$(echo "$ip" | xargs)
+        [[ "$ip" =~ /32$ ]] && continue
 
-        # Skip single host IPs (/32)
-        if [[ "$ip" =~ /32$ ]]; then
-            continue
-        fi
-
-        # Check if route exists for this network
         if ip route show "$ip" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
             print_info "Removing route: $ip dev ${WG_INTERFACE}"
             if ip route del "$ip" dev "${WG_INTERFACE}" 2>/dev/null; then
@@ -238,136 +196,104 @@ remove_routes_for_peer() {
     if [[ $routes_removed -gt 0 ]]; then
         print_success "Removed $routes_removed route(s)"
     else
-        print_info "No routes to remove (client had no network routes)"
+        print_info "No routes to remove (peer had no network routes)"
     fi
 }
 
-remove_client_from_config() {
+remove_peer_from_config() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
 
     print_info "Removing peer from server configuration..."
 
-    # Remove peer section (works for both Client and Site)
-    # Find the comment line (# Client: NAME or # Site: NAME) and remove it + [Peer] section
     local temp_file=$(mktemp)
-    # Ensure temp file is cleaned up on exit or error
     trap "rm -f '$temp_file'" EXIT ERR
 
-    # Backup original permissions
     local original_perms=$(stat -c '%a' "$config_file" 2>/dev/null || echo "600")
     local original_owner=$(stat -c '%U:%G' "$config_file" 2>/dev/null || echo "root:root")
 
     local in_peer_section=0
 
     while IFS= read -r line; do
-        # Check if this is our client or site comment
-        if [[ "$line" =~ ^#\ (Client|Site):\ ${CLIENT_NAME}$ ]]; then
+        if [[ "$line" =~ ^#\ (Client|Site):\ ${PEER_NAME}$ ]]; then
             in_peer_section=1
             continue
         fi
 
-        # Skip lines while in peer section
         if [[ $in_peer_section -eq 1 ]]; then
-            # Skip [Peer], PublicKey, AllowedIPs, PersistentKeepalive lines
             if [[ "$line" =~ ^\[Peer\]$ ]] || [[ "$line" =~ ^PublicKey ]] || [[ "$line" =~ ^AllowedIPs ]] || [[ "$line" =~ ^PersistentKeepalive ]]; then
                 continue
-            # Skip empty lines immediately after
             elif [[ -z "$line" ]]; then
                 in_peer_section=0
                 continue
             else
-                # Found next section, stop skipping
                 in_peer_section=0
             fi
         fi
 
-        # Write line to temp file
         echo "$line" >> "$temp_file"
     done < "$config_file"
 
-    # Replace original config with cleaned version
     mv "$temp_file" "$config_file"
     chmod "$original_perms" "$config_file"
     chown "$original_owner" "$config_file"
 
-    # Restore SELinux context if SELinux is enabled
     if command -v restorecon &> /dev/null && sestatus 2>/dev/null | grep -q "enabled"; then
         restorecon "$config_file" 2>/dev/null || true
     fi
 
-    # Clear the trap since we successfully moved the file
     trap - EXIT ERR
 
     print_success "Peer removed from ${config_file}"
 }
 
-remove_client_keys() {
+remove_peer_files() {
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
 
-    print_info "Removing client keys and config..."
+    print_info "Removing peer keys and config..."
 
     local files_removed=0
 
-    # Remove private key
-    if [[ -f "${keys_dir}/${CLIENT_NAME}-privatekey" ]]; then
-        rm -f "${keys_dir}/${CLIENT_NAME}-privatekey" || print_warning "Failed to remove private key"
-        ((files_removed++)) || true
-    fi
-
-    # Remove public key
-    if [[ -f "${keys_dir}/${CLIENT_NAME}-publickey" ]]; then
-        rm -f "${keys_dir}/${CLIENT_NAME}-publickey" || print_warning "Failed to remove public key"
-        ((files_removed++)) || true
-    fi
-
-    # Remove client config
-    if [[ -f "${keys_dir}/${CLIENT_NAME}.conf" ]]; then
-        rm -f "${keys_dir}/${CLIENT_NAME}.conf" || print_warning "Failed to remove config"
-        ((files_removed++)) || true
-    fi
+    for file in "${keys_dir}/${PEER_NAME}-privatekey" "${keys_dir}/${PEER_NAME}-publickey" "${keys_dir}/${PEER_NAME}.conf"; do
+        if [[ -f "$file" ]]; then
+            rm -f "$file" || print_warning "Failed to remove $(basename "$file")"
+            ((files_removed++)) || true
+        fi
+    done
 
     if [[ $files_removed -gt 0 ]]; then
-        print_success "Removed ${files_removed} client file(s) from ${keys_dir}"
+        print_success "Removed ${files_removed} peer file(s) from ${keys_dir}"
     else
-        print_warning "No client files found in ${keys_dir}"
+        print_warning "No peer files found in ${keys_dir}"
     fi
 }
 
 reload_server() {
-    local client_public_key="$1"
+    local peer_public_key="$1"
 
-    print_info "Restarting WireGuard interface to disconnect client..."
+    print_info "Restarting WireGuard interface to disconnect peer..."
 
-    # Stop the interface
     print_info "Stopping ${WG_INTERFACE}..."
 
-    # Check if interface is currently running
     if ! ip link show "${WG_INTERFACE}" &>/dev/null; then
         print_info "Interface ${WG_INTERFACE} is already down"
     else
-        # Try wg-quick down first
         if wg-quick down "${WG_INTERFACE}"; then
             print_success "Interface stopped with wg-quick"
         elif systemctl stop "wg-quick@${WG_INTERFACE}"; then
             print_success "Interface stopped with systemctl"
         else
-            print_error "Failed to stop interface!"
             error_exit "Could not stop ${WG_INTERFACE}"
         fi
 
-        # Verify it's actually down
         sleep 1
         if ip link show "${WG_INTERFACE}" &>/dev/null; then
-            print_error "Interface ${WG_INTERFACE} is still running!"
             error_exit "Failed to stop interface"
         fi
         print_success "Verified interface is stopped"
     fi
 
-    # Brief pause to ensure clean shutdown
     sleep 2
 
-    # Start the interface with updated config
     print_info "Starting ${WG_INTERFACE}..."
     local start_success=false
 
@@ -379,7 +305,6 @@ reload_server() {
         start_success=true
     fi
 
-    # Verify the interface is actually running (with retries)
     print_info "Verifying service is active..."
     local max_attempts=3
     local attempt=1
@@ -409,22 +334,22 @@ reload_server() {
     fi
 
     print_success "WireGuard interface restarted successfully"
-    print_success "Removed client has been disconnected from VPN"
+    print_success "Removed peer has been disconnected from VPN"
 }
 
 show_summary() {
     echo ""
     echo "=========================================="
-    print_success "Client Removed Successfully!"
+    print_success "Peer Removed Successfully!"
     echo "=========================================="
     echo ""
-    print_info "Removed client: ${CLIENT_NAME}"
+    print_info "Removed peer: ${PEER_NAME}"
     print_info "From server: ${WG_INTERFACE}"
     echo ""
     print_info "What was removed:"
-    echo "  - Client peer from ${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    echo "  - Client keys from ${WG_CONFIG_DIR}/${WG_INTERFACE}/"
-    echo "  - Client config file"
+    echo "  - Peer from ${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    echo "  - Peer keys from ${WG_CONFIG_DIR}/${WG_INTERFACE}/"
+    echo "  - Peer config file"
     echo ""
     echo "=========================================="
     echo ""
@@ -433,25 +358,21 @@ show_summary() {
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --interface|-i)
-                WG_INTERFACE="$2"
-                shift 2
-                ;;
-            --client|-c)
-                CLIENT_NAME="$2"
-                shift 2
-                ;;
+            --interface|-i) WG_INTERFACE="$2"; shift 2 ;;
+            --peer|-p|--client|-c) PEER_NAME="$2"; shift 2 ;;
             -h|--help)
                 echo "Usage: sudo $0 [OPTIONS]"
                 echo ""
                 echo "Options:"
                 echo "  -i, --interface NAME    WireGuard interface (e.g., wg0)"
-                echo "  -c, --client NAME       Client name to remove"
-                echo "  -h, --help             Show this help"
+                echo "  -p, --peer NAME         Peer name to remove (client or site)"
+                echo "  -c, --client NAME       Alias for --peer (for compatibility)"
+                echo "  -h, --help              Show this help"
                 echo ""
-                echo "Example:"
-                echo "  sudo $0 --interface wg0 --client laptop"
-                echo "  sudo $0  # Interactive mode"
+                echo "Examples:"
+                echo "  sudo $0                              # Interactive mode"
+                echo "  sudo $0 --interface wg0 --peer laptop-john"
+                echo "  sudo $0 -i wg0 -p branch-office"
                 exit 0
                 ;;
             *)
@@ -468,7 +389,7 @@ parse_arguments() {
 
 main() {
     echo "=========================================="
-    echo "  WireGuard Remove Client"
+    echo "  WireGuard Remove Peer"
     echo "=========================================="
     echo ""
 
@@ -476,11 +397,11 @@ main() {
 
     check_root
     select_server
-    select_client
+    select_peer
 
     echo ""
-    print_warning "This will remove client '${CLIENT_NAME}' from ${WG_INTERFACE}"
-    print_warning "The VPN server will restart - ALL clients will briefly disconnect"
+    print_warning "This will remove peer '${PEER_NAME}' from ${WG_INTERFACE}"
+    print_warning "The VPN server will restart - ALL connected peers will briefly disconnect"
     echo ""
     print_info "To backup before removal, run:"
     echo "  sudo cp /etc/wireguard/${WG_INTERFACE}.conf /etc/wireguard/${WG_INTERFACE}.conf.backup"
@@ -488,28 +409,25 @@ main() {
     read -p "Are you sure? (y/N): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        error_exit "Client removal cancelled"
+        error_exit "Peer removal cancelled"
     fi
 
-    # Get client public key before deletion (needed to kick them from active connection)
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
-    local client_public_key=""
-    if [[ -f "${keys_dir}/${CLIENT_NAME}-publickey" ]]; then
-        client_public_key=$(cat "${keys_dir}/${CLIENT_NAME}-publickey")
+    local peer_public_key=""
+    if [[ -f "${keys_dir}/${PEER_NAME}-publickey" ]]; then
+        peer_public_key=$(cat "${keys_dir}/${PEER_NAME}-publickey")
     fi
 
-    # Get AllowedIPs before removing from config (needed for route cleanup)
     print_info "Extracting peer network information..."
     local peer_allowed_ips=$(get_peer_allowed_ips)
 
-    remove_client_from_config
-    remove_client_keys
+    remove_peer_from_config
+    remove_peer_files
 
     echo ""
     print_info "Restarting VPN server..."
-    reload_server "$client_public_key"
+    reload_server "$peer_public_key"
 
-    # Remove routes after interface restart
     echo ""
     remove_routes_for_peer "$peer_allowed_ips"
 
