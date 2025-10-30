@@ -43,6 +43,7 @@
 #   --network CIDR        VPN network CIDR (default: 10.0.0.0/24)
 #   --port PORT           WireGuard listen port (default: 51820)
 #   --interface NAME      Interface name (default: wg0)
+#   --exit-node           Enable exit node (NAT all client traffic to internet)
 #   -h, --help           Show this help message
 #
 # Examples:
@@ -52,6 +53,9 @@
 #   # Second server on same VM
 #   sudo ./setup-wireguard.sh --interface wg1 --port 51821 \
 #        --server-ip 10.0.1.1/24 --network 10.0.1.0/24
+#
+#   # Create exit node server
+#   sudo ./setup-wireguard.sh --exit-node
 ################################################################################
 
 set -euo pipefail
@@ -70,6 +74,8 @@ WG_INTERFACE=""
 WG_PORT=""
 SERVER_IP=""
 SERVER_NETWORK=""
+EXIT_NODE=false
+INTERNET_INTERFACE=""
 
 WG_CONFIG_DIR="/etc/wireguard"
 LOG_FILE="/var/log/wireguard-setup.log"
@@ -142,10 +148,12 @@ show_usage() {
     echo "  --network CIDR        VPN network CIDR (default: ${DEFAULT_SERVER_NETWORK})"
     echo "  --port PORT           WireGuard listen port (default: ${DEFAULT_WG_PORT})"
     echo "  --interface NAME      Interface name (default: ${DEFAULT_WG_INTERFACE})"
+    echo "  --exit-node           Enable exit node (NAT all client traffic to internet)"
     echo "  -h, --help           Show this help message"
     echo ""
-    echo "Example:"
+    echo "Examples:"
     echo "  sudo $0 --server-ip 192.168.100.1/24 --network 192.168.100.0/24 --port 51820"
+    echo "  sudo $0 --exit-node  # Create VPN server that routes all client traffic"
     echo ""
 }
 
@@ -167,6 +175,10 @@ parse_arguments() {
             --interface)
                 WG_INTERFACE="$2"
                 shift 2
+                ;;
+            --exit-node)
+                EXIT_NODE=true
+                shift
                 ;;
             -h|--help)
                 show_usage
@@ -370,6 +382,23 @@ get_next_available_network() {
     echo "10.0.${n}.0/24"
 }
 
+detect_default_interface() {
+    # Detect the default internet-facing interface
+    local default_iface=$(ip route | grep '^default' | head -n1 | awk '{print $5}')
+
+    if [[ -z "$default_iface" ]]; then
+        # Fallback: try to find first non-loopback interface
+        default_iface=$(ip -o link show | grep -v 'lo:' | grep 'state UP' | head -n1 | awk -F': ' '{print $2}')
+    fi
+
+    if [[ -z "$default_iface" ]]; then
+        # Last resort fallback
+        default_iface="eth0"
+    fi
+
+    echo "$default_iface"
+}
+
 list_existing_wireguard_servers() {
     print_info "Existing WireGuard servers on this system:"
 
@@ -552,6 +581,24 @@ prompt_user_config() {
         fi
     fi
 
+    echo ""
+
+    # Prompt for exit node mode (default: no)
+    echo "Exit Node Mode: Route all client internet traffic through this VPN server"
+    echo "  Enable this if you want clients to use this server as their internet gateway"
+    echo "  Default: no (clients only access VPN network)"
+    echo "  Note: Requires proper firewall/NAT configuration"
+    read -p "Enable exit node mode? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        EXIT_NODE=true
+        INTERNET_INTERFACE=$(detect_default_interface)
+        print_info "Exit node enabled. Internet interface: ${INTERNET_INTERFACE}"
+    else
+        EXIT_NODE=false
+        print_info "Exit node disabled (VPN network access only)"
+    fi
+
     # Set interface-specific paths now that we have the interface name
     WG_INTERFACE_DIR="${WG_CONFIG_DIR}/${WG_INTERFACE}"
     WG_KEYS_DIR="${WG_INTERFACE_DIR}"
@@ -565,6 +612,11 @@ prompt_user_config() {
     echo "  Server IP: ${SERVER_IP}"
     echo "  Network: ${SERVER_NETWORK}"
     echo "  Keys Directory: ${WG_KEYS_DIR}"
+    if [[ "$EXIT_NODE" == true ]]; then
+        echo "  Exit Node: ENABLED (NAT via ${INTERNET_INTERFACE})"
+    else
+        echo "  Exit Node: DISABLED (VPN access only)"
+    fi
     echo ""
 
     read -p "Continue with this configuration? (Y/n): " -n 1 -r
@@ -573,7 +625,7 @@ prompt_user_config() {
         error_exit "Configuration cancelled by user"
     fi
 
-    log "Configuration: Interface=${WG_INTERFACE}, Port=${WG_PORT}, ServerIP=${SERVER_IP}, Network=${SERVER_NETWORK}"
+    log "Configuration: Interface=${WG_INTERFACE}, Port=${WG_PORT}, ServerIP=${SERVER_IP}, Network=${SERVER_NETWORK}, ExitNode=${EXIT_NODE}"
     log "Keys Directory: ${WG_KEYS_DIR}"
 }
 
@@ -808,11 +860,34 @@ generate_keys() {
 create_config() {
     print_info "Creating WireGuard configuration..."
 
+    # Detect internet interface if exit node enabled and not yet detected
+    if [[ "$EXIT_NODE" == true ]] && [[ -z "$INTERNET_INTERFACE" ]]; then
+        INTERNET_INTERFACE=$(detect_default_interface)
+        print_info "Detected internet interface: ${INTERNET_INTERFACE}"
+    fi
+
+    # Create basic config
     cat > "$WG_CONFIG_FILE" <<EOF
 [Interface]
 Address = ${SERVER_IP}
 ListenPort = ${WG_PORT}
 PrivateKey = ${SERVER_PRIVATE_KEY}
+EOF
+
+    # Add exit node (NAT) configuration if enabled
+    if [[ "$EXIT_NODE" == true ]]; then
+        cat >> "$WG_CONFIG_FILE" <<EOF
+
+# Exit Node Configuration - NAT all client traffic to internet
+PostUp = iptables -A FORWARD -i ${WG_INTERFACE} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${INTERNET_INTERFACE} -j MASQUERADE
+PostDown = iptables -D FORWARD -i ${WG_INTERFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${INTERNET_INTERFACE} -j MASQUERADE
+EOF
+        print_info "Added exit node NAT rules for interface: ${INTERNET_INTERFACE}"
+        log "Exit node enabled with NAT on ${INTERNET_INTERFACE}"
+    fi
+
+    # Add example client config comments
+    cat >> "$WG_CONFIG_FILE" <<EOF
 
 # Add client configurations below
 # Example:
