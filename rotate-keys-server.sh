@@ -133,9 +133,9 @@ select_server() {
 }
 
 get_all_clients() {
-    # Use list-clients.sh if available, otherwise fallback
-    if [[ -x "./list-clients.sh" ]]; then
-        local clients=$(./list-clients.sh "${WG_INTERFACE}" --format array 2>/dev/null)
+    # Use list-peers.sh if available, otherwise fallback
+    if [[ -x "./list-peers.sh" ]]; then
+        local clients=$(./list-peers.sh "${WG_INTERFACE}" --format array 2>/dev/null)
     else
         # Fallback: extract from config directly (match both Client and Site)
         local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"

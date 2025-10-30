@@ -837,8 +837,8 @@ configure_firewalld() {
 
     # IMPORTANT: Do NOT masquerade on WG interface for site-to-site
     # The main server needs to see the real source IP of the remote LAN
-    # Enable masquerading on public zone only (for LAN -> WAN traffic)
-    firewall-cmd --permanent --zone=public --add-masquerade
+    # For site-to-site VPN, we do NOT enable masquerade at all
+    # This allows proper routing between Site A LAN <-> VPN <-> Site B LAN
 
     # Add forwarding rules (allow bidirectional traffic)
     firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT
@@ -847,7 +847,7 @@ configure_firewalld() {
     # Reload firewall
     firewall-cmd --reload
 
-    print_success "Firewalld configured (no masquerade on VPN interface)"
+    print_success "Firewalld configured (no masquerade - proper site-to-site routing)"
 }
 
 configure_ufw() {

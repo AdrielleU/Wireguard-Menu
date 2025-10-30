@@ -183,8 +183,8 @@ get_server_info() {
     local status="STOPPED"
 
     if [[ -f "$config_file" ]]; then
-        ip_addr=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' || echo "Unknown")
-        port=$(grep -E "^ListenPort\s*=" "$config_file" | head -n1 | awk '{print $3}' || echo "Unknown")
+        ip_addr=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' || echo "Unknown")
+        port=$(grep -E "^ListenPort\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' || echo "Unknown")
         client_count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
         client_count=$(echo "$client_count" | tr -d '[:space:]')
         client_count=${client_count:-0}
@@ -333,6 +333,141 @@ remove_wireguard_interface() {
     fi
 }
 
+remove_firewall_rules() {
+    local iface="$1"
+
+    print_info "Cleaning up firewall rules for ${iface}..."
+
+    # Detect firewall system
+    if systemctl is-active --quiet firewalld 2>/dev/null; then
+        remove_firewalld_rules "$iface"
+    elif command -v ufw &> /dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        remove_ufw_rules "$iface"
+    elif command -v iptables &> /dev/null; then
+        remove_iptables_rules "$iface"
+    else
+        print_info "No active firewall detected"
+    fi
+}
+
+remove_firewalld_rules() {
+    local iface="$1"
+
+    print_info "Removing firewalld rules..."
+
+    # Get port from config if it exists
+    local config_file="${WG_CONFIG_DIR}/${iface}.conf"
+    local wg_port=""
+    if [[ -f "$config_file" ]]; then
+        wg_port=$(grep -E "^ListenPort\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' || echo "")
+    fi
+
+    # Remove interface from trusted zone
+    print_info "Checking trusted zone..."
+    if timeout 5 firewall-cmd --zone=trusted --query-interface=${iface} 2>/dev/null; then
+        timeout 10 firewall-cmd --permanent --zone=trusted --remove-interface=${iface} 2>/dev/null || true
+        print_success "Removed ${iface} from trusted zone"
+    fi
+
+    # Remove port from public zone
+    if [[ -n "$wg_port" ]]; then
+        print_info "Checking port ${wg_port}/udp..."
+        if timeout 5 firewall-cmd --zone=public --query-port=${wg_port}/udp 2>/dev/null; then
+            timeout 10 firewall-cmd --permanent --zone=public --remove-port=${wg_port}/udp 2>/dev/null || true
+            print_success "Removed port ${wg_port}/udp from public zone"
+        fi
+    fi
+
+    # Check if masquerading should be removed
+    print_info "Checking masquerade..."
+    if timeout 5 firewall-cmd --zone=public --query-masquerade 2>/dev/null; then
+        # Count WireGuard interfaces currently active (before removal)
+        # Use wg show interfaces which lists all interface names
+        local all_wg=$(wg show interfaces 2>/dev/null | wc -w || echo "0")
+        all_wg=$(echo "$all_wg" | tr -d '[:space:]')
+        all_wg=${all_wg:-0}
+
+        # If only 1 interface (the one being removed), safe to remove masquerade
+        if [[ $all_wg -le 1 ]]; then
+            # No other WireGuard interfaces after this one is removed
+            print_info "Removing masquerade (this is the last WireGuard interface)"
+            timeout 10 firewall-cmd --permanent --zone=public --remove-masquerade 2>/dev/null || true
+            print_success "Removed masquerade from public zone"
+        else
+            print_info "Masquerade kept enabled ($((all_wg - 1)) other WireGuard interface(s) remain)"
+        fi
+    fi
+
+    # Remove any direct rules related to this interface (skip if slow)
+    print_info "Checking direct rules..."
+    local direct_rules=$(timeout 5 firewall-cmd --permanent --direct --get-all-rules 2>/dev/null | grep "${iface}" || true)
+    if [[ -n "$direct_rules" ]]; then
+        print_info "Found direct rules for ${iface} (skipping detailed removal)"
+        print_warning "Manual cleanup may be needed for direct rules"
+    fi
+
+    # Reload firewall with timeout
+    print_info "Reloading firewall..."
+    if timeout 15 firewall-cmd --reload 2>/dev/null; then
+        print_success "Firewall reloaded"
+    else
+        print_warning "Firewall reload timed out (rules still applied, reboot may be needed)"
+    fi
+
+    print_success "Firewalld rules cleaned up"
+}
+
+remove_ufw_rules() {
+    local iface="$1"
+
+    print_info "Removing UFW rules..."
+
+    # Get port from config if it exists
+    local config_file="${WG_CONFIG_DIR}/${iface}.conf"
+    local wg_port=""
+    if [[ -f "$config_file" ]]; then
+        wg_port=$(grep -E "^ListenPort\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' || echo "")
+    fi
+
+    # Remove port rule
+    if [[ -n "$wg_port" ]]; then
+        ufw delete allow ${wg_port}/udp 2>/dev/null || true
+        print_success "Removed UFW rule for port ${wg_port}/udp"
+    fi
+
+    # Check before.rules for NAT rules
+    local ufw_before="/etc/ufw/before.rules"
+    if [[ -f "$ufw_before" ]] && grep -q "${iface}" "$ufw_before" 2>/dev/null; then
+        print_warning "Found NAT rules in ${ufw_before}"
+        echo "  Manual cleanup required - check ${ufw_before} for ${iface} rules"
+    fi
+
+    ufw reload 2>/dev/null || true
+
+    print_success "UFW rules cleaned up"
+}
+
+remove_iptables_rules() {
+    local iface="$1"
+
+    print_info "Removing iptables rules..."
+
+    # Remove FORWARD rules
+    iptables -D FORWARD -i ${iface} -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -o ${iface} -j ACCEPT 2>/dev/null || true
+
+    # Remove POSTROUTING masquerade rules
+    iptables -t nat -D POSTROUTING -o ${iface} -j MASQUERADE 2>/dev/null || true
+
+    # Try to save rules (command differs by distro)
+    if command -v iptables-save &>/dev/null; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null || \
+        iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+    fi
+
+    print_success "Iptables rules cleaned up"
+}
+
 remove_server_config() {
     local iface="$1"
     local config_file="${WG_CONFIG_DIR}/${iface}.conf"
@@ -364,7 +499,7 @@ remove_server_config() {
     # Count keys in directory
     if [[ -d "$keys_dir" ]]; then
         server_key_count=$(find "$keys_dir" -maxdepth 1 -name "server-*key" 2>/dev/null | wc -l | tr -d '[:space:]')
-        client_key_count=$(find "$keys_dir" -maxdepth 1 -name "*-privatekey" -o -name "*-publickey" 2>/dev/null | grep -v "server" | wc -l | tr -d '[:space:]')
+        client_key_count=$(find "$keys_dir" -maxdepth 1 -name "*-privatekey" -o -name "*-publickey" 2>/dev/null | { grep -v "server" || true; } | wc -l | tr -d '[:space:]')
         client_config_count=$(find "$keys_dir" -maxdepth 1 -name "*.conf" 2>/dev/null | wc -l | tr -d '[:space:]')
 
         # Ensure numeric defaults
@@ -490,6 +625,7 @@ remove_selected_servers() {
         echo ""
 
         stop_wireguard_service "$iface"
+        remove_firewall_rules "$iface"
         remove_wireguard_interface "$iface"
 
         if remove_server_config "$iface"; then
@@ -562,6 +698,12 @@ remove_all_servers() {
     done
     echo ""
 
+    print_info "Cleaning up firewall rules..."
+    for iface in "${all_servers[@]}"; do
+        remove_firewall_rules "$iface"
+    done
+    echo ""
+
     print_info "Removing all network interfaces and routes..."
     for iface in "${all_interfaces[@]}"; do
         remove_wireguard_interface "$iface"
@@ -575,7 +717,7 @@ remove_all_servers() {
         print_warning "Found orphaned routes, cleaning up..."
         while IFS= read -r route; do
             local network=$(echo "$route" | awk '{print $1}')
-            local dev=$(echo "$route" | grep -oP 'dev \K\S+')
+            local dev=$(echo "$route" | { grep -oP 'dev \K\S+' || true; })
             if [[ -n "$network" ]] && [[ -n "$dev" ]]; then
                 print_info "Removing orphaned route: $network dev $dev"
                 ip route del "$network" dev "$dev" 2>/dev/null || true

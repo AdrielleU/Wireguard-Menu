@@ -110,7 +110,7 @@ select_server() {
 }
 
 list_peers() {
-    local peers=$(./list-clients.sh "${WG_INTERFACE}" --format array 2>/dev/null)
+    local peers=$(./list-peers.sh "${WG_INTERFACE}" --format array 2>/dev/null)
     echo "$peers"
 }
 
@@ -121,7 +121,7 @@ select_peer() {
     [[ $peer_count -gt 0 ]] || error_exit "No peers found in ${WG_INTERFACE}"
 
     if [[ -n "$PEER_NAME" ]]; then
-        if ! ./list-clients.sh "${WG_INTERFACE}" --check "${PEER_NAME}" 2>/dev/null; then
+        if ! ./list-peers.sh "${WG_INTERFACE}" --check "${PEER_NAME}" 2>/dev/null; then
             error_exit "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
         fi
         print_success "Using peer: ${PEER_NAME}"
@@ -130,7 +130,7 @@ select_peer() {
 
     print_info "Select a peer (client or site) to remove from the VPN server"
     echo ""
-    ./list-clients.sh "${WG_INTERFACE}" --format interactive
+    ./list-peers.sh "${WG_INTERFACE}" --format interactive
 
     read -p "Select peer to remove (1-${peer_count}): " selection
 
