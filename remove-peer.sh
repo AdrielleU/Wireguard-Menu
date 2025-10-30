@@ -95,7 +95,7 @@ select_server() {
         fi
 
         printf "  ${BLUE}%d)${NC} %s %b - %s, Port %s\n" "$i" "$iface" "$is_running" "$conf_ip" "$conf_port"
-        ((i++))
+        ((i++)) || true
     done
 
     echo ""
@@ -186,7 +186,7 @@ remove_routes_for_peer() {
             print_info "Removing route: $ip dev ${WG_INTERFACE}"
             if ip route del "$ip" dev "${WG_INTERFACE}" 2>/dev/null; then
                 print_success "Route removed: $ip"
-                ((routes_removed++))
+                ((routes_removed++)) || true
             else
                 print_warning "Failed to remove route for $ip"
             fi
@@ -320,7 +320,7 @@ reload_server() {
         if [[ $attempt -lt $max_attempts ]]; then
             print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
         fi
-        ((attempt++))
+        ((attempt++)) || true
     done
 
     if [[ "$service_active" == false ]]; then

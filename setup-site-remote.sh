@@ -984,47 +984,79 @@ start_wireguard() {
     print_info "Starting WireGuard..."
 
     # Stop if already running
-    systemctl stop wg-quick@${WG_INTERFACE} 2>/dev/null || true
-    sleep 1
-
-    # Start WireGuard
-    if ! wg-quick up ${WG_INTERFACE}; then
-        error_exit "Failed to start WireGuard. Check configuration."
+    print_info "Stopping ${WG_INTERFACE} (if running)..."
+    if ip link show "${WG_INTERFACE}" &>/dev/null; then
+        systemctl stop wg-quick@${WG_INTERFACE} 2>/dev/null || wg-quick down ${WG_INTERFACE} 2>/dev/null || true
+        sleep 1
+        if ip link show "${WG_INTERFACE}" &>/dev/null; then
+            print_warning "Interface still exists, forcing removal..."
+            ip link delete dev "${WG_INTERFACE}" 2>/dev/null || true
+        fi
     fi
 
-    # Enable on boot
-    systemctl enable wg-quick@${WG_INTERFACE} 2>/dev/null || true
+    sleep 2
 
-    # Verify it's running (with retries)
-    print_info "Verifying service is active..."
+    # Start WireGuard with output capture
+    print_info "Starting ${WG_INTERFACE}..."
+    local start_time=$(date '+%Y-%m-%d %H:%M:%S')
+    local start_output
+    local start_success=false
+
+    if start_output=$(wg-quick up ${WG_INTERFACE} 2>&1); then
+        print_success "Interface started with wg-quick"
+        start_success=true
+    elif start_output=$(systemctl start wg-quick@${WG_INTERFACE} 2>&1); then
+        print_success "Interface started with systemctl"
+        start_success=true
+    fi
+
+    if [[ "$start_success" == false ]]; then
+        echo ""
+        print_error "Failed to start WireGuard interface!"
+        echo ""
+        print_info "Command output:"
+        echo "$start_output"
+        echo ""
+        error_exit "Could not start ${WG_INTERFACE}"
+    fi
+
+    # Verify interface is actually up (check actual interface, not just systemd service)
+    print_info "Verifying interface is up..."
     local max_attempts=3
     local attempt=1
-    local service_active=false
+    local interface_up=false
 
     while [[ $attempt -le $max_attempts ]]; do
         sleep 1
-        if systemctl is-active --quiet wg-quick@${WG_INTERFACE}; then
-            service_active=true
+        if ip link show "${WG_INTERFACE}" &>/dev/null && wg show "${WG_INTERFACE}" &>/dev/null; then
+            interface_up=true
             break
         fi
 
         if [[ $attempt -lt $max_attempts ]]; then
-            print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
+            print_warning "Interface not up yet, retrying ($attempt/$max_attempts)..."
         fi
         ((attempt++))
     done
 
-    if [[ "$service_active" == false ]]; then
+    if [[ "$interface_up" == false ]]; then
         echo ""
-        print_error "WireGuard interface failed to start after $max_attempts attempts!"
+        print_error "WireGuard interface failed to come up after $max_attempts attempts!"
         echo ""
-        print_info "Checking for errors..."
-        journalctl -xeu wg-quick@${WG_INTERFACE}.service --no-pager -n 20
+        print_info "Checking for errors (logs since ${start_time})..."
+        journalctl -xeu wg-quick@${WG_INTERFACE}.service --no-pager --since "$start_time"
+        echo ""
+        print_info "Current interface status:"
+        ip link show "${WG_INTERFACE}" 2>&1 || echo "Interface not found"
         echo ""
         error_exit "Failed to start ${WG_INTERFACE}. Check the error logs above."
     fi
 
-    print_success "WireGuard started and enabled on boot"
+    print_success "WireGuard interface is up and running"
+
+    # Enable on boot
+    systemctl enable wg-quick@${WG_INTERFACE} 2>/dev/null || true
+    print_success "WireGuard enabled on boot"
 
     # Add routes for VPN networks
     echo ""

@@ -330,7 +330,7 @@ get_next_available_interface() {
     # Find next available wgN interface
     local n=0
     while [[ -f "${WG_CONFIG_DIR}/wg${n}.conf" ]] || ip link show "wg${n}" &>/dev/null; do
-        ((n++))
+        ((n++)) || true
     done
     echo "wg${n}"
 }
@@ -351,7 +351,7 @@ get_next_available_port() {
 
     # Find next available port
     while [[ " ${used_ports[@]} " =~ " ${port} " ]] || ss -ulnp 2>/dev/null | grep -q ":${port} "; do
-        ((port++))
+        ((port++)) || true
     done
     echo "$port"
 }
@@ -372,7 +372,7 @@ get_next_available_network() {
 
     # Find next available 10.0.N.0/24
     while [[ " ${used_networks[@]} " =~ " 10.0.${n}.0/24 " ]]; do
-        ((n++))
+        ((n++)) || true
         # Prevent infinite loop, max 255 networks
         if [[ $n -gt 255 ]]; then
             echo "10.0.0.0/24"
@@ -586,7 +586,6 @@ prompt_user_config() {
     # Prompt for exit node mode (default: no)
     echo "Exit Node Mode: Route all client internet traffic through this VPN server"
     echo "  Enable this if you want clients to use this server as their internet gateway"
-    echo "  Default: no (clients only access VPN network)"
     echo "  Note: Requires proper firewall/NAT configuration"
     read -p "Enable exit node mode? (y/N): " -n 1 -r
     echo
@@ -1148,7 +1147,7 @@ start_services() {
         if [[ $attempt -lt $max_attempts ]]; then
             print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
         fi
-        ((attempt++))
+        ((attempt++)) || true
     done
 
     if [[ "$service_active" == false ]]; then
@@ -1217,7 +1216,7 @@ show_summary() {
             [[ ! -f "$conf" ]] && continue
             local iface=$(basename "$conf" .conf)
             if [[ "$iface" != "$WG_INTERFACE" ]] && systemctl is-active --quiet "wg-quick@${iface}"; then
-                ((other_servers++))
+                ((other_servers++)) || true
             fi
         done
     fi

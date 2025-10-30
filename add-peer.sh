@@ -14,9 +14,9 @@ set -euo pipefail
 WG_CONFIG_DIR="/etc/wireguard"
 
 # Server endpoint port for client configs (external/public port clients connect to)
-# Set this if your server uses port forwarding (e.g., external 51828 -> internal 51820)
+# Set this if your server uses port forwarding (e.g., external 51820 -> internal 51820)
 # Leave empty to auto-detect from server's ListenPort in config
-SERVER_PORT="51828"
+SERVER_PORT=""
 
 PEER_NAME=""              # Client or site name
 WG_INTERFACE=""
@@ -113,7 +113,7 @@ select_server() {
         local conf_ip=$(grep -E "^Address\s*=" "${WG_CONFIG_DIR}/${iface}.conf" | head -n1 | awk '{print $3}')
         local conf_port=$(grep -E "^ListenPort\s*=" "${WG_CONFIG_DIR}/${iface}.conf" | head -n1 | awk '{print $3}')
         printf "  ${BLUE}%d)${NC} %s - %s, Port %s\n" "$i" "$iface" "$conf_ip" "$conf_port"
-        ((i++))
+        ((i++)) || true
     done
 
     echo ""
@@ -560,7 +560,7 @@ add_route_for_remote_network() {
             print_info "Adding route: $network dev ${WG_INTERFACE}"
             if ip route add "$network" dev "${WG_INTERFACE}" 2>/dev/null; then
                 print_success "Route added: $network → ${WG_INTERFACE}"
-                ((routes_added++))
+                ((routes_added++)) || true
             else
                 print_warning "Failed to add route for $network (may already exist)"
             fi

@@ -186,6 +186,8 @@ get_server_info() {
         ip_addr=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' || echo "Unknown")
         port=$(grep -E "^ListenPort\s*=" "$config_file" | head -n1 | awk '{print $3}' || echo "Unknown")
         client_count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
+        client_count=$(echo "$client_count" | tr -d '[:space:]')
+        client_count=${client_count:-0}
     fi
 
     if systemctl is-active --quiet "wg-quick@${iface}" 2>/dev/null; then
@@ -235,7 +237,7 @@ select_servers_to_remove() {
         printf "  ${CYAN}%d)${NC} %s\n" "$i" "$iface"
         printf "      Status: %b  VPN IP: %s  Port: %s  Clients: %s\n" "$status_display" "$ip_addr" "$port" "$client_count"
         echo ""
-        ((i++))
+        ((i++)) || true
     done
 
     printf "  ${CYAN}all${NC}) Remove ALL servers\n"
@@ -307,7 +309,7 @@ remove_routes_for_interface() {
         if [[ -n "$network" ]]; then
             print_info "Removing route: $network dev $iface"
             if ip route del "$network" dev "$iface" 2>/dev/null; then
-                ((routes_removed++))
+                ((routes_removed++)) || true
                 log "Removed route: $network dev $iface"
             fi
         fi
@@ -348,18 +350,27 @@ remove_server_config() {
 
     # Count clients from server config
     if [[ -f "$config_file" ]]; then
-        client_count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
+        local client_only=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
         local site_count=$(grep -c "^# Site:" "$config_file" 2>/dev/null || echo "0")
-        if [[ $site_count -gt 0 ]]; then
-            client_count=$((client_count + site_count))
-        fi
+        # Strip any whitespace and ensure numeric
+        client_only=$(echo "$client_only" | tr -d '[:space:]')
+        site_count=$(echo "$site_count" | tr -d '[:space:]')
+        # Default to 0 if empty
+        client_only=${client_only:-0}
+        site_count=${site_count:-0}
+        client_count=$((client_only + site_count))
     fi
 
     # Count keys in directory
     if [[ -d "$keys_dir" ]]; then
-        server_key_count=$(find "$keys_dir" -maxdepth 1 -name "server-*key" 2>/dev/null | wc -l)
-        client_key_count=$(find "$keys_dir" -maxdepth 1 -name "*-privatekey" -o -name "*-publickey" 2>/dev/null | grep -v "server" | wc -l)
-        client_config_count=$(find "$keys_dir" -maxdepth 1 -name "*.conf" 2>/dev/null | wc -l)
+        server_key_count=$(find "$keys_dir" -maxdepth 1 -name "server-*key" 2>/dev/null | wc -l | tr -d '[:space:]')
+        client_key_count=$(find "$keys_dir" -maxdepth 1 -name "*-privatekey" -o -name "*-publickey" 2>/dev/null | grep -v "server" | wc -l | tr -d '[:space:]')
+        client_config_count=$(find "$keys_dir" -maxdepth 1 -name "*.conf" 2>/dev/null | wc -l | tr -d '[:space:]')
+
+        # Ensure numeric defaults
+        server_key_count=${server_key_count:-0}
+        client_key_count=${client_key_count:-0}
+        client_config_count=${client_config_count:-0}
 
         print_info "Found in ${iface}/ directory:"
         echo "  - ${client_count} peer(s) in server config"
@@ -378,7 +389,7 @@ remove_server_config() {
         else
             print_error "Failed to remove ${config_file}"
             log "ERROR: Failed to remove ${config_file}"
-            ((removal_errors++))
+            ((removal_errors++)) || true
         fi
     else
         print_info "No server config file found"
@@ -386,30 +397,66 @@ remove_server_config() {
 
     # Remove keys directory with all client configs and keys
     if [[ -d "$keys_dir" ]]; then
-        print_info "Removing keys directory with all client configs and keys..."
+        print_info "Removing keys directory: ${keys_dir}/"
 
-        # Try to remove directory
-        if rm -rf "$keys_dir" 2>/dev/null; then
+        # List what we're about to remove
+        if [[ $client_config_count -gt 0 ]] || [[ $client_key_count -gt 0 ]]; then
+            echo "  Removing:"
+            [[ $client_config_count -gt 0 ]] && echo "    - ${client_config_count} client config file(s)"
+            [[ $((client_key_count / 2)) -gt 0 ]] && echo "    - $((client_key_count / 2)) client keypair(s)"
+            [[ $server_key_count -gt 0 ]] && echo "    - ${server_key_count} server key file(s)"
+            echo ""
+        fi
+
+        # Force remove all files first to handle permission issues
+        print_info "Removing all files in directory..."
+        find "$keys_dir" -type f -exec chmod 600 {} \; 2>/dev/null || true
+        find "$keys_dir" -type f -delete 2>/dev/null || rm -f "$keys_dir"/* 2>/dev/null || true
+
+        # Remove hidden files (like .peer-defaults)
+        find "$keys_dir" -type f -name ".*" -delete 2>/dev/null || rm -f "$keys_dir"/.[^.]* 2>/dev/null || true
+
+        # Now remove the directory itself
+        if rmdir "$keys_dir" 2>/dev/null; then
             log "Removed keys directory: ${iface}/ (${client_config_count} configs, $((client_key_count / 2)) keypairs)"
             print_success "Removed all client configs and keys"
+        elif rm -rf "$keys_dir" 2>/dev/null; then
+            log "Removed keys directory (force): ${iface}/"
+            print_success "Removed all client configs and keys (forced)"
         else
             print_error "Failed to remove ${keys_dir}"
             log "ERROR: Failed to remove ${keys_dir}"
-            ((removal_errors++))
+            ((removal_errors++)) || true
         fi
 
         # Verify removal
         if [[ -d "$keys_dir" ]]; then
             print_warning "Directory still exists: ${keys_dir}"
-            echo "  Checking for remaining files..."
-            local remaining_files=$(find "$keys_dir" -type f 2>/dev/null | wc -l)
+            local remaining_files=$(find "$keys_dir" -type f 2>/dev/null | wc -l | tr -d '[:space:]')
+            remaining_files=${remaining_files:-0}
             if [[ $remaining_files -gt 0 ]]; then
                 print_error "${remaining_files} file(s) could not be removed"
                 echo "  Files that remain:"
-                find "$keys_dir" -type f 2>/dev/null | head -5 | while read -r file; do
-                    echo "    - $(basename "$file")"
+                find "$keys_dir" -type f 2>/dev/null | head -10 | while read -r file; do
+                    echo "    - $(basename "$file") ($(stat -c '%a' "$file" 2>/dev/null || echo "unknown perms"))"
                 done
-                ((removal_errors++))
+                echo ""
+                print_warning "Attempting force removal with elevated permissions..."
+                chmod -R 777 "$keys_dir" 2>/dev/null || true
+                rm -rf "$keys_dir" 2>/dev/null || true
+
+                if [[ -d "$keys_dir" ]]; then
+                    print_error "Force removal failed - manual intervention required"
+                    ((removal_errors++)) || true
+                else
+                    print_success "Force removal successful"
+                fi
+            else
+                # Directory exists but is empty, remove it
+                rmdir "$keys_dir" 2>/dev/null || rm -rf "$keys_dir" 2>/dev/null || true
+                if [[ ! -d "$keys_dir" ]]; then
+                    print_success "Removed empty directory"
+                fi
             fi
         fi
     else
@@ -446,9 +493,9 @@ remove_selected_servers() {
         remove_wireguard_interface "$iface"
 
         if remove_server_config "$iface"; then
-            ((successful_removals++))
+            ((successful_removals++)) || true
         else
-            ((total_errors++))
+            ((total_errors++)) || true
         fi
 
         echo ""
@@ -481,15 +528,22 @@ remove_all_servers() {
 
     if [[ -d "$WG_CONFIG_DIR" ]]; then
         # Count all client configs
-        total_configs=$(find "$WG_CONFIG_DIR" -name "*.conf" -type f 2>/dev/null | wc -l)
+        total_configs=$(find "$WG_CONFIG_DIR" -name "*.conf" -type f 2>/dev/null | wc -l | tr -d '[:space:]')
+        total_configs=${total_configs:-0}
         # Count all keys
-        total_keys=$(find "$WG_CONFIG_DIR" -name "*key" -type f 2>/dev/null | wc -l)
+        total_keys=$(find "$WG_CONFIG_DIR" -name "*key" -type f 2>/dev/null | wc -l | tr -d '[:space:]')
+        total_keys=${total_keys:-0}
         # Count all clients from all server configs
         for iface in "${all_servers[@]}"; do
             local config_file="${WG_CONFIG_DIR}/${iface}.conf"
             if [[ -f "$config_file" ]]; then
                 local count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
                 local sites=$(grep -c "^# Site:" "$config_file" 2>/dev/null || echo "0")
+                # Strip whitespace
+                count=$(echo "$count" | tr -d '[:space:]')
+                sites=$(echo "$sites" | tr -d '[:space:]')
+                count=${count:-0}
+                sites=${sites:-0}
                 total_clients=$((total_clients + count + sites))
             fi
         done
@@ -543,18 +597,19 @@ remove_all_servers() {
         else
             print_error "Failed to remove some config files"
             log "ERROR: Failed to remove some files from ${WG_CONFIG_DIR}"
-            ((removal_errors++))
+            ((removal_errors++)) || true
         fi
 
         # Verify removal
-        local remaining_files=$(find "$WG_CONFIG_DIR" -type f 2>/dev/null | wc -l)
+        local remaining_files=$(find "$WG_CONFIG_DIR" -type f 2>/dev/null | wc -l | tr -d '[:space:]')
+        remaining_files=${remaining_files:-0}
         if [[ $remaining_files -gt 0 ]]; then
             print_warning "${remaining_files} file(s) could not be removed"
             echo "  Remaining files:"
             find "$WG_CONFIG_DIR" -type f 2>/dev/null | head -5 | while read -r file; do
                 echo "    - ${file}"
             done
-            ((removal_errors++))
+            ((removal_errors++)) || true
         fi
 
         # Try to remove directory
