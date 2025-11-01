@@ -68,9 +68,42 @@ get_next_available_interface() {
     # Find next available wgN interface
     local n=0
     while [[ -f "${WG_CONFIG_DIR}/wg${n}.conf" ]] || ip link show "wg${n}" &>/dev/null; do
-        ((n++))
+        ((n++)) || true
     done
     echo "wg${n}"
+}
+
+list_existing_wireguard_sites() {
+    local found_sites=0
+
+    if [[ -d "$WG_CONFIG_DIR" ]]; then
+        # Use nullglob to handle case where no .conf files exist
+        shopt -s nullglob
+        local conf_files=("$WG_CONFIG_DIR"/*.conf)
+        shopt -u nullglob
+
+        for conf in "${conf_files[@]}"; do
+            [[ ! -f "$conf" ]] && continue
+
+            found_sites=1
+            local iface_name=$(basename "$conf" .conf)
+            local conf_ip=$(grep -E "^Address\s*=" "$conf" 2>/dev/null | head -n1 | awk '{print $3}' || echo "Unknown")
+            local endpoint=$(grep -E "^Endpoint\s*=" "$conf" 2>/dev/null | head -n1 | awk '{print $3}' || echo "Unknown")
+            local is_running=""
+
+            if systemctl is-active --quiet "wg-quick@${iface_name}"; then
+                is_running="${GREEN}[RUNNING]${NC}"
+            else
+                is_running="${YELLOW}[STOPPED]${NC}"
+            fi
+
+            echo -e "  - ${BLUE}${iface_name}${NC} $is_running - VPN IP: $conf_ip, Endpoint: $endpoint"
+        done
+    fi
+
+    if [[ $found_sites -eq 0 ]]; then
+        echo "  None found"
+    fi
 }
 
 remove_existing_wireguard() {
@@ -459,98 +492,195 @@ full_reset_client() {
     echo ""
 }
 
-check_existing_wireguard() {
-    local config_exists=false
-    local interface_running=false
-    local service_exists=false
+select_or_create_interface() {
+    # Check if there are ANY existing WireGuard sites
+    local has_existing_sites=false
 
-    # Check if WireGuard config already exists
-    if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
-        config_exists=true
+    if [[ -d "$WG_CONFIG_DIR" ]]; then
+        shopt -s nullglob
+        local conf_files=("$WG_CONFIG_DIR"/*.conf)
+        shopt -u nullglob
+
+        if [[ ${#conf_files[@]} -gt 0 ]]; then
+            has_existing_sites=true
+        fi
     fi
 
-    # Check if interface is already running
-    if ip link show "${WG_INTERFACE}" &>/dev/null; then
-        interface_running=true
+    # If user already specified interface via command line, validate it
+    if [[ -n "$WG_INTERFACE" ]]; then
+        print_info "Using specified interface: ${WG_INTERFACE}"
+
+        # Check if this interface already exists
+        if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]] || ip link show "${WG_INTERFACE}" &>/dev/null; then
+            print_warning "Interface '${WG_INTERFACE}' already exists"
+
+            # Show details and ask for confirmation
+            if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
+                local vpn_ip=$(grep -E "^Address\s*=" "/etc/wireguard/${WG_INTERFACE}.conf" 2>/dev/null | awk '{print $3}' || echo "Unknown")
+                local endpoint=$(grep -E "^Endpoint\s*=" "/etc/wireguard/${WG_INTERFACE}.conf" 2>/dev/null | awk '{print $3}' || echo "Unknown")
+                echo "  VPN IP: ${vpn_ip}"
+                echo "  Endpoint: ${endpoint}"
+            fi
+
+            echo ""
+            read -p "Replace existing ${WG_INTERFACE} config? (y/N): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                error_exit "Setup cancelled. Use --interface to specify a different interface."
+            fi
+
+            # Stop and backup existing config
+            if ip link show "${WG_INTERFACE}" &>/dev/null; then
+                print_info "Stopping interface..."
+                wg-quick down "${WG_INTERFACE}" 2>/dev/null || true
+                sleep 1
+            fi
+
+            if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
+                local backup_file="/etc/wireguard/${WG_INTERFACE}.conf.backup.$(date +%Y%m%d_%H%M%S)"
+                cp "/etc/wireguard/${WG_INTERFACE}.conf" "$backup_file"
+                print_success "Old config backed up to: $backup_file"
+            fi
+        fi
+
+        return
     fi
 
-    # Check if systemd service exists
-    if systemctl list-unit-files | grep -q "wg-quick@${WG_INTERFACE}.service"; then
-        service_exists=true
-    fi
-
-    # If any exists, prompt user to remove or exit
-    if [[ "$config_exists" == true ]] || [[ "$interface_running" == true ]] || [[ "$service_exists" == true ]]; then
+    # No interface specified - show menu
+    if [[ "$has_existing_sites" == true ]]; then
         echo ""
-        print_warning "WireGuard site setup already exists for interface '${WG_INTERFACE}'"
+        print_info "Existing WireGuard sites on this system:"
+        list_existing_wireguard_sites
         echo ""
 
-        if [[ "$service_exists" == true ]]; then
-            print_info "Systemd service exists: wg-quick@${WG_INTERFACE}.service"
-            local service_status=$(systemctl is-active "wg-quick@${WG_INTERFACE}" 2>/dev/null || echo "inactive")
-            local service_enabled=$(systemctl is-enabled "wg-quick@${WG_INTERFACE}" 2>/dev/null || echo "disabled")
-            echo "  Status: ${service_status}"
-            echo "  Enabled: ${service_enabled}"
-            echo ""
-        fi
+        # Get next available interface
+        local suggested_interface=$(get_next_available_interface)
 
-        if [[ "$interface_running" == true ]]; then
-            print_info "Interface is currently running:"
-            wg show "${WG_INTERFACE}" 2>/dev/null || true
-            echo ""
-        fi
-
-        if [[ "$config_exists" == true ]]; then
-            print_info "Configuration file: /etc/wireguard/${WG_INTERFACE}.conf"
-            echo ""
-        fi
-
-        echo "Options:"
-        echo "  1. Replace config file only (keep same interface)"
-        echo "  2. Use a different interface name (create new: wg1, wg2, etc.)"
-        echo "  3. Remove existing setup completely and start fresh"
-        echo "  4. Cancel and exit"
+        echo "=========================================="
+        echo "What would you like to do?"
+        echo "=========================================="
         echo ""
-        read -p "Choose an option [1/2/3/4] (default: 4): " -n 1 -r
+        echo "  ${BLUE}1)${NC} Replace an existing site's configuration"
+        echo "     - Select which interface to replace (wg0, wg1, etc.)"
+        echo "     - Backs up old config"
+        echo "     - Installs new config"
+        echo ""
+        echo "  ${BLUE}2)${NC} Create new site with different interface (suggested: ${suggested_interface})"
+        echo "     - Keeps all existing sites running"
+        echo "     - Creates new independent site"
+        echo ""
+        echo "  ${BLUE}3)${NC} Remove an existing site completely first"
+        echo "     - Select which site to remove"
+        echo "     - Then create new site"
+        echo ""
+        echo "  ${BLUE}4)${NC} Cancel and exit (keep everything as-is)"
+        echo ""
+        read -p "Choose an option (1/2/3/4) [default: 2]: " -n 1 -r
         echo
         echo ""
 
         case "$REPLY" in
             1)
-                print_info "Replacing configuration file only..."
+                # Replace existing site
+                echo "Available interfaces:"
+                local i=1
+                local interfaces=()
 
-                # Stop interface if running
+                shopt -s nullglob
+                for conf in "$WG_CONFIG_DIR"/*.conf; do
+                    local iface=$(basename "$conf" .conf)
+                    interfaces+=("$iface")
+
+                    local vpn_ip=$(grep -E "^Address\s*=" "$conf" 2>/dev/null | awk '{print $3}' || echo "Unknown")
+                    local endpoint=$(grep -E "^Endpoint\s*=" "$conf" 2>/dev/null | awk '{print $3}' || echo "Unknown")
+                    local is_running=""
+
+                    if systemctl is-active --quiet "wg-quick@${iface}"; then
+                        is_running="${GREEN}[RUNNING]${NC}"
+                    else
+                        is_running="${YELLOW}[STOPPED]${NC}"
+                    fi
+
+                    echo -e "  ${BLUE}${i})${NC} ${iface} ${is_running} - ${vpn_ip}, ${endpoint}"
+                    ((i++)) || true
+                done
+                shopt -u nullglob
+
+                echo ""
+                read -p "Select interface to replace (1-${#interfaces[@]}): " selection
+
+                if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#interfaces[@]}" ]; then
+                    error_exit "Invalid selection"
+                fi
+
+                WG_INTERFACE="${interfaces[$((selection-1))]}"
+                print_info "Selected: ${WG_INTERFACE}"
+                echo ""
+
+                # Stop and backup
                 if ip link show "${WG_INTERFACE}" &>/dev/null; then
                     print_info "Stopping interface..."
                     wg-quick down "${WG_INTERFACE}" 2>/dev/null || true
                     sleep 1
                 fi
 
-                # Backup old config
                 if [[ -f "/etc/wireguard/${WG_INTERFACE}.conf" ]]; then
                     local backup_file="/etc/wireguard/${WG_INTERFACE}.conf.backup.$(date +%Y%m%d_%H%M%S)"
                     cp "/etc/wireguard/${WG_INTERFACE}.conf" "$backup_file"
                     print_success "Old config backed up to: $backup_file"
                 fi
-
-                print_success "Ready to replace config file"
                 ;;
-            2)
-                echo "Use the --interface option to specify a different name:"
-                echo "  sudo $0 --interface wg1 --config <config-file>"
-                echo ""
-                exit 0
+            2|"")
+                # Create new site
+                WG_INTERFACE="$suggested_interface"
+                print_info "Creating new site with interface: ${WG_INTERFACE}"
                 ;;
             3)
+                # Remove existing first
+                echo "Available interfaces to remove:"
+                local i=1
+                local interfaces=()
+
+                shopt -s nullglob
+                for conf in "$WG_CONFIG_DIR"/*.conf; do
+                    local iface=$(basename "$conf" .conf)
+                    interfaces+=("$iface")
+
+                    local vpn_ip=$(grep -E "^Address\s*=" "$conf" 2>/dev/null | awk '{print $3}' || echo "Unknown")
+                    local is_running=""
+
+                    if systemctl is-active --quiet "wg-quick@${iface}"; then
+                        is_running="${GREEN}[RUNNING]${NC}"
+                    else
+                        is_running="${YELLOW}[STOPPED]${NC}"
+                    fi
+
+                    echo -e "  ${BLUE}${i})${NC} ${iface} ${is_running} - ${vpn_ip}"
+                    ((i++)) || true
+                done
+                shopt -u nullglob
+
+                echo ""
+                read -p "Select interface to remove (1-${#interfaces[@]}): " selection
+
+                if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#interfaces[@]}" ]; then
+                    error_exit "Invalid selection"
+                fi
+
+                WG_INTERFACE="${interfaces[$((selection-1))]}"
+                print_info "Removing: ${WG_INTERFACE}"
+                echo ""
+
                 remove_existing_wireguard
+
+                # After removal, use the same interface name for new setup
+                print_info "Will create new site with interface: ${WG_INTERFACE}"
                 ;;
-            4|"")
+            4)
                 print_info "Setup cancelled. Existing configuration preserved."
                 echo ""
-                echo "To remove manually:"
-                echo "  sudo wg-quick down ${WG_INTERFACE}"
-                echo "  sudo systemctl disable wg-quick@${WG_INTERFACE}"
-                echo "  sudo rm /etc/wireguard/${WG_INTERFACE}.conf"
+                echo "Current sites:"
+                list_existing_wireguard_sites
                 echo ""
                 exit 0
                 ;;
@@ -559,9 +689,13 @@ check_existing_wireguard() {
                 exit 1
                 ;;
         esac
+    else
+        # No existing sites - create first one
+        WG_INTERFACE="wg0"
+        print_success "No existing sites found. Creating first site with interface: ${WG_INTERFACE}"
     fi
 
-    print_success "No conflicting WireGuard setup found"
+    echo ""
 }
 
 detect_lan_interface() {
@@ -832,35 +966,117 @@ configure_firewall() {
 configure_firewalld() {
     print_info "Configuring firewalld..."
 
-    # Add WireGuard interface to trusted zone
-    firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
+    # Add WireGuard interface to trusted zone (allows all VPN traffic)
+    # Check if interface is already in another zone
+    local current_zone=$(firewall-cmd --get-zone-of-interface=${WG_INTERFACE} 2>/dev/null || echo "")
+    if [[ -n "$current_zone" && "$current_zone" != "trusted" ]]; then
+        echo ""
+        print_error "Interface ${WG_INTERFACE} is already in zone '${current_zone}'"
+        print_warning "For site-to-site VPN, ${WG_INTERFACE} must be in the 'trusted' zone"
+        echo ""
+        echo "To fix this, run:"
+        echo "  sudo firewall-cmd --permanent --zone=${current_zone} --remove-interface=${WG_INTERFACE}"
+        echo "  sudo firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE}"
+        echo "  sudo firewall-cmd --reload"
+        echo ""
+        error_exit "Fix the zone conflict and re-run this script"
+    fi
+
+    # Add to trusted zone
+    print_info "Adding ${WG_INTERFACE} to trusted zone"
+    if ! firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null; then
+        print_warning "Failed to add ${WG_INTERFACE} to trusted zone (may already be added)"
+    fi
 
     # IMPORTANT: Do NOT masquerade on WG interface for site-to-site
     # The main server needs to see the real source IP of the remote LAN
     # For site-to-site VPN, we do NOT enable masquerade at all
     # This allows proper routing between Site A LAN <-> VPN <-> Site B LAN
 
-    # Add forwarding rules (allow bidirectional traffic)
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT
+    # Add FORWARD rules for LAN <-> VPN traffic
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT 2>/dev/null || true
+
+    # Add FORWARD rules for peer-to-peer VPN traffic (essential for site-to-site)
+    # Allow traffic between VPN peers through the tunnel
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+
+    # NEW: Add firewalld policy for zone-to-zone forwarding (required for firewalld 0.9.0+)
+    # Policies control traffic flow between zones in newer firewalld versions
+    echo ""
+    print_info "Configuring firewall zones for site-to-site VPN..."
+    print_info "  - WireGuard interface (${WG_INTERFACE}) → 'trusted' zone"
+    print_info "  - LAN interface (${LAN_INTERFACE}) → auto-detected zone"
+    print_info "  - Default: 'public' zone (recommended for VPN)"
+    echo ""
+
+    # Detect the zone of the LAN interface
+    local lan_zone=$(firewall-cmd --get-zone-of-interface=${LAN_INTERFACE} 2>/dev/null)
+
+    # For VPN purposes, we simplify to use only public and trusted zones
+    # Ignore internal zone and other zones, treat as public for consistency
+    if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "internal" ]]; then
+        lan_zone="public"
+        print_success "Auto-selected zone 'public' for ${LAN_INTERFACE} (default for VPN)"
+    else
+        print_success "Detected zone '${lan_zone}' for ${LAN_INTERFACE}"
+    fi
+
+    # Check if firewalld supports policies (version 0.9.0+)
+    if firewall-cmd --get-policies &>/dev/null; then
+        print_info "Detected firewalld with policy support (0.9.0+)"
+
+        # Create policy name based on zones
+        local policy_name="${lan_zone}-to-trusted"
+
+        # Remove existing policy if it exists (for clean reconfiguration)
+        firewall-cmd --permanent --delete-policy=${policy_name} 2>/dev/null || true
+
+        # Create new policy for LAN zone -> trusted zone (WireGuard)
+        print_info "Creating firewalld policy: ${policy_name}"
+        firewall-cmd --permanent --new-policy=${policy_name} 2>/dev/null || true
+        firewall-cmd --permanent --policy=${policy_name} --set-target=ACCEPT
+        firewall-cmd --permanent --policy=${policy_name} --add-ingress-zone=${lan_zone}
+        firewall-cmd --permanent --policy=${policy_name} --add-egress-zone=trusted
+
+        # Create reverse policy for trusted zone -> LAN zone (return traffic)
+        local reverse_policy_name="trusted-to-${lan_zone}"
+        firewall-cmd --permanent --delete-policy=${reverse_policy_name} 2>/dev/null || true
+        firewall-cmd --permanent --new-policy=${reverse_policy_name} 2>/dev/null || true
+        firewall-cmd --permanent --policy=${reverse_policy_name} --set-target=ACCEPT
+        firewall-cmd --permanent --policy=${reverse_policy_name} --add-ingress-zone=trusted
+        firewall-cmd --permanent --policy=${reverse_policy_name} --add-egress-zone=${lan_zone}
+
+        print_success "Firewalld policies created for zone-to-zone forwarding"
+        print_info "  - Policy: ${policy_name} (${lan_zone} → trusted)"
+        print_info "  - Policy: ${reverse_policy_name} (trusted → ${lan_zone})"
+    else
+        print_info "Using direct rules only (older firewalld version)"
+    fi
 
     # Reload firewall
     firewall-cmd --reload
 
     print_success "Firewalld configured (no masquerade - proper site-to-site routing)"
+    print_info "  - ${WG_INTERFACE} added to trusted zone"
+    print_info "  - ${LAN_INTERFACE} zone: ${lan_zone}"
+    print_info "  - FORWARD rules: ${LAN_INTERFACE} <-> ${WG_INTERFACE}"
+    print_info "  - FORWARD rules: VPN peer-to-peer traffic enabled"
 }
 
 configure_ufw() {
     print_info "Configuring ufw..."
 
-    # Enable forwarding in ufw config
+    # Enable forwarding in ufw config (essential for site-to-site VPN)
     sed -i 's/^DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
 
     # IMPORTANT: Do NOT add MASQUERADE on WG interface for site-to-site
     # The main server needs to see the real source IP of the remote LAN
     # No NAT rules needed in before.rules
 
-    # Allow forwarding between interfaces
+    # Allow traffic on WireGuard interface (in/out)
     ufw allow in on ${WG_INTERFACE} 2>/dev/null || true
     ufw allow out on ${WG_INTERFACE} 2>/dev/null || true
 
@@ -868,6 +1084,8 @@ configure_ufw() {
     ufw reload 2>/dev/null || true
 
     print_success "UFW configured (no masquerade on VPN interface)"
+    print_info "  - Forwarding enabled for site-to-site VPN"
+    print_info "  - Traffic allowed on ${WG_INTERFACE}"
 }
 
 configure_iptables() {
@@ -877,12 +1095,19 @@ configure_iptables() {
     # The main server needs to see the real source IP of the remote LAN
     # Only add forwarding rules (no NAT/MASQUERADE on VPN traffic)
 
-    # Add forwarding rules
+    # Add FORWARD rules for LAN <-> VPN traffic
     iptables -C FORWARD -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || \
         iptables -A FORWARD -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT
 
     iptables -C FORWARD -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT 2>/dev/null || \
         iptables -A FORWARD -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT
+
+    # Add FORWARD rules for peer-to-peer VPN traffic (essential for site-to-site)
+    iptables -C FORWARD -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || \
+        iptables -A FORWARD -i ${WG_INTERFACE} -j ACCEPT
+
+    iptables -C FORWARD -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || \
+        iptables -A FORWARD -o ${WG_INTERFACE} -j ACCEPT
 
     # Save rules (distribution-specific)
     if [[ -f /etc/os-release ]]; then
@@ -908,6 +1133,8 @@ configure_iptables() {
     fi
 
     print_success "Iptables configured (no masquerade on VPN interface)"
+    print_info "  - FORWARD rules: ${LAN_INTERFACE} <-> ${WG_INTERFACE}"
+    print_info "  - FORWARD rules: VPN peer-to-peer traffic enabled"
 }
 
 install_wireguard_config() {
@@ -1288,14 +1515,13 @@ main() {
     parse_arguments "$@"
     check_root
 
-    # Set default interface if not specified
-    if [[ -z "$WG_INTERFACE" ]]; then
-        WG_INTERFACE=$(get_next_available_interface)
-        print_info "Auto-detected next available interface: ${WG_INTERFACE}"
-    fi
-
-    # Handle fix masquerade mode
+    # Handle fix masquerade mode (needs interface)
     if [[ "$FIX_MASQUERADE_MODE" == true ]]; then
+        # Set default interface if not specified
+        if [[ -z "$WG_INTERFACE" ]]; then
+            WG_INTERFACE=$(get_next_available_interface)
+        fi
+
         echo "=========================================="
         echo "  Fix Masquerade Configuration"
         echo "=========================================="
@@ -1309,8 +1535,13 @@ main() {
         exit 0
     fi
 
-    # Handle reset mode
+    # Handle reset mode (needs interface)
     if [[ "$RESET_MODE" == true ]]; then
+        # Set default interface if not specified
+        if [[ -z "$WG_INTERFACE" ]]; then
+            WG_INTERFACE=$(get_next_available_interface)
+        fi
+
         full_reset_client
         exit 0
     fi
@@ -1321,21 +1552,30 @@ main() {
     echo "=========================================="
     echo ""
 
-    check_existing_wireguard
+    # Step 1: Get config file first (required input)
     prompt_config
 
+    # Step 2: Select or create interface (handles existing sites intelligently)
+    select_or_create_interface
+
+    # Step 3: Final confirmation
     echo ""
-    print_warning "This will configure this system as a WireGuard site"
-    echo "  Config file: ${WG_CONFIG_FILE}"
-    echo "  LAN interface: ${LAN_INTERFACE}"
+    echo "=========================================="
+    print_warning "Setup Summary"
+    echo "=========================================="
+    echo ""
+    echo "  Config file:         ${WG_CONFIG_FILE}"
     echo "  WireGuard interface: ${WG_INTERFACE}"
+    echo "  LAN interface:       ${LAN_INTERFACE}"
+    echo "  VPN networks:        ${VPN_NETWORKS}"
     echo ""
-    read -p "Continue? (y/N): " -n 1 -r
+    read -p "Continue with setup? (Y/n): " -n 1 -r
     echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
         error_exit "Setup cancelled"
     fi
 
+    echo ""
     install_wireguard
     enable_ip_forwarding
     install_wireguard_config "$WG_CONFIG_FILE"

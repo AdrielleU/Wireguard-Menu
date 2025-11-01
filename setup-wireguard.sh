@@ -959,20 +959,114 @@ configure_firewall() {
 configure_firewalld() {
     print_info "Configuring firewalld..."
 
-    # Add WireGuard port
-    firewall-cmd --permanent --add-port=${WG_PORT}/udp || error_exit "Failed to add WireGuard port"
+    # Add WireGuard port to public zone (for incoming VPN connections)
+    firewall-cmd --permanent --zone=public --add-port=${WG_PORT}/udp || error_exit "Failed to add WireGuard port"
 
-    # Enable masquerading
-    firewall-cmd --permanent --add-masquerade || error_exit "Failed to enable masquerading"
+    # Add WireGuard interface to trusted zone (allows all VPN traffic)
+    # Check if interface is already in another zone
+    local current_zone=$(firewall-cmd --get-zone-of-interface=${WG_INTERFACE} 2>/dev/null || echo "")
+    if [[ -n "$current_zone" && "$current_zone" != "trusted" ]]; then
+        echo ""
+        print_error "Interface ${WG_INTERFACE} is already in zone '${current_zone}'"
+        print_warning "WireGuard interface should be in the 'trusted' zone"
+        echo ""
+        echo "To fix this, run:"
+        echo "  sudo firewall-cmd --permanent --zone=${current_zone} --remove-interface=${WG_INTERFACE}"
+        echo "  sudo firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE}"
+        echo "  sudo firewall-cmd --reload"
+        echo ""
+        error_exit "Fix the zone conflict and re-run this script"
+    fi
 
-    # Add WireGuard interface to internal zone
-    firewall-cmd --permanent --zone=internal --add-interface=${WG_INTERFACE} 2>/dev/null || true
+    # Add to trusted zone
+    print_info "Adding ${WG_INTERFACE} to trusted zone"
+    if ! firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null; then
+        print_warning "Failed to add ${WG_INTERFACE} to trusted zone (may already be added)"
+    fi
+
+    # Enable masquerading for exit node functionality
+    if [[ "$EXIT_NODE" == true ]]; then
+        firewall-cmd --permanent --zone=public --add-masquerade || error_exit "Failed to enable masquerading"
+        print_info "Masquerading enabled for exit node mode"
+    fi
+
+    # Add FORWARD rules for site-to-site VPN (peer-to-peer communication)
+    # Allow traffic between VPN peers (essential for site-to-site)
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+
+    # Detect LAN interface and add forwarding rules for LAN <-> VPN traffic
+    local lan_interface=$(ip route | grep default | awk '{print $5}' | head -1)
+    if [[ -n "$lan_interface" ]]; then
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${lan_interface} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${lan_interface} -j ACCEPT 2>/dev/null || true
+        print_info "Added FORWARD rules for LAN interface: ${lan_interface}"
+    fi
+
+    # NEW: Add firewalld policy for zone-to-zone forwarding (required for firewalld 0.9.0+)
+    # Policies control traffic flow between zones in newer firewalld versions
+    if firewall-cmd --get-policies &>/dev/null; then
+        print_info "Detected firewalld with policy support (0.9.0+)"
+
+        echo ""
+        print_info "Configuring firewall zones for VPN..."
+        print_info "  - WireGuard interface (${WG_INTERFACE}) → 'trusted' zone"
+        print_info "  - LAN interface (${lan_interface}) → auto-detected zone"
+        print_info "  - Default: 'public' zone (recommended for VPN)"
+        echo ""
+
+        # Detect the zone of the LAN interface
+        local lan_zone=$(firewall-cmd --get-zone-of-interface=${lan_interface} 2>/dev/null)
+
+        # For VPN purposes, we simplify to use only public and trusted zones
+        # Ignore internal zone and other zones, treat as public for consistency
+        if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "internal" ]]; then
+            lan_zone="public"
+            print_success "Auto-selected zone 'public' for ${lan_interface} (default for VPN)"
+        else
+            print_success "Detected zone '${lan_zone}' for ${lan_interface}"
+        fi
+
+        # Create policy name based on zones
+        local policy_name="${lan_zone}-to-trusted"
+
+        # Remove existing policy if it exists (for clean reconfiguration)
+        firewall-cmd --permanent --delete-policy=${policy_name} 2>/dev/null || true
+
+        # Create new policy for LAN zone -> trusted zone (WireGuard)
+        print_info "Creating firewalld policy: ${policy_name}"
+        firewall-cmd --permanent --new-policy=${policy_name} 2>/dev/null || true
+        firewall-cmd --permanent --policy=${policy_name} --set-target=ACCEPT
+        firewall-cmd --permanent --policy=${policy_name} --add-ingress-zone=${lan_zone}
+        firewall-cmd --permanent --policy=${policy_name} --add-egress-zone=trusted
+
+        # Create reverse policy for trusted zone -> LAN zone (return traffic)
+        local reverse_policy_name="trusted-to-${lan_zone}"
+        firewall-cmd --permanent --delete-policy=${reverse_policy_name} 2>/dev/null || true
+        firewall-cmd --permanent --new-policy=${reverse_policy_name} 2>/dev/null || true
+        firewall-cmd --permanent --policy=${reverse_policy_name} --set-target=ACCEPT
+        firewall-cmd --permanent --policy=${reverse_policy_name} --add-ingress-zone=trusted
+        firewall-cmd --permanent --policy=${reverse_policy_name} --add-egress-zone=${lan_zone}
+
+        print_success "Firewalld policies created for zone-to-zone forwarding"
+        print_info "  - Policy: ${policy_name} (${lan_zone} → trusted)"
+        print_info "  - Policy: ${reverse_policy_name} (trusted → ${lan_zone})"
+    else
+        print_info "Using direct rules only (older firewalld version)"
+    fi
 
     # Reload firewall
     firewall-cmd --reload || error_exit "Failed to reload firewalld"
 
     print_success "firewalld configured"
-    log "firewalld configured with port ${WG_PORT}/udp"
+    print_info "  - Port ${WG_PORT}/udp opened"
+    print_info "  - ${WG_INTERFACE} added to trusted zone"
+    print_info "  - FORWARD rules configured for site-to-site VPN"
+    if [[ -n "$lan_interface" ]]; then
+        print_info "  - LAN interface ${lan_interface} forwarding enabled"
+    fi
+    log "firewalld configured with port ${WG_PORT}/udp and FORWARD rules"
 }
 
 configure_ufw() {
@@ -981,38 +1075,61 @@ configure_ufw() {
     # Allow WireGuard port
     ufw allow ${WG_PORT}/udp || error_exit "Failed to add WireGuard port"
 
-    # Enable forwarding in ufw
+    # Enable forwarding in ufw (essential for site-to-site VPN)
     sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
 
+    # Allow traffic on WireGuard interface
+    ufw allow in on ${WG_INTERFACE} 2>/dev/null || true
+    ufw allow out on ${WG_INTERFACE} 2>/dev/null || true
+
+    # Reload ufw
+    ufw reload 2>/dev/null || true
+
     print_success "ufw configured"
-    log "ufw configured with port ${WG_PORT}/udp"
+    print_info "  - Port ${WG_PORT}/udp opened"
+    print_info "  - Forwarding enabled for site-to-site VPN"
+    log "ufw configured with port ${WG_PORT}/udp and forwarding enabled"
 }
 
 configure_iptables() {
     print_info "Configuring iptables..."
 
-    # Apply iptables rules directly
+    # Allow FORWARD traffic for VPN (essential for site-to-site)
     iptables -A FORWARD -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
     iptables -A FORWARD -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-    iptables -t nat -A POSTROUTING -s ${SERVER_NETWORK} -o ${PRIMARY_INTERFACE} -j MASQUERADE 2>/dev/null || true
+
+    # Enable masquerading only if exit node mode is enabled
+    if [[ "$EXIT_NODE" == true ]]; then
+        iptables -t nat -A POSTROUTING -s ${SERVER_NETWORK} -o ${PRIMARY_INTERFACE} -j MASQUERADE 2>/dev/null || true
+        print_info "Masquerading enabled for exit node mode"
+    fi
 
     print_success "iptables configured"
+    print_info "  - FORWARD rules configured for site-to-site VPN"
     log "iptables rules applied for ${WG_INTERFACE}"
 }
 
 configure_nftables() {
     print_info "Configuring nftables..."
 
-    # Apply nftables rules directly
+    # Create table and chain for WireGuard
     nft add table inet wireguard 2>/dev/null || true
     nft add chain inet wireguard forward { type filter hook forward priority 0 \; policy accept \; } 2>/dev/null || true
+
+    # Allow FORWARD traffic for VPN (essential for site-to-site)
     nft add rule inet wireguard forward iifname "${WG_INTERFACE}" accept 2>/dev/null || true
     nft add rule inet wireguard forward oifname "${WG_INTERFACE}" accept 2>/dev/null || true
-    nft add table ip nat 2>/dev/null || true
-    nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
-    nft add rule ip nat postrouting ip saddr ${SERVER_NETWORK} oifname "${PRIMARY_INTERFACE}" masquerade 2>/dev/null || true
+
+    # Enable masquerading only if exit node mode is enabled
+    if [[ "$EXIT_NODE" == true ]]; then
+        nft add table ip nat 2>/dev/null || true
+        nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
+        nft add rule ip nat postrouting ip saddr ${SERVER_NETWORK} oifname "${PRIMARY_INTERFACE}" masquerade 2>/dev/null || true
+        print_info "Masquerading enabled for exit node mode"
+    fi
 
     print_success "nftables configured"
+    print_info "  - FORWARD rules configured for site-to-site VPN"
     log "nftables rules applied for ${WG_INTERFACE}"
 }
 
