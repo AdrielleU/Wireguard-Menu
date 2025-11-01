@@ -988,6 +988,14 @@ configure_firewalld() {
         print_warning "Failed to add ${WG_INTERFACE} to trusted zone (may already be added)"
     fi
 
+    # Enable forwarding on trusted zone (visible in firewall-cmd --list-all)
+    print_info "Enabling forwarding on trusted zone"
+    if firewall-cmd --permanent --zone=trusted --add-forward 2>/dev/null; then
+        print_success "Zone forwarding enabled (firewalld 0.9.0+)"
+    else
+        print_info "Zone forwarding not supported (using direct rules instead)"
+    fi
+
     # IMPORTANT: Do NOT masquerade on WG interface for site-to-site
     # The main server needs to see the real source IP of the remote LAN
     # For site-to-site VPN, we do NOT enable masquerade at all
@@ -1022,6 +1030,14 @@ configure_firewalld() {
         print_success "Auto-selected zone 'public' for ${LAN_INTERFACE} (default for VPN)"
     else
         print_success "Detected zone '${lan_zone}' for ${LAN_INTERFACE}"
+    fi
+
+    # Enable forwarding on LAN zone (visible in firewall-cmd --list-all)
+    print_info "Enabling forwarding on ${lan_zone} zone"
+    if firewall-cmd --permanent --zone=${lan_zone} --add-forward 2>/dev/null; then
+        print_success "Zone forwarding enabled on ${lan_zone}"
+    else
+        print_info "Zone forwarding not supported (using direct rules instead)"
     fi
 
     # Check if firewalld supports policies (version 0.9.0+)
@@ -1062,6 +1078,7 @@ configure_firewalld() {
     print_success "Firewalld configured (no masquerade - proper site-to-site routing)"
     print_info "  - ${WG_INTERFACE} added to trusted zone"
     print_info "  - ${LAN_INTERFACE} zone: ${lan_zone}"
+    print_info "  - Zone forwarding enabled (visible in --list-all)"
     print_info "  - FORWARD rules: ${LAN_INTERFACE} <-> ${WG_INTERFACE}"
     print_info "  - FORWARD rules: VPN peer-to-peer traffic enabled"
 }

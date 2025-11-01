@@ -984,9 +984,19 @@ configure_firewalld() {
         print_warning "Failed to add ${WG_INTERFACE} to trusted zone (may already be added)"
     fi
 
+    # Enable forwarding on trusted zone (visible in firewall-cmd --list-all)
+    print_info "Enabling forwarding on trusted zone"
+    if firewall-cmd --permanent --zone=trusted --add-forward 2>/dev/null; then
+        print_success "Zone forwarding enabled (firewalld 0.9.0+)"
+    else
+        print_info "Zone forwarding not supported (using direct rules instead)"
+    fi
+
     # Enable masquerading for exit node functionality
     if [[ "$EXIT_NODE" == true ]]; then
         firewall-cmd --permanent --zone=public --add-masquerade || error_exit "Failed to enable masquerading"
+        # Enable forwarding on public zone for exit node
+        firewall-cmd --permanent --zone=public --add-forward 2>/dev/null || true
         print_info "Masquerading enabled for exit node mode"
     fi
 
@@ -1028,6 +1038,14 @@ configure_firewalld() {
             print_success "Detected zone '${lan_zone}' for ${lan_interface}"
         fi
 
+        # Enable forwarding on LAN zone (visible in firewall-cmd --list-all)
+        print_info "Enabling forwarding on ${lan_zone} zone"
+        if firewall-cmd --permanent --zone=${lan_zone} --add-forward 2>/dev/null; then
+            print_success "Zone forwarding enabled on ${lan_zone}"
+        else
+            print_info "Zone forwarding not supported (using direct rules instead)"
+        fi
+
         # Create policy name based on zones
         local policy_name="${lan_zone}-to-trusted"
 
@@ -1062,11 +1080,12 @@ configure_firewalld() {
     print_success "firewalld configured"
     print_info "  - Port ${WG_PORT}/udp opened"
     print_info "  - ${WG_INTERFACE} added to trusted zone"
+    print_info "  - Zone forwarding enabled (visible in --list-all)"
     print_info "  - FORWARD rules configured for site-to-site VPN"
     if [[ -n "$lan_interface" ]]; then
         print_info "  - LAN interface ${lan_interface} forwarding enabled"
     fi
-    log "firewalld configured with port ${WG_PORT}/udp and FORWARD rules"
+    log "firewalld configured with port ${WG_PORT}/udp and zone forwarding"
 }
 
 configure_ufw() {
