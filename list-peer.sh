@@ -66,6 +66,7 @@ extract_peers() {
     local peer_pubkey=""
     local peer_allowed_ips=""
     local peer_endpoint=""
+    local peers_found=false
 
     while IFS= read -r line; do
         if [[ "$line" =~ ^#[[:space:]]*(Client|Site|Peer-to-Peer):[[:space:]]*(.+)$ ]]; then
@@ -94,12 +95,29 @@ extract_peers() {
 
             if [[ -n "$peer_name" && -n "$peer_pubkey" && -n "$peer_allowed_ips" ]]; then
                 echo "${peer_type}|${peer_name}|${peer_pubkey}|${peer_allowed_ips}|${peer_endpoint}"
+                peers_found=true
                 peer_name=""
                 peer_type=""
                 in_peer=false
             fi
         fi
     done < "$config_file"
+
+    # Fallback: if no commented peers found, list from config files
+    if [[ "$peers_found" == false ]]; then
+        local peer_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
+        if [[ -d "$peer_dir" ]]; then
+            for conf in "$peer_dir"/*.conf 2>/dev/null; do
+                [[ -f "$conf" ]] || continue
+                local name=$(basename "$conf" .conf)
+                [[ "$name" == "${WG_INTERFACE}" ]] && continue
+
+                # Extract basic info from config file
+                local allowed=$(grep -oP '^AllowedIPs\s*=\s*\K.+' "$conf" 2>/dev/null | head -1 | xargs)
+                echo "Client|${name}|unknown|${allowed:-unknown}|"
+            done
+        fi
+    fi
 }
 
 get_status() {

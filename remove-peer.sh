@@ -111,13 +111,33 @@ select_server() {
 
 list_peers() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    grep -oP '^#\s*(Client|Site|Peer-to-Peer):\s*\K.+' "$config_file" 2>/dev/null | xargs -n1 || true
+
+    # Try comment notation first
+    local peers=$(grep -oP '^#\s*(Client|Site|Peer-to-Peer):\s*\K.+' "$config_file" 2>/dev/null | xargs -n1)
+
+    # Fallback: list .conf files in interface directory
+    if [[ -z "$peers" ]]; then
+        local peer_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
+        if [[ -d "$peer_dir" ]]; then
+            peers=$(ls "$peer_dir"/*.conf 2>/dev/null | xargs -n1 basename -s .conf | grep -v "^${WG_INTERFACE}$" || true)
+        fi
+    fi
+
+    echo "$peers"
 }
 
 peer_exists() {
     local name="$1"
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    grep -qP "^#\s*(Client|Site|Peer-to-Peer):\s*${name}\s*$" "$config_file" 2>/dev/null
+
+    # Try comment notation first
+    if grep -qP "^#\s*(Client|Site|Peer-to-Peer):\s*${name}\s*$" "$config_file" 2>/dev/null; then
+        return 0
+    fi
+
+    # Fallback: check if config file exists
+    local peer_config="${WG_CONFIG_DIR}/${WG_INTERFACE}/${name}.conf"
+    [[ -f "$peer_config" ]]
 }
 
 select_peer() {

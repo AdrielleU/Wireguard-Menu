@@ -134,7 +134,19 @@ select_server() {
 
 get_all_clients() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    grep -oP '^#\s*(Client|Site|Peer-to-Peer):\s*\K.+' "$config_file" 2>/dev/null | xargs -n1 || true
+
+    # Try comment notation first
+    local clients=$(grep -oP '^#\s*(Client|Site|Peer-to-Peer):\s*\K.+' "$config_file" 2>/dev/null | xargs -n1)
+
+    # Fallback: list .conf files in interface directory
+    if [[ -z "$clients" ]]; then
+        local peer_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
+        if [[ -d "$peer_dir" ]]; then
+            clients=$(ls "$peer_dir"/*.conf 2>/dev/null | xargs -n1 basename -s .conf | grep -v "^${WG_INTERFACE}$" || true)
+        fi
+    fi
+
+    echo "$clients"
 }
 
 get_client_info() {
