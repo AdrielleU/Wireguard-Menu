@@ -101,13 +101,14 @@ Please provide the following information:
 - Peer key rotation disconnects that specific peer
 - Old keys are permanently deleted
 
-### client-status.sh
+### list-peer.sh
+- Lists all peers or views specific peer details
 - Reads WireGuard interface status
-- Shows client connection information
+- Shows peer connection information
 
 **Potential Risks:**
-- May expose client IP addresses and connection metadata
-- Requires root to read WireGuard status
+- May expose peer IP addresses and connection metadata
+- Read-only operation (safe)
 
 ### qr-show.sh
 - Displays client configuration as QR code

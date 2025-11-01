@@ -334,66 +334,43 @@ sudo ./remove-client.sh
 sudo ./remove-client.sh --interface wg0 --client old-laptop
 ```
 
-### 5. list-clients.sh
-**List clients for a WireGuard server**
+### 5. list-peer.sh
+**List all peers or view specific peer status**
 
 ```bash
-./list-clients.sh <interface> [OPTIONS]
-```
-
-**Options:**
-- `--format FORMAT` - Output format: interactive, names-only, array, detailed
-- `--check NAME` - Check if client exists (exit 0 if yes, 1 if no)
-- `--count` - Return client count only
-- `-h, --help` - Show help
-
-**Example:**
-```bash
-# Interactive list
-./list-clients.sh wg0
-
-# Just names (for scripting)
-./list-clients.sh wg0 --format names-only
-
-# Detailed info with public keys
-./list-clients.sh wg0 --format detailed
-
-# Check if client exists
-./list-clients.sh wg0 --check laptop && echo "Client exists"
-
-# Count clients
-./list-clients.sh wg0 --count
-```
-
-### 6. client-status.sh
-**Show detailed live status for a specific client**
-
-```bash
-sudo ./client-status.sh [OPTIONS]
+./list-peer.sh [OPTIONS]
 ```
 
 **Options:**
 - `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-c, --client NAME` - Client name
+- `-p, --peer NAME` - View specific peer details
+- `-d, --detailed` - Show more details (public keys, etc.)
 - `-h, --help` - Show help
 
-**Shows:**
-- Connection status (Connected/Idle/Never Connected)
-- Client IP address
-- Remote endpoint IP
-- Last handshake time
-- Data transfer (upload/download)
+**What it shows:**
+- All peers (Clients, Sites, P2P) with type indicators
+- Connection status (Connected/Idle/Never)
+- Tunnel IP addresses
+- Remote LANs (for Sites and P2P peers)
+- Last seen time and data transfer (with -d flag)
+- Live connection status with auto-refresh
 
 **Example:**
 ```bash
-# Interactive mode
-sudo ./client-status.sh
+# List all peers
+./list-peer.sh
 
-# With arguments
-sudo ./client-status.sh --interface wg0 --client laptop
+# List peers on specific interface
+./list-peer.sh -i wg0
+
+# View specific peer details
+./list-peer.sh -p laptop
+
+# List with detailed info
+./list-peer.sh -d
 ```
 
-### 7. rotate-keys.sh
+### 6. rotate-keys.sh
 **Regenerate encryption keys for server or peers (unified key rotation)**
 
 ```bash
@@ -433,7 +410,7 @@ sudo ./rotate-keys.sh -s -i wg0
 sudo ./rotate-keys.sh -p laptop -i wg0
 ```
 
-### 8. qr-show.sh
+### 7. qr-show.sh
 **Display client config as QR code for mobile devices**
 
 ```bash
@@ -492,8 +469,8 @@ Or use individual scripts:
 # Add new client
 sudo ./add-client.sh --interface wg0 --client new-phone
 
-# Check client status
-sudo ./client-status.sh --interface wg0 --client laptop
+# View peer status
+sudo ./list-peer.sh -i wg0 -p laptop
 
 # Remove old client
 sudo ./remove-client.sh --interface wg0 --client old-device
@@ -564,8 +541,7 @@ sudo ./setup-wireguard.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── setup-wireguard.sh        # Initial server setup
 ├── add-client.sh             # Add new client
 ├── remove-client.sh          # Remove client
-├── list-clients.sh           # List clients (utility)
-├── client-status.sh          # Show client connection status
+├── list-peer.sh              # List/view all peers with status
 ├── rotate-keys.sh            # Rotate server or peer keys
 ├── qr-show.sh                # Display client QR code
 ├── README.md                 # User documentation (you are here)

@@ -476,7 +476,9 @@ This file documents the development process and AI assistance used in creating t
 - **v2.7** (Client status): Created client-status.sh for live monitoring
 - **v2.8** (Interactive menu): Created wireguard-menu.sh for easy navigation
 - **v2.9** (Documentation): Updated README.md and CLAUDE.md with full suite
-- **v2.10** (Consolidation): Merged rotate-keys-client.sh and rotate-keys-server.sh into unified rotate-keys.sh (62% code reduction)
+- **v2.10** (Consolidation): Merged multiple scripts for cleaner codebase
+  - Merged rotate-keys-client.sh and rotate-keys-server.sh into unified rotate-keys.sh (62% code reduction)
+  - Consolidated list-clients.sh and client-status.sh into list-peer.sh with -p flag for viewing individual peers
   - Peer rotation now default option (more common, less disruptive than server rotation)
   - Consistent confirmation pattern: Requires typing 'yes' for destructive operations
   - Follows same safety pattern as reset-wireguard.sh and setup-site-remote.sh
