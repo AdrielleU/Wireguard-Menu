@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial public release preparation
 - Standard open source project files (LICENSE, CONTRIBUTING, SECURITY, etc.)
 
+### Changed
+- **Code Consolidation**: Merged `rotate-keys-client.sh` and `rotate-keys-server.sh` into unified `rotate-keys.sh`
+  - 62% code reduction (1126 lines → 429 lines)
+  - Interactive menu for selecting server or peer rotation
+  - Maintains all functionality from both previous scripts
+  - Updated wireguard-menu.sh to reflect single key rotation option
+
 ## [2.0.0] - 2025-10-23
 
 ### Added

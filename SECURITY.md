@@ -92,12 +92,13 @@ Please provide the following information:
 - Unauthorized client addition could grant VPN access
 - Improper client removal could leave orphaned keys
 
-### rotate-keys-client.sh / rotate-keys-server.sh
-- Regenerates encryption keys
+### rotate-keys.sh
+- Regenerates encryption keys (server or peer)
 - Requires elevated privileges
 
 **Potential Risks:**
-- Server key rotation disconnects all clients
+- Server key rotation disconnects all peers
+- Peer key rotation disconnects that specific peer
 - Old keys are permanently deleted
 
 ### client-status.sh

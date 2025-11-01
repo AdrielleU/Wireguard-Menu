@@ -393,64 +393,47 @@ sudo ./client-status.sh
 sudo ./client-status.sh --interface wg0 --client laptop
 ```
 
-### 7. rotate-keys-client.sh
-**Regenerate encryption keys for a specific client**
+### 7. rotate-keys.sh
+**Regenerate encryption keys for server or peers (unified key rotation)**
 
 ```bash
-sudo ./rotate-keys-client.sh [OPTIONS]
+sudo ./rotate-keys.sh [OPTIONS]
 ```
 
 **Options:**
-- `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-c, --client NAME` - Client name
-- `-h, --help` - Show help
-
-**What it does:**
-- Generates new client keypair
-- Updates server config with new public key
-- Creates new client config file
-- Hot-reloads server without dropping other connections
-- Client must update their config to reconnect
-
-**Example:**
-```bash
-# Interactive mode
-sudo ./rotate-keys-client.sh
-
-# With arguments
-sudo ./rotate-keys-client.sh --interface wg0 --client laptop
-```
-
-### 8. rotate-keys-server.sh
-**Regenerate server encryption keys and update all client configs**
-
-```bash
-sudo ./rotate-keys-server.sh [OPTIONS]
-```
-
-**Options:**
+- `-s, --server` - Rotate server keys
+- `-p, --peer NAME` - Rotate peer keys
 - `-i, --interface NAME` - WireGuard interface (e.g., wg0)
 - `-h, --help` - Show help
 
-**What it does:**
+**Server Key Rotation:**
 - Removes old server keys (prevents conflicts)
 - Generates new server keypair
 - Updates server configuration
-- Regenerates ALL client configs with new server public key
-- Restarts server (all clients disconnected until they update)
+- Regenerates ALL peer configs with new server public key
+- Restarts server (all peers disconnected until they update)
+- **WARNING:** Disconnects ALL peers. They need new configs to reconnect.
 
-**WARNING:** This disconnects ALL clients. They need new configs to reconnect.
+**Peer Key Rotation:**
+- Generates new peer keypair
+- Updates server config with new public key
+- Creates new peer config file
+- Restarts server to apply changes
+- Peer must update their config to reconnect
 
-**Example:**
+**Examples:**
 ```bash
 # Interactive mode
-sudo ./rotate-keys-server.sh
+sudo ./rotate-keys.sh
 
-# With arguments
-sudo ./rotate-keys-server.sh --interface wg0
+# Rotate server keys
+sudo ./rotate-keys.sh -s -i wg0
+
+# Rotate peer keys
+sudo ./rotate-keys.sh -p laptop -i wg0
 ```
 
-### 9. qr-show.sh
+### 8. qr-show.sh
 **Display client config as QR code for mobile devices**
 
 ```bash
@@ -519,11 +502,11 @@ sudo ./remove-client.sh --interface wg0 --client old-device
 ### Security Maintenance
 Periodically rotate keys:
 ```bash
-# Rotate individual client keys
-sudo ./rotate-keys-client.sh --interface wg0 --client laptop
+# Rotate individual peer keys
+sudo ./rotate-keys.sh -p laptop -i wg0
 
-# Rotate server keys (affects all clients!)
-sudo ./rotate-keys-server.sh --interface wg0
+# Rotate server keys (affects all peers!)
+sudo ./rotate-keys.sh -s -i wg0
 ```
 
 ## Firewall Support
@@ -583,8 +566,7 @@ sudo ./setup-wireguard.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── remove-client.sh          # Remove client
 ├── list-clients.sh           # List clients (utility)
 ├── client-status.sh          # Show client connection status
-├── rotate-keys-client.sh     # Rotate client keys
-├── rotate-keys-server.sh     # Rotate server keys
+├── rotate-keys.sh            # Rotate server or peer keys
 ├── qr-show.sh                # Display client QR code
 ├── README.md                 # User documentation (you are here)
 ├── CLAUDE.md                 # Development documentation

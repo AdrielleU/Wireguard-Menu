@@ -73,25 +73,24 @@ show_menu() {
     echo "  2) Remove Peer                   (remove-peer.sh)"
     echo "  3) List Peers                    (list-clients.sh)"
     echo "  4) Show Peer Status              (client-status.sh)"
-    echo "  5) Rotate Peer Keys              (rotate-keys-client.sh)"
     echo ""
 
     echo -e "${BLUE}Peer Configuration:${NC}"
-    echo "  6) Show QR Code for Client       (qr-show.sh)"
+    echo "  5) Show QR Code for Client       (qr-show.sh)"
     echo ""
 
     echo -e "${BLUE}Server Setup & Management:${NC}"
-    echo "  7) Setup WireGuard Server        (setup-wireguard.sh)"
-    echo "  8) Rotate Server Keys            (rotate-keys-server.sh)"
-    echo "  9) Reset/Cleanup WireGuard       (reset-wireguard.sh)"
+    echo "  6) Setup WireGuard Server        (setup-wireguard.sh)"
+    echo "  7) Rotate Keys (Server or Peer)  (rotate-keys.sh)"
+    echo "  8) Reset/Cleanup WireGuard       (reset-wireguard.sh)"
     echo ""
 
     echo -e "${BLUE}Remote Site Configuration:${NC}"
-    echo " 10) Setup Remote Site             (setup-site-remote.sh)"
+    echo "  9) Setup Remote Site             (setup-site-remote.sh)"
     echo ""
 
     echo -e "${BLUE}System:${NC}"
-    echo " 11) Exit"
+    echo " 10) Exit"
     echo ""
     echo "=========================================="
     echo ""
@@ -141,7 +140,7 @@ main() {
     while true; do
         show_menu
 
-        read -p "Select an option (1-11): " choice
+        read -p "Select an option (1-10): " choice
 
         case $choice in
             1)
@@ -157,31 +156,28 @@ main() {
                 run_script "client-status.sh" "Show Peer Status"
                 ;;
             5)
-                run_script "rotate-keys-client.sh" "Rotate Peer Keys"
-                ;;
-            6)
                 run_script "qr-show.sh" "Show QR Code for Client"
                 ;;
-            7)
+            6)
                 run_script "setup-wireguard.sh" "Setup WireGuard Server"
                 ;;
-            8)
-                run_script "rotate-keys-server.sh" "Rotate Server Keys"
+            7)
+                run_script "rotate-keys.sh" "Rotate Keys (Server or Peer)"
                 ;;
-            9)
+            8)
                 run_script "reset-wireguard.sh" "Reset/Cleanup WireGuard"
                 ;;
-            10)
+            9)
                 run_script "setup-site-remote.sh" "Setup Remote Site"
                 ;;
-            11)
+            10)
                 echo ""
                 print_info "Exiting WireGuard Management Menu"
                 echo ""
                 exit 0
                 ;;
             *)
-                print_error "Invalid selection. Please choose 1-11."
+                print_error "Invalid selection. Please choose 1-10."
                 echo ""
                 read -p "Press Enter to continue..."
                 ;;

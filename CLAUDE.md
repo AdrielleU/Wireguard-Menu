@@ -218,11 +218,15 @@ This file documents the development process and AI assistance used in creating t
 - Best of both worlds
 
 ### 3. Safety-First Approach
-**Decision**: Check for conflicts before making changes, backup before overwriting
+**Decision**: Check for conflicts before making changes, backup before overwriting, require explicit confirmation for destructive operations
 **Rationale**:
 - Prevents accidental service disruption
 - Makes script safe to run multiple times
 - Supports multiple servers on same host
+- Confirmation Pattern:
+  - Destructive operations (key rotation, reset/cleanup) require typing 'yes' exactly
+  - Non-destructive operations use simple y/N prompts
+  - Consistent across all scripts (rotate-keys.sh, reset-wireguard.sh, setup-site-remote.sh)
 
 ### 4. Cross-Platform from Day One
 **Decision**: Build OS detection and multi-distro support from the start
@@ -472,6 +476,10 @@ This file documents the development process and AI assistance used in creating t
 - **v2.7** (Client status): Created client-status.sh for live monitoring
 - **v2.8** (Interactive menu): Created wireguard-menu.sh for easy navigation
 - **v2.9** (Documentation): Updated README.md and CLAUDE.md with full suite
+- **v2.10** (Consolidation): Merged rotate-keys-client.sh and rotate-keys-server.sh into unified rotate-keys.sh (62% code reduction)
+  - Peer rotation now default option (more common, less disruptive than server rotation)
+  - Consistent confirmation pattern: Requires typing 'yes' for destructive operations
+  - Follows same safety pattern as reset-wireguard.sh and setup-site-remote.sh
 
 ## Contact & Support
 
