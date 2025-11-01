@@ -110,8 +110,14 @@ select_server() {
 }
 
 list_peers() {
-    local peers=$(./list-peers.sh "${WG_INTERFACE}" --format array 2>/dev/null)
-    echo "$peers"
+    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    grep -oP '^#\s*(Client|Site|Peer-to-Peer):\s*\K.+' "$config_file" 2>/dev/null | xargs -n1 || true
+}
+
+peer_exists() {
+    local name="$1"
+    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    grep -qP "^#\s*(Client|Site|Peer-to-Peer):\s*${name}\s*$" "$config_file" 2>/dev/null
 }
 
 select_peer() {
@@ -121,16 +127,23 @@ select_peer() {
     [[ $peer_count -gt 0 ]] || error_exit "No peers found in ${WG_INTERFACE}"
 
     if [[ -n "$PEER_NAME" ]]; then
-        if ! ./list-peers.sh "${WG_INTERFACE}" --check "${PEER_NAME}" 2>/dev/null; then
+        if ! peer_exists "${PEER_NAME}"; then
             error_exit "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
         fi
         print_success "Using peer: ${PEER_NAME}"
         return
     fi
 
-    print_info "Select a peer (client or site) to remove from the VPN server"
+    print_info "Select a peer to remove"
     echo ""
-    ./list-peers.sh "${WG_INTERFACE}" --format interactive
+
+    # Show peer list
+    local i=1
+    for peer in "${peers[@]}"; do
+        printf "  ${BLUE}%d)${NC} %s\n" "$i" "$peer"
+        ((i++)) || true
+    done
+    echo ""
 
     read -p "Select peer to remove (1-${peer_count}): " selection
 

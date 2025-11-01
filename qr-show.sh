@@ -140,22 +140,8 @@ select_server() {
 }
 
 list_clients() {
-    # Use list-peers.sh if available, otherwise fallback
-    if [[ -x "./list-peers.sh" ]]; then
-        local clients=$(./list-peers.sh "${WG_INTERFACE}" --format array 2>/dev/null)
-    else
-        # Fallback: extract from config directly
-        local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-        local clients=()
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^#\ Client:\ (.+)$ ]]; then
-                clients+=("${BASH_REMATCH[1]}")
-            fi
-        done < "$config_file"
-        clients="${clients[@]}"
-    fi
-
-    echo "$clients"
+    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    grep -oP '^#\s*Client:\s*\K.+' "$config_file" 2>/dev/null | xargs -n1 || true
 }
 
 select_client() {

@@ -138,23 +138,14 @@ select_server() {
 }
 
 list_clients() {
-    # Use list-peers.sh if available, otherwise fallback
-    if [[ -x "./list-peers.sh" ]]; then
-        local clients=$(./list-peers.sh "${WG_INTERFACE}" --format array 2>/dev/null)
-    else
-        # Fallback: extract from config directly (both Client and Site entries)
-        local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-        local clients=()
-        while IFS= read -r line; do
-            # Match both "# Client: name" and "# Site: name"
-            if [[ "$line" =~ ^#[[:space:]]*(Client|Site):[[:space:]]*(.+)$ ]]; then
-                clients+=("${BASH_REMATCH[2]}")
-            fi
-        done < "$config_file"
-        clients="${clients[@]}"
-    fi
+    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    grep -oP '^#\s*(Client|Site|Peer-to-Peer):\s*\K.+' "$config_file" 2>/dev/null | xargs -n1 || true
+}
 
-    echo "$clients"
+peer_exists() {
+    local name="$1"
+    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    grep -qP "^#\s*(Client|Site|Peer-to-Peer):\s*${name}\s*$" "$config_file" 2>/dev/null
 }
 
 select_client() {
@@ -168,10 +159,8 @@ select_client() {
 
     # If client specified via argument, validate it
     if [[ -n "$CLIENT_NAME" ]]; then
-        if [[ -x "./list-peers.sh" ]]; then
-            if ! ./list-peers.sh "${WG_INTERFACE}" --check "${CLIENT_NAME}" 2>/dev/null; then
-                error_exit "Client '${CLIENT_NAME}' not found in ${WG_INTERFACE}"
-            fi
+        if ! peer_exists "${CLIENT_NAME}"; then
+            error_exit "Client '${CLIENT_NAME}' not found in ${WG_INTERFACE}"
         fi
         print_success "Using client: ${CLIENT_NAME}"
         return
