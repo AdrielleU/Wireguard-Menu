@@ -51,6 +51,31 @@ check_root() { [[ $EUID -eq 0 ]] || error_exit "This script must be run as root 
 validate_cidr() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 
+validate_peer_name() {
+    local name="$1"
+
+    # Check if empty
+    [[ -z "$name" ]] && return 1
+
+    # Check length (3-30 chars)
+    local len=${#name}
+    [[ $len -lt 3 || $len -gt 30 ]] && return 1
+
+    # Check for invalid characters (only alphanumeric, dash, underscore)
+    [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]] && return 1
+
+    # Check doesn't start/end with dash or underscore
+    [[ "$name" =~ ^[-_] ]] && return 1
+    [[ "$name" =~ [-_]$ ]] && return 1
+
+    return 0
+}
+
+validate_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] && [[ $port -ge 1 ]] && [[ $port -le 65535 ]]
+}
+
 detect_servers() {
     local servers=()
     if [[ -d "$WG_CONFIG_DIR" ]]; then
@@ -170,45 +195,20 @@ reload_server() {
 }
 
 ################################################################################
-# PEER TYPE CONFIGURATION
+# PEER TYPE CONFIG
 ################################################################################
 
-get_peer_config() {
-    local type="$1"
-    local field="$2"
-
-    case "$type:$field" in
-        # Display names
-        client:label) echo "Client" ;;
-        site:label) echo "Site" ;;
-        p2p:label) echo "Peer-to-Peer" ;;
-
-        # Descriptions
-        client:desc) echo "Single device (laptop, phone, desktop)" ;;
-        site:desc) echo "Remote network/office (site-to-site VPN)" ;;
-        p2p:desc) echo "Equal peer server (bidirectional, both accept connections)" ;;
-
-        # Name examples
-        client:name_examples) echo "laptop-john, phone-alice, desktop-work" ;;
-        site:name_examples) echo "branch-office, datacenter-east, office-la" ;;
-        p2p:name_examples) echo "datacenter-west, backup-server, peer-office" ;;
-
-        # Features
-        client:needs_remote_network) echo "false" ;;
-        site:needs_remote_network) echo "true" ;;
-        p2p:needs_remote_network) echo "true" ;;
-
-        client:needs_listen_port) echo "false" ;;
-        site:needs_listen_port) echo "false" ;;
-        p2p:needs_listen_port) echo "true" ;;
-
-        client:has_dns) echo "true" ;;
-        site:has_dns) echo "false" ;;
-        p2p:has_dns) echo "false" ;;
-
-        *) echo "" ;;
+get_label() {
+    case "$1" in
+        client) echo "Client" ;;
+        site) echo "Site" ;;
+        p2p) echo "Peer-to-Peer" ;;
     esac
 }
+
+needs_remote_network() { [[ "$1" == "site" || "$1" == "p2p" ]]; }
+needs_listen_port() { [[ "$1" == "p2p" ]]; }
+has_dns() { [[ "$1" == "client" ]]; }
 
 ################################################################################
 # PEER TYPE SELECTION
@@ -218,35 +218,20 @@ select_peer_type() {
     [[ -n "$PEER_TYPE" ]] && return 0
 
     echo ""
-    echo "=========================================="
-    echo -e "  ${CYAN}WireGuard Add Peer${NC}"
-    echo "=========================================="
+    print_info "Select peer type:"
+    echo "  ${CYAN}1)${NC} Client - Single device"
+    echo "  ${CYAN}2)${NC} Site - Remote network (site-to-site)"
+    echo "  ${CYAN}3)${NC} P2P - Equal peer (bidirectional)"
     echo ""
-    print_info "What type of peer do you want to add?"
-    echo ""
-    echo -e "  ${CYAN}1)${NC} Client"
-    echo "     $(get_peer_config client desc)"
-    echo "     Access: VPN network, optionally route all traffic"
-    echo ""
-    echo -e "  ${CYAN}2)${NC} Site-to-Site"
-    echo "     $(get_peer_config site desc)"
-    echo "     Access: Connect entire networks together"
-    echo "     Connection: Remote site connects TO this server"
-    echo ""
-    echo -e "  ${CYAN}3)${NC} Peer-to-Peer"
-    echo "     $(get_peer_config p2p desc)"
-    echo "     Access: Full bidirectional network access"
-    echo "     Connection: Either side can initiate (both have ListenPort)"
-    echo ""
-    read -p "Select peer type (1-3): " peer_choice
+    read -p "Choice (1-3): " choice
 
-    case "$peer_choice" in
-        1) PEER_TYPE="client"; print_success "Selected: Client" ;;
-        2) PEER_TYPE="site"; print_success "Selected: Site-to-Site" ;;
-        3) PEER_TYPE="p2p"; print_success "Selected: Peer-to-Peer" ;;
+    case "$choice" in
+        1) PEER_TYPE="client" ;;
+        2) PEER_TYPE="site" ;;
+        3) PEER_TYPE="p2p" ;;
         *) error_exit "Invalid selection" ;;
     esac
-    echo ""
+    print_success "Selected: $(get_label "$PEER_TYPE")"
 }
 
 ################################################################################
@@ -339,103 +324,100 @@ get_server_info() {
 
 prompt_peer_name() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local label=$(get_peer_config "$PEER_TYPE" label)
-    local examples=$(get_peer_config "$PEER_TYPE" name_examples)
+    local label=$(get_label "$PEER_TYPE")
 
     if [[ -z "$PEER_NAME" ]]; then
-        echo ""
-        echo "${label} Name: A descriptive name for this ${PEER_TYPE}"
-        echo "  Examples: ${examples}"
-        read -p "Enter ${PEER_TYPE} name: " PEER_NAME
+        while true; do
+            echo ""
+            echo "Peer name (3-30 chars, alphanumeric, dash, underscore)"
+            read -p "Enter name: " PEER_NAME
+            PEER_NAME=$(echo "$PEER_NAME" | xargs)
 
-        [[ -z "$PEER_NAME" ]] && error_exit "${label} name is required"
+            if ! validate_peer_name "$PEER_NAME"; then
+                print_error "Invalid: Use 3-30 alphanumeric, dash, or underscore (no spaces)"
+                read -p "Retry? (y/n): " retry
+                [[ "$retry" =~ ^[Yy] ]] || error_exit "Name required"
+                continue
+            fi
 
-        # Check if name already exists
-        if grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null; then
-            error_exit "${label} '${PEER_NAME}' already exists in ${WG_INTERFACE}"
-        fi
+            if grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null; then
+                print_error "${label} '${PEER_NAME}' already exists"
+                read -p "Retry? (y/n): " retry
+                [[ "$retry" =~ ^[Yy] ]] || error_exit "Name exists"
+                PEER_NAME=""
+                continue
+            fi
+            break
+        done
+    else
+        validate_peer_name "$PEER_NAME" || error_exit "Invalid name format"
+        grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null && error_exit "Name already exists"
     fi
 }
 
 prompt_remote_network() {
-    local needs_remote=$(get_peer_config "$PEER_TYPE" needs_remote_network)
-    [[ "$needs_remote" != "true" ]] && return
+    needs_remote_network "$PEER_TYPE" || return
 
     if [[ -z "$REMOTE_NETWORK" ]]; then
-        echo ""
-        if [[ "$PEER_TYPE" == "p2p" ]]; then
-            echo "Remote Peer's LAN Network: The network behind the remote peer"
-        else
-            echo "Remote Site's LAN Network: The network behind the remote site"
-        fi
-        echo "  Examples: 192.168.50.0/24, 10.100.0.0/16, 172.16.5.0/24"
-        print_warning "This is REQUIRED - the remote LAN you want to access"
-        read -p "Enter remote network CIDR: " REMOTE_NETWORK
+        while true; do
+            echo ""
+            echo "Remote LAN network (e.g., 192.168.50.0/24)"
+            read -p "Enter CIDR: " REMOTE_NETWORK
+            REMOTE_NETWORK=$(echo "$REMOTE_NETWORK" | xargs)
 
-        [[ -z "$REMOTE_NETWORK" ]] && error_exit "Remote network CIDR is required for ${PEER_TYPE}"
+            [[ -z "$REMOTE_NETWORK" ]] && { print_error "Required"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Required"; continue; }
+            validate_cidr "$REMOTE_NETWORK" || { print_error "Invalid CIDR"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid"; REMOTE_NETWORK=""; continue; }
+            break
+        done
+    else
+        validate_cidr "$REMOTE_NETWORK" || error_exit "Invalid CIDR"
     fi
-
-    validate_cidr "$REMOTE_NETWORK" || error_exit "Invalid remote network CIDR format (e.g., 192.168.50.0/24)"
 }
 
 prompt_peer_listen_port() {
-    local needs_port=$(get_peer_config "$PEER_TYPE" needs_listen_port)
-    [[ "$needs_port" != "true" ]] && return
+    needs_listen_port "$PEER_TYPE" || return
 
     if [[ -z "$PEER_LISTEN_PORT" ]]; then
-        echo ""
-        echo "=========================================="
-        print_info "Peer Listen Port Configuration"
-        echo "=========================================="
-        echo ""
-        echo "For peer-to-peer, the remote peer also needs a listening port."
-        echo "This allows bidirectional connection initiation."
-        echo ""
-        echo "Options:"
-        echo "  - Press ENTER to use default (51820) [RECOMMENDED]"
-        echo "  - Enter custom port if remote peer uses different port"
-        echo ""
-        read -p "Remote peer's listening port [default: 51820]: " input_port
-        PEER_LISTEN_PORT="${input_port:-51820}"
-        print_success "Remote peer will listen on port: ${PEER_LISTEN_PORT}"
-    fi
-
-    # Validate port
-    if ! [[ "$PEER_LISTEN_PORT" =~ ^[0-9]+$ ]] || [ "$PEER_LISTEN_PORT" -lt 1 ] || [ "$PEER_LISTEN_PORT" -gt 65535 ]; then
-        error_exit "Invalid port number. Must be between 1-65535"
+        while true; do
+            echo ""
+            read -p "Remote peer listen port [51820]: " input_port
+            PEER_LISTEN_PORT="${input_port:-51820}"
+            validate_port "$PEER_LISTEN_PORT" || { print_error "Invalid port (1-65535)"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid"; PEER_LISTEN_PORT=""; continue; }
+            break
+        done
+    else
+        validate_port "$PEER_LISTEN_PORT" || error_exit "Invalid port"
     fi
 }
 
 prompt_peer_ip() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local label=$(get_peer_config "$PEER_TYPE" label)
+    local server_cidr=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' | cut -d'/' -f2)
+    local server_net=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
 
     if [[ -z "$PEER_IP" ]]; then
-        local server_network=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-        local server_cidr=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' | cut -d'/' -f2)
-        local suggested_ip=$(get_next_available_ip)
+        while true; do
+            local suggested=$(get_next_available_ip)
+            echo ""
+            read -p "Tunnel IP [${suggested}/${server_cidr}]: " input
+            PEER_IP="${input:-${suggested}/${server_cidr}}"
+            [[ ! "$PEER_IP" =~ / ]] && PEER_IP="${PEER_IP}/${server_cidr}"
 
-        echo ""
-        echo "Tunnel IP: IP address to assign to this ${PEER_TYPE} on VPN"
-        echo "  Suggested: ${suggested_ip}/${server_cidr} (next available)"
-        echo "  Range: ${server_network}.2 - ${server_network}.254"
-        echo ""
-        read -p "Enter tunnel IP with CIDR [${suggested_ip}/${server_cidr}]: " input_ip
-        PEER_IP="${input_ip:-${suggested_ip}/${server_cidr}}"
+            validate_cidr "$PEER_IP" || { print_error "Invalid IP"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid"; PEER_IP=""; continue; }
+
+            local peer_net=$(echo "$PEER_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+            [[ "$peer_net" != "$server_net" ]] && { print_error "Must be in ${server_net}.0/${server_cidr}"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Wrong network"; PEER_IP=""; continue; }
+
+            local ip_only=$(echo "$PEER_IP" | cut -d'/' -f1)
+            grep -qP "AllowedIPs\s*=\s*${ip_only}/32" "$config_file" 2>/dev/null && { print_error "IP in use"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "In use"; PEER_IP=""; continue; }
+            break
+        done
+    else
+        [[ ! "$PEER_IP" =~ / ]] && PEER_IP="${PEER_IP}/${server_cidr}"
+        validate_cidr "$PEER_IP" || error_exit "Invalid IP"
+        local peer_net=$(echo "$PEER_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+        [[ "$peer_net" == "$server_net" ]] || error_exit "Wrong network"
     fi
-
-    # Add CIDR if not present
-    if [[ ! "$PEER_IP" =~ / ]]; then
-        local server_cidr=$(grep -E "^Address\s*=" "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" | head -n1 | awk '{print $3}' | cut -d'/' -f2)
-        PEER_IP="${PEER_IP}/${server_cidr}"
-    fi
-
-    validate_cidr "$PEER_IP" || error_exit "Invalid IP format. Use CIDR notation (e.g., 10.0.0.2/24)"
-
-    # Validate IP is in correct network
-    local peer_network=$(echo "$PEER_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-    local server_network=$(grep -E "^Address\s*=" "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" | head -n1 | awk '{print $3}' | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-    [[ "$peer_network" == "$server_network" ]] || error_exit "IP must be in the ${server_network}.0/24 network"
 }
 
 configure_routing() {
@@ -534,18 +516,11 @@ configure_routing() {
 ################################################################################
 
 prompt_peer_config() {
-    local label=$(get_peer_config "$PEER_TYPE" label)
-    echo ""
-    print_info "${label} Configuration"
-    echo ""
-
     prompt_peer_name
     prompt_remote_network
     prompt_peer_listen_port
     prompt_peer_ip
     get_server_info
-
-    print_success "Configuration complete"
 }
 
 generate_keypair() {
@@ -572,41 +547,18 @@ generate_keypair() {
 
 add_peer_to_server() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local peer_ip_only=$(echo "$PEER_IP" | cut -d'/' -f1)
-    local label=$(get_peer_config "$PEER_TYPE" label)
+    local peer_ip=$(echo "$PEER_IP" | cut -d'/' -f1)
+    local label=$(get_label "$PEER_TYPE")
+    local allowed="${peer_ip}/32"
 
-    print_info "Adding peer to server configuration..."
+    needs_remote_network "$PEER_TYPE" && [[ -n "$REMOTE_NETWORK" ]] && allowed="${allowed}, ${REMOTE_NETWORK}"
 
-    # Build AllowedIPs for server config
-    local allowed_ips="${peer_ip_only}/32"
-    local needs_remote=$(get_peer_config "$PEER_TYPE" needs_remote_network)
-    [[ "$needs_remote" == "true" && -n "$REMOTE_NETWORK" ]] && allowed_ips="${allowed_ips}, ${REMOTE_NETWORK}"
-
-    # For P2P, add Endpoint to server config
-    local peer_endpoint=""
-    if [[ "$PEER_TYPE" == "p2p" ]]; then
+    local endpoint=""
+    if needs_listen_port "$PEER_TYPE"; then
         echo ""
-        print_info "Peer-to-Peer requires remote peer's public endpoint"
-        echo ""
-        echo "Enter the public IP or domain of the remote peer."
-        echo "  - This is where THIS server will connect to reach the remote peer"
-        echo "  - Must be reachable from this server"
-        echo ""
-
-        local peer_endpoint_host=""
-        while true; do
-            read -p "Enter remote peer's public IP/domain (required): " peer_endpoint_host
-
-            if [[ -z "$peer_endpoint_host" ]]; then
-                print_error "Remote peer endpoint cannot be empty"
-                echo ""
-            else
-                break
-            fi
-        done
-
-        peer_endpoint="${peer_endpoint_host}:${PEER_LISTEN_PORT}"
-        print_success "Remote peer endpoint: ${peer_endpoint}"
+        read -p "Remote peer's public IP/domain: " host
+        [[ -z "$host" ]] && error_exit "Endpoint required for P2P"
+        endpoint="${host}:${PEER_LISTEN_PORT}"
     fi
 
     cat >> "$config_file" <<EOF
@@ -615,17 +567,14 @@ add_peer_to_server() {
 [Peer]
 PublicKey = ${PEER_PUBLIC_KEY}
 EOF
-
-    [[ -n "$peer_endpoint" ]] && echo "Endpoint = ${peer_endpoint}" >> "$config_file"
-    echo "AllowedIPs = ${allowed_ips}" >> "$config_file"
-
-    print_success "Peer added to ${config_file}"
+    [[ -n "$endpoint" ]] && echo "Endpoint = ${endpoint}" >> "$config_file"
+    echo "AllowedIPs = ${allowed}" >> "$config_file"
 }
 
 create_peer_config() {
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
     local config_file="${keys_dir}/${PEER_NAME}.conf"
-    local label=$(get_peer_config "$PEER_TYPE" label)
+    local label=$(get_label "$PEER_TYPE")
 
     print_info "Creating peer configuration file..."
 
@@ -651,8 +600,7 @@ EOF
     fi
 
     # Add DNS for clients only
-    local has_dns=$(get_peer_config "$PEER_TYPE" has_dns)
-    [[ "$has_dns" == "true" ]] && echo "DNS = 1.1.1.1, 8.8.8.8" >> "$config_file"
+    has_dns "$PEER_TYPE" && echo "DNS = 1.1.1.1, 8.8.8.8" >> "$config_file"
 
     cat >> "$config_file" <<EOF
 
@@ -668,8 +616,7 @@ EOF
 }
 
 add_route_for_remote_network() {
-    local needs_remote=$(get_peer_config "$PEER_TYPE" needs_remote_network)
-    [[ "$needs_remote" != "true" ]] && return
+    needs_remote_network "$PEER_TYPE" || return
 
     print_info "Setting up route for remote network..."
 
@@ -701,68 +648,26 @@ add_route_for_remote_network() {
 }
 
 show_summary() {
-    local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
-    local config_file="${keys_dir}/${PEER_NAME}.conf"
-    local label=$(get_peer_config "$PEER_TYPE" label)
+    local config="${WG_CONFIG_DIR}/${WG_INTERFACE}/${PEER_NAME}.conf"
+    local label=$(get_label "$PEER_TYPE")
 
     echo ""
-    echo "=========================================="
-    print_success "${label} Created Successfully!"
-    echo "=========================================="
-    echo ""
+    print_success "${label} '${PEER_NAME}' created!"
+    echo "  IP: ${PEER_IP}"
+    echo "  Config: ${config}"
 
     if [[ "$PEER_TYPE" == "client" ]]; then
-        print_info "Client Details:"
-        echo "  Name: ${PEER_NAME}"
-        echo "  IP: ${PEER_IP}"
-        echo "  Server: ${WG_INTERFACE}"
-        echo "  Routing: ${ROUTING_DESC}"
-        echo "  Config File: ${config_file}"
         echo ""
-        print_warning "NEXT STEPS - Distribute configuration:"
-        echo ""
-        echo "1. Mobile devices: Use QR code"
-        echo "   sudo ./qr-show.sh ${PEER_NAME}"
-        echo ""
-        echo "2. Desktop/Laptop: Copy config file"
-        echo "   scp root@server:${config_file} client-device:~/"
+        echo "Next: Distribute config"
+        echo "  Mobile: sudo ./qr-show.sh ${PEER_NAME}"
+        echo "  Desktop: scp root@server:${config} ~/"
     else
-        local tunnel_ip_only=$(echo "$PEER_IP" | cut -d'/' -f1)
-        local vpn_network=$(get_local_network)
-
-        print_info "This Server (Site A):"
-        echo "  Interface: ${WG_INTERFACE}"
-        echo "  VPN Network: ${vpn_network}"
-        echo "  Endpoint: ${SERVER_ENDPOINT}:${SERVER_PORT}"
+        echo "  Remote LAN: ${REMOTE_NETWORK}"
         echo ""
-        print_info "Remote Peer (Site B):"
-        echo "  Name: ${PEER_NAME}"
-        echo "  Tunnel IP: ${PEER_IP}"
-        [[ -n "$REMOTE_NETWORK" ]] && echo "  LAN Network: ${REMOTE_NETWORK}"
-        [[ "$PEER_TYPE" == "p2p" ]] && echo "  Listen Port: ${PEER_LISTEN_PORT}"
-        echo "  Config File: ${config_file}"
-        echo "  Can access: ${ALLOWED_IPS}"
-        echo ""
-        print_warning "NEXT STEPS - Deploy to remote:"
-        echo ""
-        echo "1. Copy config to remote peer:"
-        echo "   scp root@server:${config_file} remote:/etc/wireguard/wg0.conf"
-        echo ""
-        if [[ "$PEER_TYPE" == "p2p" ]]; then
-            echo "2. On remote peer, start WireGuard:"
-            echo "   sudo wg-quick up wg0"
-            echo "   sudo systemctl enable wg-quick@wg0"
-        else
-            echo "2. On remote site, use setup-site-remote.sh:"
-            echo "   sudo ./setup-site-remote.sh --config /etc/wireguard/wg0.conf"
-        fi
-        echo ""
-        echo "3. Test connectivity:"
-        echo "   ping ${tunnel_ip_only}"
+        echo "Next: Deploy to remote"
+        echo "  1. scp root@server:${config} remote:/etc/wireguard/wg0.conf"
+        [[ "$PEER_TYPE" == "p2p" ]] && echo "  2. sudo wg-quick up wg0" || echo "  2. sudo ./setup-site-remote.sh --config wg0.conf"
     fi
-
-    echo ""
-    echo "=========================================="
     echo ""
 }
 
