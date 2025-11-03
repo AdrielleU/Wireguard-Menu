@@ -482,6 +482,11 @@ This file documents the development process and AI assistance used in creating t
   - Peer rotation now default option (more common, less disruptive than server rotation)
   - Consistent confirmation pattern: Requires typing 'yes' for destructive operations
   - Follows same safety pattern as reset-wireguard.sh and setup-site-remote.sh
+  - **Hot reload improvements**: All peer operations now use `wg syncconf` instead of full restart
+    - add-peer.sh: Already using hot reload ✓
+    - remove-peer.sh: Updated to use hot reload (other peers stay connected)
+    - rotate-keys.sh (peer mode): Updated to use hot reload (only rotated peer disconnects)
+    - rotate-keys.sh (server mode): Still uses restart (required when server key changes)
 
 ## Contact & Support
 

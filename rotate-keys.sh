@@ -350,12 +350,25 @@ EOF
     chmod 600 "$peer_config"
     print_success "New peer config created"
 
-    # Restart server
-    print_info "Restarting WireGuard server..."
-    systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
-    sleep 1
-    systemctl start "wg-quick@${WG_INTERFACE}" || error_exit "Failed to start ${WG_INTERFACE}"
-    print_success "WireGuard server restarted"
+    # Reload server configuration
+    print_info "Reloading WireGuard configuration..."
+
+    if wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}"); then
+        print_success "WireGuard configuration reloaded"
+        print_info "Other connected peers remain unaffected"
+    else
+        print_warning "Hot reload failed, attempting full restart..."
+
+        systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+        sleep 1
+
+        if systemctl start "wg-quick@${WG_INTERFACE}"; then
+            print_success "WireGuard server restarted successfully"
+            print_warning "All peers were briefly disconnected during restart"
+        else
+            error_exit "Failed to start ${WG_INTERFACE}"
+        fi
+    fi
 
     # Summary
     echo ""

@@ -303,71 +303,25 @@ remove_peer_files() {
 reload_server() {
     local peer_public_key="$1"
 
-    print_info "Restarting WireGuard interface to disconnect peer..."
+    print_info "Reloading WireGuard configuration..."
 
-    print_info "Stopping ${WG_INTERFACE}..."
-
-    if ! ip link show "${WG_INTERFACE}" &>/dev/null; then
-        print_info "Interface ${WG_INTERFACE} is already down"
+    if wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}"); then
+        print_success "WireGuard configuration reloaded"
+        print_success "Removed peer has been disconnected from VPN"
+        print_info "Other connected peers remain unaffected"
     else
-        if wg-quick down "${WG_INTERFACE}"; then
-            print_success "Interface stopped with wg-quick"
-        elif systemctl stop "wg-quick@${WG_INTERFACE}"; then
-            print_success "Interface stopped with systemctl"
+        print_warning "Hot reload failed, attempting full restart..."
+
+        systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+        sleep 1
+
+        if systemctl start "wg-quick@${WG_INTERFACE}"; then
+            print_success "WireGuard interface restarted successfully"
+            print_warning "All peers were disconnected during restart"
         else
-            error_exit "Could not stop ${WG_INTERFACE}"
+            error_exit "Failed to restart ${WG_INTERFACE}"
         fi
-
-        sleep 1
-        if ip link show "${WG_INTERFACE}" &>/dev/null; then
-            error_exit "Failed to stop interface"
-        fi
-        print_success "Verified interface is stopped"
     fi
-
-    sleep 2
-
-    print_info "Starting ${WG_INTERFACE}..."
-    local start_success=false
-
-    if wg-quick up "${WG_INTERFACE}" 2>&1; then
-        print_success "Interface started with wg-quick"
-        start_success=true
-    elif systemctl start "wg-quick@${WG_INTERFACE}" 2>&1; then
-        print_success "Interface started with systemctl"
-        start_success=true
-    fi
-
-    print_info "Verifying service is active..."
-    local max_attempts=3
-    local attempt=1
-    local service_active=false
-
-    while [[ $attempt -le $max_attempts ]]; do
-        sleep 1
-        if systemctl is-active --quiet "wg-quick@${WG_INTERFACE}"; then
-            service_active=true
-            break
-        fi
-
-        if [[ $attempt -lt $max_attempts ]]; then
-            print_warning "Service not active yet, retrying ($attempt/$max_attempts)..."
-        fi
-        ((attempt++)) || true
-    done
-
-    if [[ "$service_active" == false ]]; then
-        echo ""
-        print_error "WireGuard interface failed to start after $max_attempts attempts!"
-        echo ""
-        print_info "Checking for errors..."
-        journalctl -xeu "wg-quick@${WG_INTERFACE}.service" --no-pager -n 20
-        echo ""
-        error_exit "Failed to restart ${WG_INTERFACE}. Check the error logs above."
-    fi
-
-    print_success "WireGuard interface restarted successfully"
-    print_success "Removed peer has been disconnected from VPN"
 }
 
 show_summary() {
@@ -433,8 +387,9 @@ main() {
     select_peer
 
     echo ""
-    print_warning "This will remove peer '${PEER_NAME}' from ${WG_INTERFACE}"
-    print_warning "The VPN server will restart - ALL connected peers will briefly disconnect"
+    print_warning "This will PERMANENTLY remove peer '${PEER_NAME}' from ${WG_INTERFACE}"
+    print_info "This peer will be disconnected immediately"
+    print_info "Other connected peers will remain unaffected"
     echo ""
     print_info "To backup before removal, run:"
     echo "  sudo cp /etc/wireguard/${WG_INTERFACE}.conf /etc/wireguard/${WG_INTERFACE}.conf.backup"
