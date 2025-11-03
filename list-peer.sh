@@ -24,10 +24,10 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+print_success() { echo -e "${GREEN}[✓]${NC} $1" >&2; }
 print_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
-print_info() { echo -e "${BLUE}[i]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
+print_info() { echo -e "${BLUE}[i]${NC} $1" >&2; }
 error_exit() { print_error "$1"; exit 1; }
 
 ################################################################################
@@ -107,7 +107,8 @@ extract_peers() {
     if [[ "$peers_found" == false ]]; then
         local peer_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
         if [[ -d "$peer_dir" ]]; then
-            for conf in "$peer_dir"/*.conf 2>/dev/null; do
+            shopt -s nullglob
+            for conf in "$peer_dir"/*.conf; do
                 [[ -f "$conf" ]] || continue
                 local name=$(basename "$conf" .conf)
                 [[ "$name" == "${WG_INTERFACE}" ]] && continue
@@ -116,6 +117,7 @@ extract_peers() {
                 local allowed=$(grep -oP '^AllowedIPs\s*=\s*\K.+' "$conf" 2>/dev/null | head -1 | xargs)
                 echo "Client|${name}|unknown|${allowed:-unknown}|"
             done
+            shopt -u nullglob
         fi
     fi
 }

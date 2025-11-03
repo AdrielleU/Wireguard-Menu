@@ -25,10 +25,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
-print_error() { echo -e "${RED}[✗]${NC} $1"; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
-print_info() { echo -e "${BLUE}[i]${NC} $1"; }
+print_success() { echo -e "${GREEN}[✓]${NC} $1" >&2; }
+print_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
+print_warning() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
+print_info() { echo -e "${BLUE}[i]${NC} $1" >&2; }
 
 ################################################################################
 # HELPER FUNCTIONS
@@ -119,7 +119,18 @@ list_peers() {
     if [[ -z "$peers" ]]; then
         local peer_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
         if [[ -d "$peer_dir" ]]; then
-            peers=$(ls "$peer_dir"/*.conf 2>/dev/null | xargs -n1 basename -s .conf | grep -v "^${WG_INTERFACE}$" || true)
+            shopt -s nullglob
+            local conf_files=("$peer_dir"/*.conf)
+            shopt -u nullglob
+
+            local peer_list=()
+            for conf in "${conf_files[@]}"; do
+                [[ -f "$conf" ]] || continue
+                local name=$(basename "$conf" .conf)
+                [[ "$name" == "${WG_INTERFACE}" ]] && continue
+                peer_list+=("$name")
+            done
+            peers=$(printf "%s\n" "${peer_list[@]}" 2>/dev/null || true)
         fi
     fi
 

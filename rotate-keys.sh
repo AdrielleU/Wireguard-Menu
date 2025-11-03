@@ -27,10 +27,10 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
-print_error() { echo -e "${RED}[✗]${NC} $1"; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
-print_info() { echo -e "${BLUE}[i]${NC} $1"; }
+print_success() { echo -e "${GREEN}[✓]${NC} $1" >&2; }
+print_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
+print_warning() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
+print_info() { echo -e "${BLUE}[i]${NC} $1" >&2; }
 error_exit() { print_error "$1"; exit 1; }
 
 ################################################################################
@@ -94,7 +94,20 @@ list_peers() {
 
     if [[ -z "$peers" ]]; then
         local peer_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
-        [[ -d "$peer_dir" ]] && peers=$(ls "$peer_dir"/*.conf 2>/dev/null | xargs -n1 basename -s .conf | grep -v "^${WG_INTERFACE}$" || true)
+        if [[ -d "$peer_dir" ]]; then
+            shopt -s nullglob
+            local conf_files=("$peer_dir"/*.conf)
+            shopt -u nullglob
+
+            local peer_list=()
+            for conf in "${conf_files[@]}"; do
+                [[ -f "$conf" ]] || continue
+                local name=$(basename "$conf" .conf)
+                [[ "$name" == "${WG_INTERFACE}" ]] && continue
+                peer_list+=("$name")
+            done
+            peers=$(printf "%s\n" "${peer_list[@]}" 2>/dev/null || true)
+        fi
     fi
 
     echo "$peers"
@@ -116,8 +129,8 @@ select_rotation_type() {
 
     echo ""
     print_info "What would you like to rotate?"
-    echo "  ${CYAN}1)${NC} Peer keys - Regenerate a single peer's keys"
-    echo "  ${CYAN}2)${NC} Server keys - Regenerate server keys (ALL peers need new configs)"
+    echo -e "  ${CYAN}1)${NC} Peer keys - Regenerate a single peer's keys"
+    echo -e "  ${CYAN}2)${NC} Server keys - Regenerate server keys (ALL peers need new configs)"
     echo ""
     read -p "Choice (1-2): " choice
 

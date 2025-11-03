@@ -12,6 +12,15 @@ set -euo pipefail
 ################################################################################
 
 WG_CONFIG_DIR="/etc/wireguard"
+
+# Default DNS servers (can be customized during peer creation)
+DEFAULT_DNS_SERVERS="1.1.1.1, 8.8.8.8"
+
+# Persistent keepalive interval in seconds (0 to disable)
+# Recommended: 25 for NAT traversal, 0 if both peers have public IPs
+DEFAULT_KEEPALIVE=25
+
+# Runtime variables (set during execution)
 SERVER_PORT=""           # Endpoint port (auto-detected or custom)
 PEER_NAME=""
 WG_INTERFACE=""
@@ -25,6 +34,8 @@ ALLOWED_IPS=""
 ROUTING_DESC=""
 PEER_PRIVATE_KEY=""
 PEER_PUBLIC_KEY=""
+DNS_SERVERS=""           # Custom DNS (defaults to DEFAULT_DNS_SERVERS)
+KEEPALIVE=""             # Custom keepalive (defaults to DEFAULT_KEEPALIVE)
 
 ################################################################################
 # COLORS
@@ -37,10 +48,10 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
-print_error() { echo -e "${RED}[✗]${NC} $1"; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1"; }
-print_info() { echo -e "${BLUE}[i]${NC} $1"; }
+print_success() { echo -e "${GREEN}[✓]${NC} $1" >&2; }
+print_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
+print_warning() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
+print_info() { echo -e "${BLUE}[i]${NC} $1" >&2; }
 
 ################################################################################
 # HELPER FUNCTIONS
@@ -114,8 +125,8 @@ select_server() {
 
     local i=1
     for iface in "${servers[@]}"; do
-        local conf_ip=$(grep -E "^Address\s*=" "${WG_CONFIG_DIR}/${iface}.conf" | head -n1 | awk '{print $3}')
-        local conf_port=$(grep -E "^ListenPort\s*=" "${WG_CONFIG_DIR}/${iface}.conf" | head -n1 | awk '{print $3}')
+        local conf_ip=$(grep -E "^Address\s*=" "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -n1 | awk '{print $3}' || echo "N/A")
+        local conf_port=$(grep -E "^ListenPort\s*=" "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -n1 | awk '{print $3}' || echo "N/A")
         printf "  ${BLUE}%d)${NC} %s - %s, Port %s\n" "$i" "$iface" "$conf_ip" "$conf_port"
         ((i++)) || true
     done
@@ -133,7 +144,8 @@ select_server() {
 
 get_local_network() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local server_address=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')
+    local server_address=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}')
+    [[ -z "$server_address" ]] && { echo "10.0.0.0/24"; return; }
     local network_base=$(echo "$server_address" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3".0"}')
     local network_cidr=$(echo "$server_address" | cut -d'/' -f2)
     echo "${network_base}/${network_cidr}"
@@ -156,9 +168,10 @@ get_primary_interface_network() {
 
 get_next_available_ip() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local server_address=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}')
+    local server_address=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}')
+    [[ -z "$server_address" ]] && { echo "10.0.0.2"; return; }
     local network_base=$(echo "$server_address" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-    local used_ips=$(grep -E "AllowedIPs\s*=" "$config_file" | awk '{print $3}' | cut -d',' -f1 | cut -d'/' -f1 | cut -d'.' -f4 | sort -n)
+    local used_ips=$(grep -E "AllowedIPs\s*=" "$config_file" 2>/dev/null | awk '{print $3}' | cut -d',' -f1 | cut -d'/' -f1 | cut -d'.' -f4 | sort -n)
 
     for i in {2..254}; do
         if ! echo "$used_ips" | grep -q "^${i}$"; then
@@ -176,10 +189,10 @@ get_public_ip() {
     local services=("https://api.ipify.org" "https://icanhazip.com")
 
     for service in "${services[@]}"; do
-        public_ip=$(curl -s --connect-timeout 2 --max-time 3 "$service" 2>/dev/null | tr -d '\n')
+        public_ip=$(curl -s --connect-timeout 2 --max-time 3 "$service" 2>/dev/null | tr -d '\n' | tr -d '\r')
         if [[ -n "$public_ip" ]] && [[ "$public_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "$public_ip"
-            return
+            return 0
         fi
     done
 
@@ -219,9 +232,9 @@ select_peer_type() {
 
     echo ""
     print_info "Select peer type:"
-    echo "  ${CYAN}1)${NC} Client - Single device"
-    echo "  ${CYAN}2)${NC} Site - Remote network (site-to-site)"
-    echo "  ${CYAN}3)${NC} P2P - Equal peer (bidirectional)"
+    echo -e "  ${CYAN}1)${NC} Client - Single device"
+    echo -e "  ${CYAN}2)${NC} Site - Remote network (site-to-site)"
+    echo -e "  ${CYAN}3)${NC} P2P - Equal peer (bidirectional)"
     echo ""
     read -p "Choice (1-3): " choice
 
@@ -240,7 +253,8 @@ select_peer_type() {
 
 get_server_info() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local server_listen_port=$(grep -E "^ListenPort\s*=" "$config_file" | head -n1 | awk '{print $3}')
+    local server_listen_port=$(grep -E "^ListenPort\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}')
+    [[ -z "$server_listen_port" ]] && error_exit "Could not read ListenPort from ${config_file}"
 
     # Get server public key
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
@@ -356,7 +370,7 @@ prompt_peer_name() {
 }
 
 prompt_remote_network() {
-    needs_remote_network "$PEER_TYPE" || return
+    needs_remote_network "$PEER_TYPE" || return 0
 
     if [[ -z "$REMOTE_NETWORK" ]]; then
         while true; do
@@ -375,7 +389,7 @@ prompt_remote_network() {
 }
 
 prompt_peer_listen_port() {
-    needs_listen_port "$PEER_TYPE" || return
+    needs_listen_port "$PEER_TYPE" || return 0
 
     if [[ -z "$PEER_LISTEN_PORT" ]]; then
         while true; do
@@ -392,8 +406,20 @@ prompt_peer_listen_port() {
 
 prompt_peer_ip() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local server_cidr=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' | cut -d'/' -f2)
-    local server_net=$(grep -E "^Address\s*=" "$config_file" | head -n1 | awk '{print $3}' | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
+
+    # Debug: Check if config file exists
+    if [[ ! -f "$config_file" ]]; then
+        error_exit "Configuration file not found: ${config_file}"
+    fi
+
+    local server_cidr=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' | cut -d'/' -f2 || echo "24")
+    local server_net=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}' || echo "")
+
+    if [[ -z "$server_net" ]]; then
+        print_error "Could not read server address from ${config_file}"
+        print_info "Make sure your WireGuard config has an 'Address' line like: Address = 10.0.0.1/24"
+        exit 1
+    fi
 
     if [[ -z "$PEER_IP" ]]; then
         while true; do
@@ -417,6 +443,52 @@ prompt_peer_ip() {
         validate_cidr "$PEER_IP" || error_exit "Invalid IP"
         local peer_net=$(echo "$PEER_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
         [[ "$peer_net" == "$server_net" ]] || error_exit "Wrong network"
+    fi
+}
+
+configure_dns() {
+    # Only for clients
+    [[ "$PEER_TYPE" != "client" ]] && return 0
+
+    if [[ -z "$DNS_SERVERS" ]]; then
+        echo ""
+        echo "=========================================="
+        print_info "DNS Configuration"
+        echo "=========================================="
+        echo ""
+        echo "DNS servers for client to use when connected to VPN."
+        echo "Default: ${DEFAULT_DNS_SERVERS}"
+        echo ""
+        echo "Options:"
+        echo "  1) Use default (${DEFAULT_DNS_SERVERS})"
+        echo "  2) Custom DNS servers"
+        echo "  3) No DNS (client uses existing DNS)"
+        echo ""
+        read -p "Select DNS option (1-3) [1]: " dns_choice
+        dns_choice="${dns_choice:-1}"
+
+        case "$dns_choice" in
+            1)
+                DNS_SERVERS="${DEFAULT_DNS_SERVERS}"
+                print_success "Using default DNS: ${DNS_SERVERS}"
+                ;;
+            2)
+                echo ""
+                echo "Enter DNS servers (comma-separated)"
+                echo "Examples: 1.1.1.1, 8.8.8.8  or  10.0.0.1"
+                read -p "DNS servers: " custom_dns
+                DNS_SERVERS="${custom_dns}"
+                [[ -n "$DNS_SERVERS" ]] && print_success "Using custom DNS: ${DNS_SERVERS}"
+                ;;
+            3)
+                DNS_SERVERS=""
+                print_info "DNS disabled (client will use existing DNS settings)"
+                ;;
+            *)
+                print_warning "Invalid choice, using default"
+                DNS_SERVERS="${DEFAULT_DNS_SERVERS}"
+                ;;
+        esac
     fi
 }
 
@@ -517,10 +589,22 @@ configure_routing() {
 
 prompt_peer_config() {
     prompt_peer_name
+    print_success "Peer name validated: ${PEER_NAME}"
+
+    print_info "Checking for remote network requirements..."
     prompt_remote_network
+
+    print_info "Checking for listen port requirements..."
     prompt_peer_listen_port
+
+    print_info "Configuring peer IP address..."
     prompt_peer_ip
+
+    print_info "Getting server information..."
     get_server_info
+
+    # Configure DNS (clients only)
+    configure_dns
 }
 
 generate_keypair() {
@@ -587,6 +671,9 @@ create_peer_config() {
         ROUTING_DESC="VPN network only (default)"
     fi
 
+    # Set keepalive (default if not specified)
+    [[ -z "$KEEPALIVE" ]] && KEEPALIVE="${DEFAULT_KEEPALIVE}"
+
     # Build config
     cat > "$config_file" <<EOF
 [Interface]
@@ -599,8 +686,10 @@ EOF
         echo "ListenPort = ${PEER_LISTEN_PORT}" >> "$config_file"
     fi
 
-    # Add DNS for clients only
-    has_dns "$PEER_TYPE" && echo "DNS = 1.1.1.1, 8.8.8.8" >> "$config_file"
+    # Add DNS for clients (if configured)
+    if [[ "$PEER_TYPE" == "client" && -n "$DNS_SERVERS" ]]; then
+        echo "DNS = ${DNS_SERVERS}" >> "$config_file"
+    fi
 
     cat >> "$config_file" <<EOF
 
@@ -608,7 +697,7 @@ EOF
 PublicKey = ${SERVER_PUBLIC_KEY}
 Endpoint = ${SERVER_ENDPOINT}:${SERVER_PORT}
 AllowedIPs = ${ALLOWED_IPS}
-PersistentKeepalive = 25
+PersistentKeepalive = ${KEEPALIVE}
 EOF
 
     chmod 600 "$config_file"
@@ -616,7 +705,7 @@ EOF
 }
 
 add_route_for_remote_network() {
-    needs_remote_network "$PEER_TYPE" || return
+    needs_remote_network "$PEER_TYPE" || return 0
 
     print_info "Setting up route for remote network..."
 
@@ -691,6 +780,9 @@ parse_arguments() {
             --route-all) ALLOWED_IPS="0.0.0.0/0"; ROUTING_DESC="All traffic"; shift ;;
             --route-vpn-only) ALLOWED_IPS="vpn-only"; shift ;;
             --route-custom) ALLOWED_IPS="$2"; ROUTING_DESC="Custom routing"; shift 2 ;;
+            --dns) DNS_SERVERS="$2"; shift 2 ;;
+            --no-dns) DNS_SERVERS=""; shift ;;
+            --keepalive) KEEPALIVE="$2"; shift 2 ;;
             -h|--help)
                 echo "Usage: sudo $0 [OPTIONS]"
                 echo ""
@@ -713,6 +805,11 @@ parse_arguments() {
                 echo "  --route-all              Route all traffic (0.0.0.0/0)"
                 echo "  --route-vpn-only         Route only VPN network"
                 echo "  --route-custom CIDR      Custom routes"
+                echo ""
+                echo "Network Options:"
+                echo "  --dns SERVERS            Custom DNS (e.g., '1.1.1.1, 8.8.8.8')"
+                echo "  --no-dns                 Disable DNS (use client's existing DNS)"
+                echo "  --keepalive SECONDS      PersistentKeepalive interval (default: ${DEFAULT_KEEPALIVE})"
                 echo ""
                 echo "Examples:"
                 echo "  sudo $0                                    # Interactive"
