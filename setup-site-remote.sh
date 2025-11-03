@@ -188,8 +188,11 @@ remove_firewalld_rules() {
         print_success "Removed forwarding rules for ${lan_iface} <-> ${WG_INTERFACE}"
     fi
 
-    # Reload firewall
-    firewall-cmd --reload 2>/dev/null || true
+    # Restart firewall to apply changes
+    print_info "Restarting firewall..."
+    systemctl stop firewalld 2>/dev/null || true
+    sleep 1
+    systemctl start firewalld 2>/dev/null || true
 
     print_success "Firewalld rules removed"
 }
@@ -407,14 +410,14 @@ full_reset_client() {
     # Step 1: Stop and disable service
     print_info "Step 1/5: Stopping WireGuard service..."
     if systemctl is-active --quiet "wg-quick@${WG_INTERFACE}" 2>/dev/null; then
-        systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+        timeout 30 systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
         print_success "Service stopped"
     else
         print_info "Service not running"
     fi
 
     if systemctl is-enabled --quiet "wg-quick@${WG_INTERFACE}" 2>/dev/null; then
-        systemctl disable "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
+        timeout 30 systemctl disable "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
         print_success "Service disabled"
     else
         print_info "Service not enabled"
@@ -849,7 +852,10 @@ fix_incorrect_masquerade() {
         if firewall-cmd --zone=trusted --query-masquerade 2>/dev/null; then
             print_info "Removing masquerade from trusted zone..."
             firewall-cmd --permanent --zone=trusted --remove-masquerade 2>/dev/null || true
-            firewall-cmd --reload 2>/dev/null || true
+            print_info "Restarting firewall..."
+            systemctl stop firewalld 2>/dev/null || true
+            sleep 1
+            systemctl start firewalld 2>/dev/null || true
             print_success "Fixed firewalld masquerade"
             ((fixed_count++))
         fi
@@ -977,7 +983,7 @@ configure_firewalld() {
         echo "To fix this, run:"
         echo "  sudo firewall-cmd --permanent --zone=${current_zone} --remove-interface=${WG_INTERFACE}"
         echo "  sudo firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE}"
-        echo "  sudo firewall-cmd --reload"
+        echo "  sudo systemctl restart firewalld"
         echo ""
         error_exit "Fix the zone conflict and re-run this script"
     fi
@@ -1001,79 +1007,121 @@ configure_firewalld() {
     # For site-to-site VPN, we do NOT enable masquerade at all
     # This allows proper routing between Site A LAN <-> VPN <-> Site B LAN
 
-    # Add FORWARD rules for LAN <-> VPN traffic
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT 2>/dev/null || true
-
-    # Add FORWARD rules for peer-to-peer VPN traffic (essential for site-to-site)
-    # Allow traffic between VPN peers through the tunnel
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-
-    # NEW: Add firewalld policy for zone-to-zone forwarding (required for firewalld 0.9.0+)
-    # Policies control traffic flow between zones in newer firewalld versions
-    echo ""
-    print_info "Configuring firewall zones for site-to-site VPN..."
-    print_info "  - WireGuard interface (${WG_INTERFACE}) → 'trusted' zone"
-    print_info "  - LAN interface (${LAN_INTERFACE}) → auto-detected zone"
-    print_info "  - Default: 'public' zone (recommended for VPN)"
-    echo ""
-
-    # Detect the zone of the LAN interface
-    local lan_zone=$(firewall-cmd --get-zone-of-interface=${LAN_INTERFACE} 2>/dev/null)
-
-    # For VPN purposes, we simplify to use only public and trusted zones
-    # Ignore internal zone and other zones, treat as public for consistency
+    # Detect LAN zone
+    local lan_zone=$(firewall-cmd --get-zone-of-interface=${LAN_INTERFACE} 2>/dev/null || echo "public")
     if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "internal" ]]; then
         lan_zone="public"
-        print_success "Auto-selected zone 'public' for ${LAN_INTERFACE} (default for VPN)"
-    else
-        print_success "Detected zone '${lan_zone}' for ${LAN_INTERFACE}"
     fi
 
-    # Enable forwarding on LAN zone (visible in firewall-cmd --list-all)
-    print_info "Enabling forwarding on ${lan_zone} zone"
-    if firewall-cmd --permanent --zone=${lan_zone} --add-forward 2>/dev/null; then
-        print_success "Zone forwarding enabled on ${lan_zone}"
-    else
-        print_info "Zone forwarding not supported (using direct rules instead)"
-    fi
+    echo ""
+    print_info "Zone configuration:"
+    print_info "  - WireGuard (${WG_INTERFACE}) → trusted zone"
+    print_info "  - LAN (${LAN_INTERFACE}) → ${lan_zone} zone"
+    echo ""
 
-    # Check if firewalld supports policies (version 0.9.0+)
+    # Check for modern firewalld with policy support (0.9.0+)
     if firewall-cmd --get-policies &>/dev/null; then
-        print_info "Detected firewalld with policy support (0.9.0+)"
+        print_info "Using modern firewalld policies (recommended for 0.9.0+)"
+        echo ""
 
-        # Create policy name based on zones
-        local policy_name="${lan_zone}-to-trusted"
+        # Enable forwarding on zones
+        firewall-cmd --permanent --zone=${lan_zone} --add-forward 2>/dev/null || true
+        firewall-cmd --permanent --zone=trusted --add-forward 2>/dev/null || true
 
-        # Remove existing policy if it exists (for clean reconfiguration)
-        firewall-cmd --permanent --delete-policy=${policy_name} 2>/dev/null || true
+        # Policy 1: VPN peer-to-peer (trusted ↔ trusted)
+        # NOTE: Policy names have 18 char max limit
+        local policy_vpn="wg-peer-to-peer"  # 15 chars
 
-        # Create new policy for LAN zone -> trusted zone (WireGuard)
-        print_info "Creating firewalld policy: ${policy_name}"
-        firewall-cmd --permanent --new-policy=${policy_name} 2>/dev/null || true
-        firewall-cmd --permanent --policy=${policy_name} --set-target=ACCEPT
-        firewall-cmd --permanent --policy=${policy_name} --add-ingress-zone=${lan_zone}
-        firewall-cmd --permanent --policy=${policy_name} --add-egress-zone=trusted
+        # Check if policy already exists with correct configuration
+        if firewall-cmd --permanent --query-policy=${policy_vpn} &>/dev/null; then
+            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_vpn} 2>/dev/null || echo "")
+            if echo "$policy_info" | grep -q "ingress-zones: trusted" && \
+               echo "$policy_info" | grep -q "egress-zones: trusted"; then
+                print_success "Policy already exists: ${policy_vpn} (correct configuration)"
+            else
+                print_info "Policy exists but incorrect, recreating: ${policy_vpn}"
+                firewall-cmd --permanent --delete-policy=${policy_vpn} 2>/dev/null || true
+                if firewall-cmd --permanent --new-policy=${policy_vpn} 2>/dev/null; then
+                    firewall-cmd --permanent --policy=${policy_vpn} --set-target=ACCEPT
+                    firewall-cmd --permanent --policy=${policy_vpn} --add-ingress-zone=trusted
+                    firewall-cmd --permanent --policy=${policy_vpn} --add-egress-zone=trusted
+                    print_success "Policy recreated: ${policy_vpn}"
+                fi
+            fi
+        else
+            print_info "Creating policy: ${policy_vpn} (VPN ↔ VPN)"
+            if firewall-cmd --permanent --new-policy=${policy_vpn} 2>/dev/null; then
+                firewall-cmd --permanent --policy=${policy_vpn} --set-target=ACCEPT
+                firewall-cmd --permanent --policy=${policy_vpn} --add-ingress-zone=trusted
+                firewall-cmd --permanent --policy=${policy_vpn} --add-egress-zone=trusted
+                print_success "Policy created: trusted ↔ trusted (VPN peer-to-peer)"
+            fi
+        fi
 
-        # Create reverse policy for trusted zone -> LAN zone (return traffic)
-        local reverse_policy_name="trusted-to-${lan_zone}"
-        firewall-cmd --permanent --delete-policy=${reverse_policy_name} 2>/dev/null || true
-        firewall-cmd --permanent --new-policy=${reverse_policy_name} 2>/dev/null || true
-        firewall-cmd --permanent --policy=${reverse_policy_name} --set-target=ACCEPT
-        firewall-cmd --permanent --policy=${reverse_policy_name} --add-ingress-zone=trusted
-        firewall-cmd --permanent --policy=${reverse_policy_name} --add-egress-zone=${lan_zone}
+        # Policy 2: LAN ↔ VPN (bidirectional)
+        # NOTE: Policy names have 18 char max limit (e.g., "public-wg-lan" = 13 chars)
+        local policy_lan_vpn="${lan_zone}-wg-lan"
 
-        print_success "Firewalld policies created for zone-to-zone forwarding"
-        print_info "  - Policy: ${policy_name} (${lan_zone} → trusted)"
-        print_info "  - Policy: ${reverse_policy_name} (trusted → ${lan_zone})"
+        # Check if policy already exists with correct configuration
+        if firewall-cmd --permanent --query-policy=${policy_lan_vpn} &>/dev/null; then
+            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_lan_vpn} 2>/dev/null || echo "")
+            if echo "$policy_info" | grep -q "ingress-zones: ${lan_zone} trusted" && \
+               echo "$policy_info" | grep -q "egress-zones: ${lan_zone} trusted"; then
+                print_success "Policy already exists: ${policy_lan_vpn} (correct configuration)"
+            else
+                print_info "Policy exists but incorrect, recreating: ${policy_lan_vpn}"
+                firewall-cmd --permanent --delete-policy=${policy_lan_vpn} 2>/dev/null || true
+                if firewall-cmd --permanent --new-policy=${policy_lan_vpn} 2>/dev/null; then
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --set-target=ACCEPT
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=${lan_zone}
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=trusted
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=${lan_zone}
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=trusted
+                    print_success "Policy recreated: ${policy_lan_vpn}"
+                fi
+            fi
+        else
+            print_info "Creating policy: ${policy_lan_vpn} (LAN ↔ VPN)"
+            if firewall-cmd --permanent --new-policy=${policy_lan_vpn} 2>/dev/null; then
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --set-target=ACCEPT
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=${lan_zone}
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=trusted
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=${lan_zone}
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=trusted
+                print_success "Policy created: ${lan_zone} ↔ trusted (LAN ↔ VPN)"
+            fi
+        fi
+
+        print_success "Modern firewalld policies configured for site-to-site VPN"
+
     else
-        print_info "Using direct rules only (older firewalld version)"
+        # Legacy firewalld (< 0.9.0) - use direct rules
+        print_info "Using legacy direct rules (firewalld < 0.9.0)"
+        echo ""
+
+        # LAN ↔ VPN forwarding
+        print_info "Adding FORWARD rules for LAN ↔ VPN traffic..."
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT 2>/dev/null || true
+
+        # VPN peer-to-peer forwarding
+        print_info "Adding FORWARD rules for VPN peer-to-peer traffic..."
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+
+        print_success "Legacy firewalld direct rules configured"
     fi
 
-    # Reload firewall
-    firewall-cmd --reload
+    # Restart firewall to apply changes
+    print_info "Restarting firewall..."
+    systemctl stop firewalld 2>/dev/null || true
+    sleep 1
+    if systemctl start firewalld 2>/dev/null; then
+        print_success "Firewall restarted successfully"
+    else
+        print_warning "Firewall restart failed (check firewall status)"
+    fi
 
     print_success "Firewalld configured (no masquerade - proper site-to-site routing)"
     print_info "  - ${WG_INTERFACE} added to trusted zone"
@@ -1230,7 +1278,7 @@ start_wireguard() {
     # Stop if already running
     print_info "Stopping ${WG_INTERFACE} (if running)..."
     if ip link show "${WG_INTERFACE}" &>/dev/null; then
-        systemctl stop wg-quick@${WG_INTERFACE} 2>/dev/null || wg-quick down ${WG_INTERFACE} 2>/dev/null || true
+        timeout 30 systemctl stop wg-quick@${WG_INTERFACE} 2>/dev/null || timeout 30 wg-quick down ${WG_INTERFACE} 2>/dev/null || true
         sleep 1
         if ip link show "${WG_INTERFACE}" &>/dev/null; then
             print_warning "Interface still exists, forcing removal..."
@@ -1240,16 +1288,18 @@ start_wireguard() {
 
     sleep 2
 
-    # Start WireGuard with output capture
+    # Start WireGuard with output capture and timeout
     print_info "Starting ${WG_INTERFACE}..."
     local start_time=$(date '+%Y-%m-%d %H:%M:%S')
     local start_output
     local start_success=false
 
-    if start_output=$(wg-quick up ${WG_INTERFACE} 2>&1); then
+    # Try wg-quick first with timeout
+    if start_output=$(timeout 30 wg-quick up ${WG_INTERFACE} 2>&1); then
         print_success "Interface started with wg-quick"
         start_success=true
-    elif start_output=$(systemctl start wg-quick@${WG_INTERFACE} 2>&1); then
+    # Try systemctl with timeout as fallback
+    elif start_output=$(timeout 30 systemctl start wg-quick@${WG_INTERFACE} 2>&1); then
         print_success "Interface started with systemctl"
         start_success=true
     fi
@@ -1261,7 +1311,16 @@ start_wireguard() {
         print_info "Command output:"
         echo "$start_output"
         echo ""
-        error_exit "Could not start ${WG_INTERFACE}"
+
+        # Show interface status for debugging
+        if ip link show "${WG_INTERFACE}" &>/dev/null; then
+            print_info "Interface exists but may not be configured properly"
+            echo ""
+            echo "Interface status:"
+            ip addr show "${WG_INTERFACE}" 2>&1 | head -10
+        fi
+
+        error_exit "Could not start ${WG_INTERFACE} (timed out after 30 seconds)"
     fi
 
     # Verify interface is actually up (check actual interface, not just systemd service)

@@ -995,97 +995,166 @@ configure_firewalld() {
     # Enable masquerading for exit node functionality
     if [[ "$EXIT_NODE" == true ]]; then
         firewall-cmd --permanent --zone=public --add-masquerade || error_exit "Failed to enable masquerading"
-        # Enable forwarding on public zone for exit node
-        firewall-cmd --permanent --zone=public --add-forward 2>/dev/null || true
-        print_info "Masquerading enabled for exit node mode"
+        print_info "Masquerading enabled for exit node mode (VPN → Internet)"
     fi
 
-    # Add FORWARD rules for site-to-site VPN (peer-to-peer communication)
-    # Allow traffic between VPN peers (essential for site-to-site)
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-    firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-
-    # Detect LAN interface and add forwarding rules for LAN <-> VPN traffic
+    # Detect LAN interface for forwarding configuration
     local lan_interface=$(ip route | grep default | awk '{print $5}' | head -1)
+    local lan_zone=""
+
     if [[ -n "$lan_interface" ]]; then
-        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${lan_interface} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${lan_interface} -j ACCEPT 2>/dev/null || true
-        print_info "Added FORWARD rules for LAN interface: ${lan_interface}"
+        # Detect which zone the LAN interface is in
+        lan_zone=$(firewall-cmd --get-zone-of-interface=${lan_interface} 2>/dev/null || echo "public")
+
+        # Enable masquerading on LAN zone (required for VPN clients to access LAN)
+        if ! firewall-cmd --zone=${lan_zone} --query-masquerade &>/dev/null; then
+            firewall-cmd --permanent --zone=${lan_zone} --add-masquerade 2>/dev/null || true
+            print_info "Enabled masquerading on ${lan_zone} zone (VPN → LAN access)"
+        fi
     fi
 
-    # NEW: Add firewalld policy for zone-to-zone forwarding (required for firewalld 0.9.0+)
-    # Policies control traffic flow between zones in newer firewalld versions
+    # Check for modern firewalld with policy support (0.9.0+)
     if firewall-cmd --get-policies &>/dev/null; then
-        print_info "Detected firewalld with policy support (0.9.0+)"
-
-        echo ""
-        print_info "Configuring firewall zones for VPN..."
-        print_info "  - WireGuard interface (${WG_INTERFACE}) → 'trusted' zone"
-        print_info "  - LAN interface (${lan_interface}) → auto-detected zone"
-        print_info "  - Default: 'public' zone (recommended for VPN)"
+        print_info "Using modern firewalld policies (recommended for 0.9.0+)"
         echo ""
 
-        # Detect the zone of the LAN interface
-        local lan_zone=$(firewall-cmd --get-zone-of-interface=${lan_interface} 2>/dev/null)
-
-        # For VPN purposes, we simplify to use only public and trusted zones
-        # Ignore internal zone and other zones, treat as public for consistency
+        # Simplify zone detection: default to 'public' for consistency
         if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "internal" ]]; then
             lan_zone="public"
-            print_success "Auto-selected zone 'public' for ${lan_interface} (default for VPN)"
-        else
-            print_success "Detected zone '${lan_zone}' for ${lan_interface}"
         fi
 
-        # Enable forwarding on LAN zone (visible in firewall-cmd --list-all)
-        print_info "Enabling forwarding on ${lan_zone} zone"
+        print_info "Zone configuration:"
+        print_info "  - WireGuard (${WG_INTERFACE}) → trusted zone"
+        print_info "  - LAN (${lan_interface}) → ${lan_zone} zone"
+        echo ""
+
+        # Enable forwarding on LAN zone (makes policy visible in firewall-cmd --list-all)
         if firewall-cmd --permanent --zone=${lan_zone} --add-forward 2>/dev/null; then
             print_success "Zone forwarding enabled on ${lan_zone}"
-        else
-            print_info "Zone forwarding not supported (using direct rules instead)"
         fi
 
-        # Create policy name based on zones
-        local policy_name="${lan_zone}-to-trusted"
+        # Policy 1: VPN peer-to-peer (trusted ↔ trusted)
+        # NOTE: Policy names have 18 char max limit
+        local policy_vpn="wg-peer-to-peer"  # 15 chars
 
-        # Remove existing policy if it exists (for clean reconfiguration)
-        firewall-cmd --permanent --delete-policy=${policy_name} 2>/dev/null || true
+        # Check if policy already exists with correct configuration
+        if firewall-cmd --permanent --query-policy=${policy_vpn} &>/dev/null; then
+            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_vpn} 2>/dev/null || echo "")
+            if echo "$policy_info" | grep -q "ingress-zones: trusted" && \
+               echo "$policy_info" | grep -q "egress-zones: trusted"; then
+                print_success "Policy already exists: ${policy_vpn} (correct configuration)"
+            else
+                print_info "Policy exists but incorrect, recreating: ${policy_vpn}"
+                firewall-cmd --permanent --delete-policy=${policy_vpn} 2>/dev/null || true
+                if firewall-cmd --permanent --new-policy=${policy_vpn} 2>/dev/null; then
+                    firewall-cmd --permanent --policy=${policy_vpn} --set-target=ACCEPT
+                    firewall-cmd --permanent --policy=${policy_vpn} --add-ingress-zone=trusted
+                    firewall-cmd --permanent --policy=${policy_vpn} --add-egress-zone=trusted
+                    print_success "Policy recreated: ${policy_vpn}"
+                fi
+            fi
+        else
+            print_info "Creating policy: ${policy_vpn} (VPN ↔ VPN)"
+            if firewall-cmd --permanent --new-policy=${policy_vpn} 2>/dev/null; then
+                firewall-cmd --permanent --policy=${policy_vpn} --set-target=ACCEPT
+                firewall-cmd --permanent --policy=${policy_vpn} --add-ingress-zone=trusted
+                firewall-cmd --permanent --policy=${policy_vpn} --add-egress-zone=trusted
+                print_success "Policy created: trusted ↔ trusted (VPN peer-to-peer)"
+            else
+                print_warning "Failed to create peer-to-peer policy"
+            fi
+        fi
 
-        # Create new policy for LAN zone -> trusted zone (WireGuard)
-        print_info "Creating firewalld policy: ${policy_name}"
-        firewall-cmd --permanent --new-policy=${policy_name} 2>/dev/null || true
-        firewall-cmd --permanent --policy=${policy_name} --set-target=ACCEPT
-        firewall-cmd --permanent --policy=${policy_name} --add-ingress-zone=${lan_zone}
-        firewall-cmd --permanent --policy=${policy_name} --add-egress-zone=trusted
+        # Policy 2: LAN ↔ VPN (bidirectional)
+        # NOTE: Policy names have 18 char max limit (e.g., "public-wg-lan" = 13 chars)
+        local policy_lan_vpn="${lan_zone}-wg-lan"
 
-        # Create reverse policy for trusted zone -> LAN zone (return traffic)
-        local reverse_policy_name="trusted-to-${lan_zone}"
-        firewall-cmd --permanent --delete-policy=${reverse_policy_name} 2>/dev/null || true
-        firewall-cmd --permanent --new-policy=${reverse_policy_name} 2>/dev/null || true
-        firewall-cmd --permanent --policy=${reverse_policy_name} --set-target=ACCEPT
-        firewall-cmd --permanent --policy=${reverse_policy_name} --add-ingress-zone=trusted
-        firewall-cmd --permanent --policy=${reverse_policy_name} --add-egress-zone=${lan_zone}
+        # Check if policy already exists with correct configuration
+        if firewall-cmd --permanent --query-policy=${policy_lan_vpn} &>/dev/null; then
+            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_lan_vpn} 2>/dev/null || echo "")
+            if echo "$policy_info" | grep -q "ingress-zones: ${lan_zone} trusted" && \
+               echo "$policy_info" | grep -q "egress-zones: ${lan_zone} trusted"; then
+                print_success "Policy already exists: ${policy_lan_vpn} (correct configuration)"
+            else
+                print_info "Policy exists but incorrect, recreating: ${policy_lan_vpn}"
+                firewall-cmd --permanent --delete-policy=${policy_lan_vpn} 2>/dev/null || true
+                if firewall-cmd --permanent --new-policy=${policy_lan_vpn} 2>/dev/null; then
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --set-target=ACCEPT
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=${lan_zone}
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=trusted
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=${lan_zone}
+                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=trusted
+                    print_success "Policy recreated: ${policy_lan_vpn}"
+                fi
+            fi
+        else
+            print_info "Creating policy: ${policy_lan_vpn} (LAN ↔ VPN)"
+            if firewall-cmd --permanent --new-policy=${policy_lan_vpn} 2>/dev/null; then
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --set-target=ACCEPT
 
-        print_success "Firewalld policies created for zone-to-zone forwarding"
-        print_info "  - Policy: ${policy_name} (${lan_zone} → trusted)"
-        print_info "  - Policy: ${reverse_policy_name} (trusted → ${lan_zone})"
+                # Bidirectional: LAN ↔ WireGuard
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=${lan_zone}
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=trusted
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=${lan_zone}
+                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=trusted
+
+                print_success "Policy created: ${lan_zone} ↔ trusted (LAN ↔ VPN)"
+            else
+                print_warning "Failed to create LAN-VPN policy"
+            fi
+        fi
+
+        print_success "Modern firewalld policies configured"
+        print_info "  - VPN clients can reach each other (peer-to-peer)"
+        print_info "  - VPN clients can reach LAN devices"
+        print_info "  - LAN devices can reach VPN clients"
+
     else
-        print_info "Using direct rules only (older firewalld version)"
+        # Legacy firewalld (< 0.9.0) - use direct rules
+        print_info "Using legacy direct rules (firewalld < 0.9.0)"
+        echo ""
+
+        # VPN peer-to-peer forwarding
+        print_info "Adding FORWARD rules for VPN peer-to-peer traffic..."
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+
+        # LAN ↔ VPN forwarding
+        if [[ -n "$lan_interface" ]]; then
+            print_info "Adding FORWARD rules for LAN ↔ VPN traffic..."
+            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${lan_interface} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${lan_interface} -j ACCEPT 2>/dev/null || true
+            print_success "FORWARD rules added for: ${lan_interface} ↔ ${WG_INTERFACE}"
+        fi
+
+        print_success "Legacy firewalld direct rules configured"
     fi
 
     # Reload firewall
     firewall-cmd --reload || error_exit "Failed to reload firewalld"
 
-    print_success "firewalld configured"
-    print_info "  - Port ${WG_PORT}/udp opened"
+    echo ""
+    print_success "firewalld configured successfully"
+    print_info "Configuration summary:"
+    print_info "  - Port ${WG_PORT}/udp opened on public zone"
     print_info "  - ${WG_INTERFACE} added to trusted zone"
-    print_info "  - Zone forwarding enabled (visible in --list-all)"
-    print_info "  - FORWARD rules configured for site-to-site VPN"
-    if [[ -n "$lan_interface" ]]; then
-        print_info "  - LAN interface ${lan_interface} forwarding enabled"
+
+    if firewall-cmd --get-policies &>/dev/null; then
+        print_info "  - Modern policies: VPN peer-to-peer + LAN ↔ VPN"
+    else
+        print_info "  - Legacy direct FORWARD rules configured"
     fi
-    log "firewalld configured with port ${WG_PORT}/udp and zone forwarding"
+
+    if [[ -n "$lan_interface" ]]; then
+        print_info "  - LAN interface: ${lan_interface} (${lan_zone} zone)"
+    fi
+
+    if [[ "$EXIT_NODE" == true ]]; then
+        print_info "  - Exit node enabled (VPN → Internet)"
+    fi
+
+    log "firewalld configured: port=${WG_PORT}, interface=${WG_INTERFACE}, policies/rules added"
 }
 
 configure_ufw() {

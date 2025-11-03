@@ -350,6 +350,73 @@ remove_firewall_rules() {
     fi
 }
 
+cleanup_firewalld_policies() {
+    # Check if firewalld supports policies
+    if ! firewall-cmd --get-policies &>/dev/null; then
+        return 0
+    fi
+
+    local policies_removed=0
+
+    # Get all existing policies
+    local all_policies=$(firewall-cmd --permanent --get-policies 2>/dev/null || echo "")
+
+    if [[ -z "$all_policies" ]]; then
+        print_info "No firewall policies found"
+        return 0
+    fi
+
+    # Remove all WireGuard-related policies
+    for policy in $all_policies; do
+        # Match WireGuard-related policies (all variations):
+        # - Old style: zone-to-trusted, trusted-to-zone
+        # - Old bidirectional: *-wireguard-bidirectional
+        # - Old peer-to-peer: wireguard-peer-to-peer (22 chars)
+        # - New peer-to-peer: wg-peer-to-peer (15 chars)
+        # - New LAN policies: *-wg-lan (e.g., public-wg-lan, internal-wg-lan)
+        if [[ "$policy" =~ -to-trusted$ ]] || \
+           [[ "$policy" =~ ^trusted-to- ]] || \
+           [[ "$policy" =~ -wireguard-bidirectional$ ]] || \
+           [[ "$policy" == "wireguard-peer-to-peer" ]] || \
+           [[ "$policy" == "wg-peer-to-peer" ]] || \
+           [[ "$policy" =~ -wg-lan$ ]]; then
+            print_info "Removing policy: ${policy}"
+            if timeout 10 firewall-cmd --permanent --delete-policy=${policy} 2>/dev/null; then
+                ((policies_removed++)) || true
+                log "Removed firewalld policy: ${policy}"
+            else
+                print_warning "Could not remove policy: ${policy}"
+            fi
+        fi
+    done
+
+    if [[ $policies_removed -gt 0 ]]; then
+        print_success "Removed ${policies_removed} firewall policy/policies"
+
+        # Restart firewalld to apply changes
+        print_info "Restarting firewalld to apply changes..."
+
+        # Stop service
+        if systemctl stop firewalld 2>/dev/null; then
+            print_success "Firewalld stopped"
+        else
+            print_warning "Could not stop firewalld cleanly"
+        fi
+
+        # Wait a moment
+        sleep 1
+
+        # Start service
+        if systemctl start firewalld 2>/dev/null; then
+            print_success "Firewalld started successfully"
+        else
+            print_error "Could not start firewalld (may need manual intervention)"
+        fi
+    else
+        print_info "No WireGuard policies to remove"
+    fi
+}
+
 remove_firewalld_rules() {
     local iface="$1"
 
@@ -406,12 +473,18 @@ remove_firewalld_rules() {
         print_warning "Manual cleanup may be needed for direct rules"
     fi
 
-    # Reload firewall with timeout
-    print_info "Reloading firewall..."
-    if timeout 15 firewall-cmd --reload 2>/dev/null; then
-        print_success "Firewall reloaded"
+    # Clean up firewalld policies
+    print_info "Cleaning up firewall policies..."
+    cleanup_firewalld_policies
+
+    # Restart firewall to apply changes
+    print_info "Restarting firewall..."
+    systemctl stop firewalld 2>/dev/null || true
+    sleep 1
+    if systemctl start firewalld 2>/dev/null; then
+        print_success "Firewall restarted successfully"
     else
-        print_warning "Firewall reload timed out (rules still applied, reboot may be needed)"
+        print_warning "Firewall restart failed (rules still applied, reboot may be needed)"
     fi
 
     print_success "Firewalld rules cleaned up"

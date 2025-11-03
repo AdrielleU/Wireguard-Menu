@@ -203,7 +203,7 @@ select_server() {
     local i=1
     for iface in "${servers[@]}"; do
         local ip=$(grep -oP '^Address\s*=\s*\K\S+' "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -1)
-        local count=$(grep -cP '^#\s*(Client|Site|P2P|Peer):' "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null || echo "0")
+        local count=$(grep -cP '^#\s*(Client|Site|Peer-to-Peer):' "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null || echo "0")
         local status=""
         systemctl is-active --quiet "wg-quick@${iface}" 2>/dev/null && status="${GREEN}●${NC}" || status="${YELLOW}○${NC}"
         printf "  ${BLUE}%d)${NC} %s %b - %s (%d peers)\n" "$i" "$iface" "$status" "$ip" "$count" >&2
