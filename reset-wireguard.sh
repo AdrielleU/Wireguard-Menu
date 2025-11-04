@@ -369,16 +369,22 @@ cleanup_firewalld_policies() {
     # Remove all WireGuard-related policies
     for policy in $all_policies; do
         # Match WireGuard-related policies (all variations):
-        # - Old style: zone-to-trusted, trusted-to-zone
-        # - Old bidirectional: *-wireguard-bidirectional
-        # - Old peer-to-peer: wireguard-peer-to-peer (22 chars)
-        # - New peer-to-peer: wg-peer-to-peer (15 chars)
-        # - New LAN policies: *-wg-lan (e.g., public-wg-lan, internal-wg-lan)
-        if [[ "$policy" =~ -to-trusted$ ]] || \
+        # - Current: site-to-site, wg-peer-to-peer
+        # - Old: siteA-to-siteB, siteB-to-siteA, public-wg-lan, internal-wg-lan
+        # - Old: public-to-vpn, internal-to-vpn, wireguard-peer-to-peer
+        # - Old: zone-to-trusted, trusted-to-zone, *-wireguard-bidirectional
+        if [[ "$policy" == "site-to-site" ]] || \
+           [[ "$policy" == "wg-peer-to-peer" ]] || \
+           [[ "$policy" == "siteA-to-siteB" ]] || \
+           [[ "$policy" == "siteB-to-siteA" ]] || \
+           [[ "$policy" == "public-wg-lan" ]] || \
+           [[ "$policy" == "internal-wg-lan" ]] || \
+           [[ "$policy" == "public-to-vpn" ]] || \
+           [[ "$policy" == "internal-to-vpn" ]] || \
+           [[ "$policy" == "wireguard-peer-to-peer" ]] || \
+           [[ "$policy" =~ -to-trusted$ ]] || \
            [[ "$policy" =~ ^trusted-to- ]] || \
            [[ "$policy" =~ -wireguard-bidirectional$ ]] || \
-           [[ "$policy" == "wireguard-peer-to-peer" ]] || \
-           [[ "$policy" == "wg-peer-to-peer" ]] || \
            [[ "$policy" =~ -wg-lan$ ]]; then
             print_info "Removing policy: ${policy}"
             if timeout 10 firewall-cmd --permanent --delete-policy=${policy} 2>/dev/null; then
@@ -436,13 +442,31 @@ remove_firewalld_rules() {
         print_success "Removed ${iface} from trusted zone"
     fi
 
-    # Remove port from public zone
+    # Remove port from internal zone (setup-wireguard.sh opens port on internal zone)
     if [[ -n "$wg_port" ]]; then
-        print_info "Checking port ${wg_port}/udp..."
+        print_info "Checking port ${wg_port}/udp on internal zone..."
+        if timeout 5 firewall-cmd --zone=internal --query-port=${wg_port}/udp 2>/dev/null; then
+            timeout 10 firewall-cmd --permanent --zone=internal --remove-port=${wg_port}/udp 2>/dev/null || true
+            print_success "Removed port ${wg_port}/udp from internal zone"
+        fi
+
+        # Also check public zone (for old configurations)
         if timeout 5 firewall-cmd --zone=public --query-port=${wg_port}/udp 2>/dev/null; then
             timeout 10 firewall-cmd --permanent --zone=public --remove-port=${wg_port}/udp 2>/dev/null || true
             print_success "Removed port ${wg_port}/udp from public zone"
         fi
+    fi
+
+    # Remove zone forwarding (if this is the last WireGuard interface)
+    local all_wg=$(wg show interfaces 2>/dev/null | wc -w || echo "0")
+    all_wg=$(echo "$all_wg" | tr -d '[:space:]')
+    all_wg=${all_wg:-0}
+
+    if [[ $all_wg -le 1 ]]; then
+        print_info "Removing zone forwarding (last WireGuard interface)..."
+        timeout 10 firewall-cmd --permanent --zone=internal --remove-forward 2>/dev/null || true
+        timeout 10 firewall-cmd --permanent --zone=trusted --remove-forward 2>/dev/null || true
+        print_success "Removed zone forwarding"
     fi
 
     # Check if masquerading should be removed

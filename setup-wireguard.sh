@@ -959,9 +959,6 @@ configure_firewall() {
 configure_firewalld() {
     print_info "Configuring firewalld..."
 
-    # Add WireGuard port to public zone (for incoming VPN connections)
-    firewall-cmd --permanent --zone=public --add-port=${WG_PORT}/udp || error_exit "Failed to add WireGuard port"
-
     # Add WireGuard interface to trusted zone (allows all VPN traffic)
     # Check if interface is already in another zone
     local current_zone=$(firewall-cmd --get-zone-of-interface=${WG_INTERFACE} 2>/dev/null || echo "")
@@ -1004,13 +1001,35 @@ configure_firewalld() {
 
     if [[ -n "$lan_interface" ]]; then
         # Detect which zone the LAN interface is in
-        lan_zone=$(firewall-cmd --get-zone-of-interface=${lan_interface} 2>/dev/null || echo "public")
+        lan_zone=$(firewall-cmd --get-zone-of-interface=${lan_interface} 2>/dev/null || echo "")
 
-        # Enable masquerading on LAN zone (required for VPN clients to access LAN)
-        if ! firewall-cmd --zone=${lan_zone} --query-masquerade &>/dev/null; then
-            firewall-cmd --permanent --zone=${lan_zone} --add-masquerade 2>/dev/null || true
-            print_info "Enabled masquerading on ${lan_zone} zone (VPN → LAN access)"
+        # If interface not in any zone or in public zone, move to internal (best practice for LAN)
+        if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "public" ]]; then
+            print_info "Moving LAN interface ${lan_interface} to internal zone (best practice)"
+
+            # Remove from public zone if present
+            if [[ "$lan_zone" == "public" ]]; then
+                firewall-cmd --permanent --zone=public --remove-interface=${lan_interface} 2>/dev/null || true
+            fi
+
+            # Add to internal zone
+            if firewall-cmd --permanent --zone=internal --add-interface=${lan_interface} 2>/dev/null; then
+                lan_zone="internal"
+                print_success "LAN interface ${lan_interface} moved to internal zone"
+            else
+                print_warning "Failed to move to internal zone, using current: ${lan_zone:-public}"
+                lan_zone="${lan_zone:-public}"
+            fi
         fi
+
+        # IMPORTANT: Do NOT enable masquerading on LAN zone for site-to-site VPN
+        # Masquerading hides the real source IP from remote sites, breaking routing
+        # Only enable masquerading if this is an exit node (already handled above)
+        print_info "LAN zone: ${lan_zone} (no masquerading - preserves source IPs for site-to-site)"
+
+        # Open WireGuard port on internal zone (traffic comes in through LAN)
+        firewall-cmd --permanent --zone=internal --add-port=${WG_PORT}/udp || error_exit "Failed to add WireGuard port to internal zone"
+        print_success "WireGuard port ${WG_PORT}/udp opened on internal zone"
     fi
 
     # Check for modern firewalld with policy support (0.9.0+)
@@ -1018,20 +1037,15 @@ configure_firewalld() {
         print_info "Using modern firewalld policies (recommended for 0.9.0+)"
         echo ""
 
-        # Simplify zone detection: default to 'public' for consistency
-        if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "internal" ]]; then
-            lan_zone="public"
-        fi
-
         print_info "Zone configuration:"
         print_info "  - WireGuard (${WG_INTERFACE}) → trusted zone"
         print_info "  - LAN (${lan_interface}) → ${lan_zone} zone"
         echo ""
 
-        # Enable forwarding on LAN zone (makes policy visible in firewall-cmd --list-all)
-        if firewall-cmd --permanent --zone=${lan_zone} --add-forward 2>/dev/null; then
-            print_success "Zone forwarding enabled on ${lan_zone}"
-        fi
+        # Enable forwarding on both zones (essential for site-to-site routing)
+        firewall-cmd --permanent --zone=${lan_zone} --add-forward 2>/dev/null || true
+        firewall-cmd --permanent --zone=trusted --add-forward 2>/dev/null || true
+        print_success "Zone forwarding enabled on ${lan_zone} and trusted zones"
 
         # Policy 1: VPN peer-to-peer (trusted ↔ trusted)
         # NOTE: Policy names have 18 char max limit
@@ -1065,42 +1079,45 @@ configure_firewalld() {
             fi
         fi
 
-        # Policy 2: LAN ↔ VPN (bidirectional)
-        # NOTE: Policy names have 18 char max limit (e.g., "public-wg-lan" = 13 chars)
-        local policy_lan_vpn="${lan_zone}-wg-lan"
+        # Policy 2: LAN ↔ VPN (bidirectional for site-to-site)
+        # Both directions needed: LAN can initiate to VPN, VPN can initiate to LAN
+        local policy_site_to_site="site-to-site"
 
         # Check if policy already exists with correct configuration
-        if firewall-cmd --permanent --query-policy=${policy_lan_vpn} &>/dev/null; then
-            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_lan_vpn} 2>/dev/null || echo "")
+        if firewall-cmd --permanent --query-policy=${policy_site_to_site} &>/dev/null; then
+            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_site_to_site} 2>/dev/null || echo "")
             if echo "$policy_info" | grep -q "ingress-zones: ${lan_zone} trusted" && \
                echo "$policy_info" | grep -q "egress-zones: ${lan_zone} trusted"; then
-                print_success "Policy already exists: ${policy_lan_vpn} (correct configuration)"
+                print_success "Policy already exists: ${policy_site_to_site} (correct configuration)"
             else
-                print_info "Policy exists but incorrect, recreating: ${policy_lan_vpn}"
-                firewall-cmd --permanent --delete-policy=${policy_lan_vpn} 2>/dev/null || true
-                if firewall-cmd --permanent --new-policy=${policy_lan_vpn} 2>/dev/null; then
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --set-target=ACCEPT
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=${lan_zone}
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=trusted
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=${lan_zone}
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=trusted
-                    print_success "Policy recreated: ${policy_lan_vpn}"
+                print_info "Policy exists but incorrect, recreating: ${policy_site_to_site}"
+                firewall-cmd --permanent --delete-policy=${policy_site_to_site} 2>/dev/null || true
+                if firewall-cmd --permanent --new-policy=${policy_site_to_site} 2>/dev/null; then
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --set-target=ACCEPT
+                    # Bidirectional: internal → trusted AND trusted → internal
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=${lan_zone}
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=trusted
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=trusted
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=${lan_zone}
+                    print_success "Policy recreated: ${policy_site_to_site}"
                 fi
             fi
         else
-            print_info "Creating policy: ${policy_lan_vpn} (LAN ↔ VPN)"
-            if firewall-cmd --permanent --new-policy=${policy_lan_vpn} 2>/dev/null; then
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --set-target=ACCEPT
+            print_info "Creating policy: ${policy_site_to_site} (LAN ↔ VPN bidirectional)"
+            if firewall-cmd --permanent --new-policy=${policy_site_to_site} 2>/dev/null; then
+                firewall-cmd --permanent --policy=${policy_site_to_site} --set-target=ACCEPT
 
-                # Bidirectional: LAN ↔ WireGuard
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=${lan_zone}
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=trusted
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=${lan_zone}
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=trusted
+                # Bidirectional flows for site-to-site VPN
+                # internal → trusted (LAN can initiate to VPN)
+                firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=${lan_zone}
+                firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=trusted
+                # trusted → internal (VPN can initiate to LAN)
+                firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=trusted
+                firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=${lan_zone}
 
-                print_success "Policy created: ${lan_zone} ↔ trusted (LAN ↔ VPN)"
+                print_success "Policy created: site-to-site (${lan_zone} ↔ trusted bidirectional)"
             else
-                print_warning "Failed to create LAN-VPN policy"
+                print_warning "Failed to create site-to-site policy"
             fi
         fi
 
@@ -1131,8 +1148,16 @@ configure_firewalld() {
         print_success "Legacy firewalld direct rules configured"
     fi
 
-    # Reload firewall
-    firewall-cmd --reload || error_exit "Failed to reload firewalld"
+    # Restart firewall to apply changes (more reliable than reload for zone/policy changes)
+    print_info "Restarting firewall..."
+    systemctl stop firewalld 2>/dev/null || true
+    sleep 1
+    if systemctl start firewalld 2>/dev/null; then
+        print_success "Firewall restarted successfully"
+    else
+        print_warning "Firewall restart failed, trying reload..."
+        firewall-cmd --reload || error_exit "Failed to reload firewalld"
+    fi
 
     echo ""
     print_success "firewalld configured successfully"
@@ -1312,14 +1337,18 @@ setup_site_routes() {
     if [[ ${#site_networks[@]} -gt 0 ]]; then
         print_info "Found ${#site_networks[@]} site-to-site network(s)"
 
+        # Get server's VPN IP (without CIDR) for source routing
+        local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+        local server_vpn_ip=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' | cut -d'/' -f1)
+
         for network in "${site_networks[@]}"; do
             # Check if route already exists
             if ip route show "$network" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
                 print_info "Route already exists: $network dev ${WG_INTERFACE}"
             else
-                print_info "Adding route: $network dev ${WG_INTERFACE}"
-                ip route add "$network" dev "${WG_INTERFACE}" 2>/dev/null || print_warning "Failed to add route for $network"
-                log "Added site-to-site route: $network dev ${WG_INTERFACE}"
+                print_info "Adding route: $network dev ${WG_INTERFACE} src ${server_vpn_ip}"
+                ip route add "$network" dev "${WG_INTERFACE}" src "${server_vpn_ip}" 2>/dev/null || print_warning "Failed to add route for $network"
+                log "Added site-to-site route: $network dev ${WG_INTERFACE} src ${server_vpn_ip}"
             fi
         done
 

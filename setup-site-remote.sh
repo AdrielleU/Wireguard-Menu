@@ -1008,9 +1008,25 @@ configure_firewalld() {
     # This allows proper routing between Site A LAN <-> VPN <-> Site B LAN
 
     # Detect LAN zone
-    local lan_zone=$(firewall-cmd --get-zone-of-interface=${LAN_INTERFACE} 2>/dev/null || echo "public")
-    if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "internal" ]]; then
-        lan_zone="public"
+    local lan_zone=$(firewall-cmd --get-zone-of-interface=${LAN_INTERFACE} 2>/dev/null || echo "")
+
+    # If interface not in any zone or in public zone, move to internal (best practice for LAN)
+    if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "public" ]]; then
+        print_info "Moving LAN interface ${LAN_INTERFACE} to internal zone (best practice)"
+
+        # Remove from public zone if present
+        if [[ "$lan_zone" == "public" ]]; then
+            firewall-cmd --permanent --zone=public --remove-interface=${LAN_INTERFACE} 2>/dev/null || true
+        fi
+
+        # Add to internal zone
+        if firewall-cmd --permanent --zone=internal --add-interface=${LAN_INTERFACE} 2>/dev/null; then
+            lan_zone="internal"
+            print_success "LAN interface ${LAN_INTERFACE} moved to internal zone"
+        else
+            print_warning "Failed to move to internal zone, using current: ${lan_zone:-public}"
+            lan_zone="${lan_zone:-public}"
+        fi
     fi
 
     echo ""
@@ -1058,37 +1074,43 @@ configure_firewalld() {
             fi
         fi
 
-        # Policy 2: LAN ↔ VPN (bidirectional)
-        # NOTE: Policy names have 18 char max limit (e.g., "public-wg-lan" = 13 chars)
-        local policy_lan_vpn="${lan_zone}-wg-lan"
+        # Policy 2: LAN ↔ VPN (bidirectional for site-to-site)
+        # Both directions needed: LAN can initiate to VPN, VPN can initiate to LAN
+        local policy_site_to_site="site-to-site"
 
         # Check if policy already exists with correct configuration
-        if firewall-cmd --permanent --query-policy=${policy_lan_vpn} &>/dev/null; then
-            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_lan_vpn} 2>/dev/null || echo "")
+        if firewall-cmd --permanent --query-policy=${policy_site_to_site} &>/dev/null; then
+            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_site_to_site} 2>/dev/null || echo "")
             if echo "$policy_info" | grep -q "ingress-zones: ${lan_zone} trusted" && \
                echo "$policy_info" | grep -q "egress-zones: ${lan_zone} trusted"; then
-                print_success "Policy already exists: ${policy_lan_vpn} (correct configuration)"
+                print_success "Policy already exists: ${policy_site_to_site} (correct configuration)"
             else
-                print_info "Policy exists but incorrect, recreating: ${policy_lan_vpn}"
-                firewall-cmd --permanent --delete-policy=${policy_lan_vpn} 2>/dev/null || true
-                if firewall-cmd --permanent --new-policy=${policy_lan_vpn} 2>/dev/null; then
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --set-target=ACCEPT
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=${lan_zone}
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=trusted
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=${lan_zone}
-                    firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=trusted
-                    print_success "Policy recreated: ${policy_lan_vpn}"
+                print_info "Policy exists but incorrect, recreating: ${policy_site_to_site}"
+                firewall-cmd --permanent --delete-policy=${policy_site_to_site} 2>/dev/null || true
+                if firewall-cmd --permanent --new-policy=${policy_site_to_site} 2>/dev/null; then
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --set-target=ACCEPT
+                    # Bidirectional: internal → trusted AND trusted → internal
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=${lan_zone}
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=trusted
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=trusted
+                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=${lan_zone}
+                    print_success "Policy recreated: ${policy_site_to_site}"
                 fi
             fi
         else
-            print_info "Creating policy: ${policy_lan_vpn} (LAN ↔ VPN)"
-            if firewall-cmd --permanent --new-policy=${policy_lan_vpn} 2>/dev/null; then
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --set-target=ACCEPT
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=${lan_zone}
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-ingress-zone=trusted
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=${lan_zone}
-                firewall-cmd --permanent --policy=${policy_lan_vpn} --add-egress-zone=trusted
-                print_success "Policy created: ${lan_zone} ↔ trusted (LAN ↔ VPN)"
+            print_info "Creating policy: ${policy_site_to_site} (LAN ↔ VPN bidirectional)"
+            if firewall-cmd --permanent --new-policy=${policy_site_to_site} 2>/dev/null; then
+                firewall-cmd --permanent --policy=${policy_site_to_site} --set-target=ACCEPT
+
+                # Bidirectional flows for site-to-site VPN
+                # internal → trusted (LAN can initiate to VPN)
+                firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=${lan_zone}
+                firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=trusted
+                # trusted → internal (VPN can initiate to LAN)
+                firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=trusted
+                firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=${lan_zone}
+
+                print_success "Policy created: site-to-site (${lan_zone} ↔ trusted bidirectional)"
             fi
         fi
 

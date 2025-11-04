@@ -711,6 +711,10 @@ add_route_for_remote_network() {
 
     [[ -z "$REMOTE_NETWORK" ]] && print_info "No remote network specified, skipping route setup" && return
 
+    # Get server's VPN IP (without CIDR) for source routing
+    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    local server_vpn_ip=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' | cut -d'/' -f1)
+
     IFS=',' read -ra NETWORKS <<< "$REMOTE_NETWORK"
     local routes_added=0
 
@@ -721,9 +725,9 @@ add_route_for_remote_network() {
         if ip route show "$network" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
             print_info "Route already exists: $network dev ${WG_INTERFACE}"
         else
-            print_info "Adding route: $network dev ${WG_INTERFACE}"
-            if ip route add "$network" dev "${WG_INTERFACE}" 2>/dev/null; then
-                print_success "Route added: $network → ${WG_INTERFACE}"
+            print_info "Adding route: $network dev ${WG_INTERFACE} src ${server_vpn_ip}"
+            if ip route add "$network" dev "${WG_INTERFACE}" src "${server_vpn_ip}" 2>/dev/null; then
+                print_success "Route added: $network → ${WG_INTERFACE} (src ${server_vpn_ip})"
                 ((routes_added++)) || true
             else
                 print_warning "Failed to add route for $network (may already exist)"
@@ -732,7 +736,7 @@ add_route_for_remote_network() {
     done
 
     if [[ $routes_added -gt 0 ]]; then
-        print_success "Added $routes_added route(s)"
+        print_success "Added $routes_added route(s) with correct source IP"
     fi
 }
 
