@@ -253,10 +253,18 @@ get_public_ip() {
 }
 
 reload_server() {
-    print_info "Reloading WireGuard configuration..."
-    wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}") || error_exit "Failed to reload ${WG_INTERFACE}"
-    print_success "WireGuard configuration reloaded for ${WG_INTERFACE}"
-    print_info "Existing connections remain intact"
+    print_info "Restarting WireGuard to apply routes..."
+    echo ""
+    print_warning "This will briefly disconnect all peers (~2 seconds)"
+
+    # Full restart required to update kernel routes
+    # wg syncconf only updates interface config, NOT routes!
+    if wg-quick down "${WG_INTERFACE}" 2>/dev/null && wg-quick up "${WG_INTERFACE}" 2>/dev/null; then
+        print_success "WireGuard restarted for ${WG_INTERFACE}"
+        print_info "Routes updated based on AllowedIPs"
+    else
+        error_exit "Failed to restart ${WG_INTERFACE}"
+    fi
 }
 
 ################################################################################
@@ -790,37 +798,20 @@ EOF
 add_route_for_remote_network() {
     needs_remote_network "$PEER_TYPE" || return 0
 
-    print_info "Setting up route for remote network..."
+    [[ -z "$REMOTE_NETWORK" ]] && return
 
-    [[ -z "$REMOTE_NETWORK" ]] && print_info "No remote network specified, skipping route setup" && return
+    # Routes are automatically managed by wg-quick based on AllowedIPs
+    # IMPORTANT: Must use 'wg-quick down && wg-quick up' to update routes
+    # - wg syncconf does NOT update kernel routes (only peer config)
+    # - wg-quick up/down creates/removes routes from AllowedIPs
+    #
+    # NO manual 'ip route add' needed!
+    # - wg-quick up reads AllowedIPs and adds routes to kernel
+    # - wg-quick down removes all routes
+    # - Full restart ensures clean route table
 
-    # Get server's VPN IP (without CIDR) for source routing
-    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local server_vpn_ip=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' | cut -d'/' -f1)
-
-    IFS=',' read -ra NETWORKS <<< "$REMOTE_NETWORK"
-    local routes_added=0
-
-    for network in "${NETWORKS[@]}"; do
-        network=$(echo "$network" | xargs)
-        [[ "$network" =~ /32$ ]] && continue
-
-        if ip route show "$network" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
-            print_info "Route already exists: $network dev ${WG_INTERFACE}"
-        else
-            print_info "Adding route: $network dev ${WG_INTERFACE} src ${server_vpn_ip}"
-            if ip route add "$network" dev "${WG_INTERFACE}" src "${server_vpn_ip}" 2>/dev/null; then
-                print_success "Route added: $network → ${WG_INTERFACE} (src ${server_vpn_ip})"
-                ((routes_added++)) || true
-            else
-                print_warning "Failed to add route for $network (may already exist)"
-            fi
-        fi
-    done
-
-    if [[ $routes_added -gt 0 ]]; then
-        print_success "Added $routes_added route(s) with correct source IP"
-    fi
+    print_info "Routes for ${REMOTE_NETWORK} will be added by wg-quick restart"
+    print_info "Based on AllowedIPs in peer configuration"
 }
 
 show_summary() {

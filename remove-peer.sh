@@ -213,35 +213,19 @@ remove_routes_for_peer() {
     local allowed_ips="$1"
 
     if [[ -z "$allowed_ips" ]]; then
-        print_info "No AllowedIPs found for peer, skipping route removal"
         return
     fi
 
-    print_info "Checking for routes to remove..."
+    # Routes are automatically managed by wg-quick based on AllowedIPs
+    # When we remove the peer from config and run wg syncconf,
+    # wg-quick automatically removes the routes associated with that peer.
+    #
+    # NO manual 'ip route del' needed!
+    # - wg syncconf sees peer removed from config
+    # - wg-quick automatically removes routes for that peer's AllowedIPs
+    # - Restart wg-quick → all routes cleaned up and recreated from config
 
-    IFS=',' read -ra IP_ARRAY <<< "$allowed_ips"
-    local routes_removed=0
-
-    for ip in "${IP_ARRAY[@]}"; do
-        ip=$(echo "$ip" | xargs)
-        [[ "$ip" =~ /32$ ]] && continue
-
-        if ip route show "$ip" 2>/dev/null | grep -q "dev ${WG_INTERFACE}"; then
-            print_info "Removing route: $ip dev ${WG_INTERFACE}"
-            if ip route del "$ip" dev "${WG_INTERFACE}" 2>/dev/null; then
-                print_success "Route removed: $ip"
-                ((routes_removed++)) || true
-            else
-                print_warning "Failed to remove route for $ip"
-            fi
-        fi
-    done
-
-    if [[ $routes_removed -gt 0 ]]; then
-        print_success "Removed $routes_removed route(s)"
-    else
-        print_info "No routes to remove (peer had no network routes)"
-    fi
+    print_info "Routes for ${allowed_ips} will be removed automatically by wg syncconf"
 }
 
 remove_peer_from_config() {
@@ -314,24 +298,17 @@ remove_peer_files() {
 reload_server() {
     local peer_public_key="$1"
 
-    print_info "Reloading WireGuard configuration..."
+    print_info "Restarting WireGuard to remove routes..."
+    print_warning "This will briefly disconnect all peers (~2 seconds)"
 
-    if wg syncconf "${WG_INTERFACE}" <(wg-quick strip "${WG_INTERFACE}"); then
-        print_success "WireGuard configuration reloaded"
+    # Full restart required to update kernel routes
+    # wg syncconf only updates interface config, NOT routes!
+    if wg-quick down "${WG_INTERFACE}" 2>/dev/null && wg-quick up "${WG_INTERFACE}" 2>/dev/null; then
+        print_success "WireGuard restarted for ${WG_INTERFACE}"
         print_success "Removed peer has been disconnected from VPN"
-        print_info "Other connected peers remain unaffected"
+        print_info "Routes removed based on AllowedIPs"
     else
-        print_warning "Hot reload failed, attempting full restart..."
-
-        systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
-        sleep 1
-
-        if systemctl start "wg-quick@${WG_INTERFACE}"; then
-            print_success "WireGuard interface restarted successfully"
-            print_warning "All peers were disconnected during restart"
-        else
-            error_exit "Failed to restart ${WG_INTERFACE}"
-        fi
+        error_exit "Failed to restart ${WG_INTERFACE}"
     fi
 }
 
