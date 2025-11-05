@@ -69,13 +69,28 @@ DEFAULT_WG_PORT=51820
 DEFAULT_SERVER_IP="10.0.0.1/24"
 DEFAULT_SERVER_NETWORK="10.0.0.0/24"
 
-# These will be set by parse_arguments() and prompt_user_config()
+# MODE: "server", "client", "site-to-site", or "import-config"
+MODE=""
+
+# Import existing config
+CONFIG_FILE_PATH=""
+
+# SERVER MODE - These will be set by parse_arguments() and prompt_user_config()
 WG_INTERFACE=""
 WG_PORT=""
 SERVER_IP=""
 SERVER_NETWORK=""
 EXIT_NODE=false
 INTERNET_INTERFACE=""
+
+# CLIENT/PEER MODE - Additional variables
+PEER_ENDPOINT=""           # Remote server endpoint (IP:PORT)
+SERVER_PUBKEY=""           # Remote server's public key
+PEER_IP=""                 # This peer's IP on VPN network
+
+# SITE-TO-SITE MODE - Additional variables (includes CLIENT MODE vars above)
+LOCAL_NETWORK=""           # Local LAN network to route
+LAN_INTERFACE=""           # Local LAN interface
 
 WG_CONFIG_DIR="/etc/wireguard"
 LOG_FILE="/var/log/wireguard-setup.log"
@@ -144,22 +159,50 @@ show_usage() {
     echo "Usage: sudo $0 [OPTIONS]"
     echo ""
     echo "Options:"
+    echo "  --config FILE         Import existing WireGuard config file"
+    echo "  --interface NAME      Interface name (default: auto-detect from filename)"
+    echo ""
+    echo "  SERVER MODE:"
     echo "  --server-ip IP        Server IP address (default: ${DEFAULT_SERVER_IP})"
     echo "  --network CIDR        VPN network CIDR (default: ${DEFAULT_SERVER_NETWORK})"
     echo "  --port PORT           WireGuard listen port (default: ${DEFAULT_WG_PORT})"
-    echo "  --interface NAME      Interface name (default: ${DEFAULT_WG_INTERFACE})"
     echo "  --exit-node           Enable exit node (NAT all client traffic to internet)"
-    echo "  -h, --help           Show this help message"
+    echo ""
+    echo "  CLIENT/SITE-TO-SITE MODE:"
+    echo "  --peer-of ENDPOINT    Remote server endpoint (IP:PORT)"
+    echo "  --server-pubkey KEY   Remote server's public key"
+    echo "  --peer-ip IP          This peer's VPN IP address"
+    echo "  --local-network CIDR  Local LAN network (for site-to-site only)"
+    echo "  --lan-interface NAME  LAN interface (for site-to-site only)"
+    echo ""
+    echo "  -h, --help            Show this help message"
     echo ""
     echo "Examples:"
-    echo "  sudo $0 --server-ip 192.168.100.1/24 --network 192.168.100.0/24 --port 51820"
-    echo "  sudo $0 --exit-node  # Create VPN server that routes all client traffic"
+    echo "  # Import existing config"
+    echo "  sudo $0 --config /path/to/wg0.conf"
+    echo ""
+    echo "  # Create new server"
+    echo "  sudo $0 --server-ip 10.0.0.1/24 --network 10.0.0.0/24 --port 51820"
+    echo ""
+    echo "  # Connect as client"
+    echo "  sudo $0 --peer-of 1.2.3.4:51820 --server-pubkey <key> --peer-ip 10.0.0.2/24"
+    echo ""
+    echo "  # Site-to-site connection"
+    echo "  sudo $0 --peer-of 1.2.3.4:51820 --server-pubkey <key> \\"
+    echo "          --peer-ip 10.0.0.2/24 --local-network 192.168.1.0/24"
     echo ""
 }
 
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
+            # Import existing config
+            --config)
+                CONFIG_FILE_PATH="$2"
+                MODE="import-config"
+                shift 2
+                ;;
+            # Server mode arguments
             --server-ip)
                 SERVER_IP="$2"
                 shift 2
@@ -179,6 +222,28 @@ parse_arguments() {
             --exit-node)
                 EXIT_NODE=true
                 shift
+                ;;
+            # Peer mode arguments
+            --peer-of)
+                MODE="peer"
+                PEER_ENDPOINT="$2"
+                shift 2
+                ;;
+            --server-pubkey)
+                SERVER_PUBKEY="$2"
+                shift 2
+                ;;
+            --peer-ip)
+                PEER_IP="$2"
+                shift 2
+                ;;
+            --local-network)
+                LOCAL_NETWORK="$2"
+                shift 2
+                ;;
+            --lan-interface)
+                LAN_INTERFACE="$2"
+                shift 2
                 ;;
             -h|--help)
                 show_usage
@@ -220,6 +285,61 @@ validate_port() {
     else
         return 1
     fi
+}
+
+prompt_mode_selection() {
+    # If MODE already set via arguments, skip interactive prompt
+    if [[ -n "$MODE" ]]; then
+        return 0
+    fi
+
+    echo ""
+    echo "======================================================================"
+    echo "                    WireGuard Setup - Mode Selection"
+    echo "======================================================================"
+    echo ""
+    echo "Choose setup mode:"
+    echo ""
+    echo "  1) Server Mode"
+    echo "     - Create a new WireGuard VPN server"
+    echo "     - Accept incoming connections from clients/peers"
+    echo "     - Use this to create the main VPN hub"
+    echo ""
+    echo "  2) Client Mode"
+    echo "     - Connect this machine as a regular VPN client"
+    echo "     - Routes only this machine's traffic through VPN"
+    echo "     - Road warrior / remote access setup"
+    echo ""
+    echo "  3) Site-to-Site Mode"
+    echo "     - Connect this site to a remote WireGuard server"
+    echo "     - Routes entire local LAN through VPN"
+    echo "     - Both sites can access each other's networks"
+    echo ""
+
+    while true; do
+        read -p "Select mode [1-3]: " mode_choice
+        case $mode_choice in
+            1)
+                MODE="server"
+                print_success "Server mode selected"
+                break
+                ;;
+            2)
+                MODE="client"
+                print_success "Client mode selected"
+                break
+                ;;
+            3)
+                MODE="site-to-site"
+                print_success "Site-to-Site mode selected"
+                break
+                ;;
+            *)
+                print_error "Invalid choice. Please enter 1, 2, or 3."
+                ;;
+        esac
+    done
+    echo ""
 }
 
 check_network_conflicts() {
@@ -628,6 +748,145 @@ prompt_user_config() {
     log "Keys Directory: ${WG_KEYS_DIR}"
 }
 
+prompt_client_config() {
+    if [[ "$MODE" == "site-to-site" ]]; then
+        print_info "Site-to-Site VPN Configuration"
+    else
+        print_info "Client VPN Configuration"
+    fi
+    echo ""
+
+    # Auto-detect smart defaults
+    local suggested_interface=$(get_next_available_interface)
+    local detected_lan=$(ip route | grep default | awk '{print $5}' | head -n1)
+    local detected_lan_network=$(ip -4 addr show "$detected_lan" 2>/dev/null | grep "inet " | awk '{print $2}' | head -n1 | cut -d'.' -f1-3).0/24
+
+    # Interface name
+    if [[ -z "$WG_INTERFACE" ]]; then
+        echo "Interface Name: WireGuard interface for this peer connection"
+        while true; do
+            read -p "Enter interface name [${suggested_interface}]: " input_interface
+            WG_INTERFACE="${input_interface:-$suggested_interface}"
+
+            if check_interface_conflicts "$WG_INTERFACE"; then
+                break
+            else
+                print_error "Interface '${WG_INTERFACE}' already exists. Choose different name"
+            fi
+        done
+    fi
+    echo ""
+
+    # Remote server endpoint
+    if [[ -z "$PEER_ENDPOINT" ]]; then
+        echo "Remote Server Endpoint: IP:PORT of the WireGuard server to connect to"
+        echo "  Example: 1.2.3.4:51820"
+        while true; do
+            read -p "Enter remote server endpoint: " PEER_ENDPOINT
+            if [[ -n "$PEER_ENDPOINT" ]] && [[ "$PEER_ENDPOINT" =~ ^[0-9.]+:[0-9]+$ ]]; then
+                break
+            else
+                print_error "Invalid format. Use IP:PORT (e.g., 1.2.3.4:51820)"
+            fi
+        done
+    fi
+    echo ""
+
+    # Server public key
+    if [[ -z "$SERVER_PUBKEY" ]]; then
+        echo "Remote Server Public Key: Get this from the remote server"
+        echo "  Run on remote server: cat /etc/wireguard/<interface>/server-publickey"
+        while true; do
+            read -p "Enter remote server public key: " SERVER_PUBKEY
+            if [[ -n "$SERVER_PUBKEY" ]]; then
+                break
+            else
+                print_error "Public key cannot be empty"
+            fi
+        done
+    fi
+    echo ""
+
+    # This peer's IP on VPN
+    if [[ -z "$PEER_IP" ]]; then
+        echo "Peer VPN IP: This peer's IP address on the VPN network"
+        echo "  Example: 10.0.0.2/24 (must be in server's VPN network)"
+        while true; do
+            read -p "Enter peer VPN IP: " PEER_IP
+            if validate_ip_cidr "$PEER_IP"; then
+                break
+            else
+                print_error "Invalid IP/CIDR format. Example: 10.0.0.2/24"
+            fi
+        done
+    fi
+    echo ""
+
+    # Site-to-Site specific: Local network and LAN interface
+    if [[ "$MODE" == "site-to-site" ]]; then
+        # Local network to route
+        if [[ -z "$LOCAL_NETWORK" ]]; then
+            echo "Local LAN Network: Your local network to route through VPN"
+            echo "  Detected: ${detected_lan_network}"
+            echo "  This allows remote site to access your local devices"
+            while true; do
+                read -p "Enter local LAN network [${detected_lan_network}]: " input_network
+                LOCAL_NETWORK="${input_network:-$detected_lan_network}"
+                if validate_network_cidr "$LOCAL_NETWORK"; then
+                    break
+                else
+                    print_error "Invalid network CIDR. Example: 192.168.1.0/24"
+                fi
+            done
+        fi
+        echo ""
+
+        # LAN interface
+        if [[ -z "$LAN_INTERFACE" ]]; then
+            echo "LAN Interface: Network interface connected to local LAN"
+            echo "  Detected: ${detected_lan}"
+            read -p "Enter LAN interface [${detected_lan}]: " input_lan
+            LAN_INTERFACE="${input_lan:-$detected_lan}"
+        fi
+        echo ""
+    fi
+
+    # Set interface-specific paths
+    WG_INTERFACE_DIR="${WG_CONFIG_DIR}/${WG_INTERFACE}"
+    WG_KEYS_DIR="${WG_INTERFACE_DIR}"
+    WG_CONFIG_FILE="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+
+    # Show configuration summary
+    echo ""
+    if [[ "$MODE" == "site-to-site" ]]; then
+        print_info "Site-to-Site Configuration Summary:"
+        echo "  Interface: ${WG_INTERFACE}"
+        echo "  Remote Server: ${PEER_ENDPOINT}"
+        echo "  Peer VPN IP: ${PEER_IP}"
+        echo "  Local LAN: ${LOCAL_NETWORK} (via ${LAN_INTERFACE})"
+        echo "  Keys Directory: ${WG_KEYS_DIR}"
+    else
+        print_info "Client Configuration Summary:"
+        echo "  Interface: ${WG_INTERFACE}"
+        echo "  Remote Server: ${PEER_ENDPOINT}"
+        echo "  Client VPN IP: ${PEER_IP}"
+        echo "  Keys Directory: ${WG_KEYS_DIR}"
+    fi
+    echo ""
+
+    read -p "Continue with this configuration? (Y/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+        error_exit "Configuration cancelled by user"
+    fi
+
+    if [[ "$MODE" == "site-to-site" ]]; then
+        log "Site-to-Site Configuration: Interface=${WG_INTERFACE}, RemoteServer=${PEER_ENDPOINT}, PeerIP=${PEER_IP}, LocalLAN=${LOCAL_NETWORK}"
+    else
+        log "Client Configuration: Interface=${WG_INTERFACE}, RemoteServer=${PEER_ENDPOINT}, ClientIP=${PEER_IP}"
+    fi
+}
+
 ################################################################################
 # PREREQUISITE CHECKS
 ################################################################################
@@ -821,12 +1080,21 @@ enable_ip_forwarding() {
 
     # Make permanent
     local sysctl_conf="/etc/sysctl.d/99-wireguard.conf"
-    if ! grep -q "net.ipv4.ip_forward" "$sysctl_conf" 2>/dev/null; then
-        echo "net.ipv4.ip_forward = 1" > "$sysctl_conf"
-        log "IP forwarding enabled permanently in $sysctl_conf"
+    if [[ ! -f "$sysctl_conf" ]] || ! grep -q "net.ipv4.ip_forward" "$sysctl_conf" 2>/dev/null; then
+        cat > "$sysctl_conf" <<EOF
+# WireGuard VPN Configuration
+# Enable IP forwarding
+net.ipv4.ip_forward = 1
+
+# Disable reverse path filtering (required for site-to-site VPN)
+# rp_filter=0 disables reverse path validation completely
+net.ipv4.conf.default.rp_filter = 0
+net.ipv4.conf.all.rp_filter = 0
+EOF
+        log "IP forwarding and rp_filter configured permanently in $sysctl_conf"
     fi
 
-    print_success "IP forwarding enabled"
+    print_success "IP forwarding enabled (rp_filter=disabled)"
 }
 
 generate_keys() {
@@ -904,6 +1172,155 @@ EOF
     log "Configuration created: $WG_CONFIG_FILE"
 }
 
+generate_client_keys() {
+    print_info "Generating WireGuard client keys for ${WG_INTERFACE}..."
+
+    # Create interface-specific directories
+    mkdir -p "$WG_KEYS_DIR"
+    cd "$WG_KEYS_DIR" || error_exit "Failed to access $WG_KEYS_DIR"
+
+    # Set restrictive umask for key generation
+    umask 077
+
+    local private_key_file="${WG_KEYS_DIR}/client-privatekey"
+    local public_key_file="${WG_KEYS_DIR}/client-publickey"
+
+    if [[ ! -f "$private_key_file" ]]; then
+        wg genkey | tee "$private_key_file" | wg pubkey > "$public_key_file" || error_exit "Failed to generate client keys"
+        chmod 600 "$private_key_file" "$public_key_file"
+        print_success "Client keys generated in ${WG_KEYS_DIR}"
+        log "Client keys generated: $private_key_file and $public_key_file"
+    else
+        print_warning "Client keys already exist for ${WG_INTERFACE}, reusing them"
+        log "Reusing existing client keys: $private_key_file"
+    fi
+
+    CLIENT_PRIVATE_KEY=$(cat "$private_key_file")
+    CLIENT_PUBLIC_KEY=$(cat "$public_key_file")
+}
+
+create_client_config() {
+    if [[ "$MODE" == "site-to-site" ]]; then
+        print_info "Creating site-to-site configuration..."
+    else
+        print_info "Creating client configuration..."
+    fi
+
+    # Get remote server's network from PEER_IP (assuming /24)
+    local vpn_network_base=$(echo "$PEER_IP" | cut -d'/' -f1 | cut -d'.' -f1-3).0/24
+
+    if [[ "$MODE" == "site-to-site" ]]; then
+        # Site-to-Site config: wg-quick handles routing via AllowedIPs
+        cat > "$WG_CONFIG_FILE" <<EOF
+[Interface]
+Address = ${PEER_IP}
+PrivateKey = ${CLIENT_PRIVATE_KEY}
+
+[Peer]
+PublicKey = ${SERVER_PUBKEY}
+Endpoint = ${PEER_ENDPOINT}
+# AllowedIPs automatically creates routes via wg-quick
+# Remote VPN network and local LAN advertisement
+AllowedIPs = ${vpn_network_base}
+PersistentKeepalive = 25
+EOF
+    else
+        # Regular client config: Just connect this machine to VPN
+        cat > "$WG_CONFIG_FILE" <<EOF
+[Interface]
+Address = ${PEER_IP}
+PrivateKey = ${CLIENT_PRIVATE_KEY}
+
+[Peer]
+PublicKey = ${SERVER_PUBKEY}
+Endpoint = ${PEER_ENDPOINT}
+# Route to remote VPN network (wg-quick handles routing automatically)
+AllowedIPs = ${vpn_network_base}
+PersistentKeepalive = 25
+EOF
+    fi
+
+    chmod 600 "$WG_CONFIG_FILE" || error_exit "Failed to set permissions on config file"
+    print_success "Configuration file created: $WG_CONFIG_FILE"
+    log "Configuration created: $WG_CONFIG_FILE"
+
+    echo ""
+    print_warning "IMPORTANT: Add this client/peer to the remote server!"
+    echo ""
+    echo "On the remote server, run:"
+    echo "  sudo add-peer.sh"
+    echo ""
+    if [[ "$MODE" == "site-to-site" ]]; then
+        echo "Use these values:"
+        echo "  Peer Name: $(hostname)-site"
+        echo "  Public Key: ${CLIENT_PUBLIC_KEY}"
+        echo "  Allowed IPs: ${PEER_IP%/*}/32, ${LOCAL_NETWORK}"
+    else
+        echo "Use these values:"
+        echo "  Peer Name: $(hostname)-client"
+        echo "  Public Key: ${CLIENT_PUBLIC_KEY}"
+        echo "  Allowed IPs: ${PEER_IP%/*}/32"
+    fi
+    echo ""
+}
+
+import_existing_config() {
+    print_info "Importing existing WireGuard configuration..."
+
+    # Validate config file exists
+    if [[ ! -f "$CONFIG_FILE_PATH" ]]; then
+        error_exit "Config file not found: $CONFIG_FILE_PATH"
+    fi
+
+    # Extract interface name from filename if not provided
+    if [[ -z "$WG_INTERFACE" ]]; then
+        WG_INTERFACE=$(basename "$CONFIG_FILE_PATH" .conf)
+        print_info "Interface name extracted from filename: ${WG_INTERFACE}"
+    fi
+
+    # Set paths
+    WG_INTERFACE_DIR="${WG_CONFIG_DIR}/${WG_INTERFACE}"
+    WG_KEYS_DIR="${WG_INTERFACE_DIR}"
+    WG_CONFIG_FILE="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+
+    # Create directories
+    mkdir -p "$WG_KEYS_DIR"
+
+    # Check if config already exists
+    if [[ -f "$WG_CONFIG_FILE" ]]; then
+        print_warning "Configuration already exists: $WG_CONFIG_FILE"
+        read -p "Overwrite existing config? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            error_exit "Import cancelled by user"
+        fi
+        # Backup existing config
+        local backup_file="${WG_CONFIG_FILE}.backup.$(date +%Y%m%d-%H%M%S)"
+        cp "$WG_CONFIG_FILE" "$backup_file"
+        print_info "Existing config backed up to: $backup_file"
+    fi
+
+    # Copy config file
+    cp "$CONFIG_FILE_PATH" "$WG_CONFIG_FILE" || error_exit "Failed to copy config file"
+    chmod 600 "$WG_CONFIG_FILE"
+    print_success "Config imported to: $WG_CONFIG_FILE"
+
+    # Try to detect mode from config content
+    if grep -q "PostUp.*FORWARD" "$WG_CONFIG_FILE" || grep -q "AllowedIPs.*192.168\|10\.\|172\." "$WG_CONFIG_FILE"; then
+        print_info "Detected site-to-site configuration (has FORWARD rules or LAN routes)"
+
+        # Try to detect LAN interface
+        if [[ -z "$LAN_INTERFACE" ]]; then
+            LAN_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
+            print_info "Auto-detected LAN interface: ${LAN_INTERFACE}"
+        fi
+    else
+        print_info "Detected client configuration"
+    fi
+
+    log "Config imported: $CONFIG_FILE_PATH -> $WG_CONFIG_FILE"
+}
+
 detect_firewall() {
     print_info "Detecting active firewall..."
 
@@ -959,200 +1376,64 @@ configure_firewall() {
 configure_firewalld() {
     print_info "Configuring firewalld..."
 
-    # Add WireGuard interface to trusted zone (allows all VPN traffic)
-    # Check if interface is already in another zone
-    local current_zone=$(firewall-cmd --get-zone-of-interface=${WG_INTERFACE} 2>/dev/null || echo "")
-    if [[ -n "$current_zone" && "$current_zone" != "trusted" ]]; then
-        echo ""
-        print_error "Interface ${WG_INTERFACE} is already in zone '${current_zone}'"
-        print_warning "WireGuard interface should be in the 'trusted' zone"
-        echo ""
-        echo "To fix this, run:"
-        echo "  sudo firewall-cmd --permanent --zone=${current_zone} --remove-interface=${WG_INTERFACE}"
-        echo "  sudo firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE}"
-        echo "  sudo firewall-cmd --reload"
-        echo ""
-        error_exit "Fix the zone conflict and re-run this script"
-    fi
+    if [[ "$MODE" == "server" ]]; then
+        # SERVER MODE: Open port and optionally enable masquerading
+        print_info "Configuring firewall for server mode..."
 
-    # Add to trusted zone
-    print_info "Adding ${WG_INTERFACE} to trusted zone"
-    if ! firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null; then
-        print_warning "Failed to add ${WG_INTERFACE} to trusted zone (may already be added)"
-    fi
-
-    # Enable forwarding on trusted zone (visible in firewall-cmd --list-all)
-    print_info "Enabling forwarding on trusted zone"
-    if firewall-cmd --permanent --zone=trusted --add-forward 2>/dev/null; then
-        print_success "Zone forwarding enabled (firewalld 0.9.0+)"
-    else
-        print_info "Zone forwarding not supported (using direct rules instead)"
-    fi
-
-    # Enable masquerading for exit node functionality
-    if [[ "$EXIT_NODE" == true ]]; then
-        firewall-cmd --permanent --zone=public --add-masquerade || error_exit "Failed to enable masquerading"
-        print_info "Masquerading enabled for exit node mode (VPN → Internet)"
-    fi
-
-    # Detect LAN interface for forwarding configuration
-    local lan_interface=$(ip route | grep default | awk '{print $5}' | head -1)
-    local lan_zone=""
-
-    if [[ -n "$lan_interface" ]]; then
-        # Detect which zone the LAN interface is in
-        lan_zone=$(firewall-cmd --get-zone-of-interface=${lan_interface} 2>/dev/null || echo "")
-
-        # If interface not in any zone or in public zone, move to internal (best practice for LAN)
-        if [[ -z "$lan_zone" ]] || [[ "$lan_zone" == "public" ]]; then
-            print_info "Moving LAN interface ${lan_interface} to internal zone (best practice)"
-
-            # Remove from public zone if present
-            if [[ "$lan_zone" == "public" ]]; then
-                firewall-cmd --permanent --zone=public --remove-interface=${lan_interface} 2>/dev/null || true
-            fi
-
-            # Add to internal zone
-            if firewall-cmd --permanent --zone=internal --add-interface=${lan_interface} 2>/dev/null; then
-                lan_zone="internal"
-                print_success "LAN interface ${lan_interface} moved to internal zone"
-            else
-                print_warning "Failed to move to internal zone, using current: ${lan_zone:-public}"
-                lan_zone="${lan_zone:-public}"
-            fi
-        fi
-
-        # IMPORTANT: Do NOT enable masquerading on LAN zone for site-to-site VPN
-        # Masquerading hides the real source IP from remote sites, breaking routing
-        # Only enable masquerading if this is an exit node (already handled above)
-        print_info "LAN zone: ${lan_zone} (no masquerading - preserves source IPs for site-to-site)"
-
-        # Open WireGuard port on internal zone (traffic comes in through LAN)
-        firewall-cmd --permanent --zone=internal --add-port=${WG_PORT}/udp || error_exit "Failed to add WireGuard port to internal zone"
-        print_success "WireGuard port ${WG_PORT}/udp opened on internal zone"
-    fi
-
-    # Check for modern firewalld with policy support (0.9.0+)
-    if firewall-cmd --get-policies &>/dev/null; then
-        print_info "Using modern firewalld policies (recommended for 0.9.0+)"
-        echo ""
-
-        print_info "Zone configuration:"
-        print_info "  - WireGuard (${WG_INTERFACE}) → trusted zone"
-        print_info "  - LAN (${lan_interface}) → ${lan_zone} zone"
-        echo ""
-
-        # Enable forwarding on both zones (essential for site-to-site routing)
-        firewall-cmd --permanent --zone=${lan_zone} --add-forward 2>/dev/null || true
-        firewall-cmd --permanent --zone=trusted --add-forward 2>/dev/null || true
-        print_success "Zone forwarding enabled on ${lan_zone} and trusted zones"
-
-        # Policy 1: VPN peer-to-peer (trusted ↔ trusted)
-        # NOTE: Policy names have 18 char max limit
-        local policy_vpn="wg-peer-to-peer"  # 15 chars
-
-        # Check if policy already exists with correct configuration
-        if firewall-cmd --permanent --query-policy=${policy_vpn} &>/dev/null; then
-            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_vpn} 2>/dev/null || echo "")
-            if echo "$policy_info" | grep -q "ingress-zones: trusted" && \
-               echo "$policy_info" | grep -q "egress-zones: trusted"; then
-                print_success "Policy already exists: ${policy_vpn} (correct configuration)"
-            else
-                print_info "Policy exists but incorrect, recreating: ${policy_vpn}"
-                firewall-cmd --permanent --delete-policy=${policy_vpn} 2>/dev/null || true
-                if firewall-cmd --permanent --new-policy=${policy_vpn} 2>/dev/null; then
-                    firewall-cmd --permanent --policy=${policy_vpn} --set-target=ACCEPT
-                    firewall-cmd --permanent --policy=${policy_vpn} --add-ingress-zone=trusted
-                    firewall-cmd --permanent --policy=${policy_vpn} --add-egress-zone=trusted
-                    print_success "Policy recreated: ${policy_vpn}"
-                fi
-            fi
+        # Open WireGuard port on public zone
+        print_info "Opening WireGuard port ${WG_PORT}/udp on public zone"
+        if firewall-cmd --permanent --zone=public --add-port=${WG_PORT}/udp 2>/dev/null; then
+            print_success "WireGuard port ${WG_PORT}/udp opened on public zone"
         else
-            print_info "Creating policy: ${policy_vpn} (VPN ↔ VPN)"
-            if firewall-cmd --permanent --new-policy=${policy_vpn} 2>/dev/null; then
-                firewall-cmd --permanent --policy=${policy_vpn} --set-target=ACCEPT
-                firewall-cmd --permanent --policy=${policy_vpn} --add-ingress-zone=trusted
-                firewall-cmd --permanent --policy=${policy_vpn} --add-egress-zone=trusted
-                print_success "Policy created: trusted ↔ trusted (VPN peer-to-peer)"
-            else
-                print_warning "Failed to create peer-to-peer policy"
-            fi
+            print_warning "Failed to add port to public zone (may already exist)"
         fi
 
-        # Policy 2: LAN ↔ VPN (bidirectional for site-to-site)
-        # Both directions needed: LAN can initiate to VPN, VPN can initiate to LAN
-        local policy_site_to_site="site-to-site"
+        # Add WireGuard to trusted zone
+        print_info "Adding ${WG_INTERFACE} to trusted zone..."
+        firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
 
-        # Check if policy already exists with correct configuration
-        if firewall-cmd --permanent --query-policy=${policy_site_to_site} &>/dev/null; then
-            local policy_info=$(firewall-cmd --permanent --info-policy=${policy_site_to_site} 2>/dev/null || echo "")
-            if echo "$policy_info" | grep -q "ingress-zones: ${lan_zone} trusted" && \
-               echo "$policy_info" | grep -q "egress-zones: ${lan_zone} trusted"; then
-                print_success "Policy already exists: ${policy_site_to_site} (correct configuration)"
-            else
-                print_info "Policy exists but incorrect, recreating: ${policy_site_to_site}"
-                firewall-cmd --permanent --delete-policy=${policy_site_to_site} 2>/dev/null || true
-                if firewall-cmd --permanent --new-policy=${policy_site_to_site} 2>/dev/null; then
-                    firewall-cmd --permanent --policy=${policy_site_to_site} --set-target=ACCEPT
-                    # Bidirectional: internal → trusted AND trusted → internal
-                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=${lan_zone}
-                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=trusted
-                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=trusted
-                    firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=${lan_zone}
-                    print_success "Policy recreated: ${policy_site_to_site}"
-                fi
-            fi
-        else
-            print_info "Creating policy: ${policy_site_to_site} (LAN ↔ VPN bidirectional)"
-            if firewall-cmd --permanent --new-policy=${policy_site_to_site} 2>/dev/null; then
-                firewall-cmd --permanent --policy=${policy_site_to_site} --set-target=ACCEPT
-
-                # Bidirectional flows for site-to-site VPN
-                # internal → trusted (LAN can initiate to VPN)
-                firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=${lan_zone}
-                firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=trusted
-                # trusted → internal (VPN can initiate to LAN)
-                firewall-cmd --permanent --policy=${policy_site_to_site} --add-ingress-zone=trusted
-                firewall-cmd --permanent --policy=${policy_site_to_site} --add-egress-zone=${lan_zone}
-
-                print_success "Policy created: site-to-site (${lan_zone} ↔ trusted bidirectional)"
-            else
-                print_warning "Failed to create site-to-site policy"
-            fi
+        # Enable masquerading for exit node functionality
+        if [[ "$EXIT_NODE" == true ]]; then
+            firewall-cmd --permanent --zone=public --add-masquerade || error_exit "Failed to enable masquerading"
+            print_info "Masquerading enabled for exit node mode (VPN → Internet)"
         fi
 
-        print_success "Modern firewalld policies configured"
-        print_info "  - VPN clients can reach each other (peer-to-peer)"
-        print_info "  - VPN clients can reach LAN devices"
-        print_info "  - LAN devices can reach VPN clients"
+        print_success "Server firewall rules configured"
 
-    else
-        # Legacy firewalld (< 0.9.0) - use direct rules
-        print_info "Using legacy direct rules (firewalld < 0.9.0)"
+    elif [[ "$MODE" == "site-to-site" ]]; then
+        # SITE-TO-SITE MODE: Add FORWARD rules between WireGuard and LAN
+        print_info "Configuring firewall for site-to-site VPN..."
         echo ""
 
-        # VPN peer-to-peer forwarding
-        print_info "Adding FORWARD rules for VPN peer-to-peer traffic..."
+        # Add WireGuard to trusted zone
+        print_info "Adding ${WG_INTERFACE} to trusted zone..."
+        firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
+
+        # Add direct FORWARD rules (works on all firewalld versions)
+        print_info "Adding FORWARD rules for ${WG_INTERFACE} ↔ ${LAN_INTERFACE}..."
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT 2>/dev/null || true
+        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
         firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-        firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
 
-        # LAN ↔ VPN forwarding
-        if [[ -n "$lan_interface" ]]; then
-            print_info "Adding FORWARD rules for LAN ↔ VPN traffic..."
-            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${lan_interface} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-            firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${lan_interface} -j ACCEPT 2>/dev/null || true
-            print_success "FORWARD rules added for: ${lan_interface} ↔ ${WG_INTERFACE}"
-        fi
+        print_success "Site-to-site firewall rules configured"
+        print_info "  - ${WG_INTERFACE} in trusted zone"
+        print_info "  - Direct FORWARD rules: ${WG_INTERFACE} ↔ ${LAN_INTERFACE}"
 
-        print_success "Legacy firewalld direct rules configured"
+    else
+        # CLIENT MODE: Just add WireGuard to trusted zone
+        print_info "Configuring firewall for client mode..."
+
+        # Add WireGuard to trusted zone
+        print_info "Adding ${WG_INTERFACE} to trusted zone..."
+        firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
+
+        print_success "Client firewall rules configured"
+        print_info "  - ${WG_INTERFACE} in trusted zone"
     fi
 
-    # Restart firewall to apply changes (more reliable than reload for zone/policy changes)
+    # Restart firewall to apply changes
     print_info "Restarting firewall..."
-    systemctl stop firewalld 2>/dev/null || true
-    sleep 1
-    if systemctl start firewalld 2>/dev/null; then
+    if systemctl restart firewalld 2>/dev/null; then
         print_success "Firewall restarted successfully"
     else
         print_warning "Firewall restart failed, trying reload..."
@@ -1160,26 +1441,24 @@ configure_firewalld() {
     fi
 
     echo ""
-    print_success "firewalld configured successfully"
+    print_success "firewalld configured for site-to-site VPN"
     print_info "Configuration summary:"
     print_info "  - Port ${WG_PORT}/udp opened on public zone"
-    print_info "  - ${WG_INTERFACE} added to trusted zone"
-
-    if firewall-cmd --get-policies &>/dev/null; then
-        print_info "  - Modern policies: VPN peer-to-peer + LAN ↔ VPN"
-    else
-        print_info "  - Legacy direct FORWARD rules configured"
-    fi
+    print_info "  - ${WG_INTERFACE} in trusted zone"
 
     if [[ -n "$lan_interface" ]]; then
-        print_info "  - LAN interface: ${lan_interface} (${lan_zone} zone)"
+        print_info "  - ${lan_interface} in public zone (default)"
+        print_info "  - Policies: lan-to-vpn (public → trusted)"
+        print_info "  - Policies: vpn-to-lan (trusted → public)"
     fi
 
     if [[ "$EXIT_NODE" == true ]]; then
         print_info "  - Exit node enabled (VPN → Internet)"
     fi
 
-    log "firewalld configured: port=${WG_PORT}, interface=${WG_INTERFACE}, policies/rules added"
+    print_info "  - Source IPs preserved (no NAT on VPN)"
+
+    log "firewalld configured: port=${WG_PORT}, interface=${WG_INTERFACE}, policies configured"
 }
 
 configure_ufw() {
@@ -1397,6 +1676,19 @@ start_services() {
     print_success "WireGuard service is running"
     log "WireGuard service started successfully"
 
+    # Re-apply firewall zone after interface is created
+    if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+        print_info "Verifying firewall zone assignment..."
+
+        # Make sure WireGuard is in trusted zone
+        if ! firewall-cmd --zone=trusted --query-interface=${WG_INTERFACE} 2>/dev/null; then
+            print_warning "WireGuard interface not in trusted zone, fixing..."
+            firewall-cmd --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
+        fi
+
+        print_success "Firewall zone verified"
+    fi
+
     # Show interface status
     if wg show ${WG_INTERFACE} &>/dev/null; then
         print_success "WireGuard interface ${WG_INTERFACE} is up"
@@ -1491,13 +1783,13 @@ show_summary() {
 
 main() {
     echo "=========================================="
-    echo "  WireGuard Server Setup Script"
+    echo "  WireGuard Setup Script"
     echo "=========================================="
     echo ""
 
     # Initialize log file
     mkdir -p "$(dirname "$LOG_FILE")"
-    log "=== WireGuard Server Setup Started ==="
+    log "=== WireGuard Setup Started ==="
 
     # Parse command-line arguments
     parse_arguments "$@"
@@ -1508,25 +1800,68 @@ main() {
     check_os
     check_wireguard_installed
 
-    # Get user configuration (prompts for any values not provided via arguments)
-    prompt_user_config
+    # Check if importing existing config
+    if [[ "$MODE" == "import-config" ]]; then
+        print_info "Import mode: Using existing configuration file"
 
-    # Check existing config after we know the interface name
-    check_existing_config
+        # Import the config
+        import_existing_config
 
-    # Installation steps
-    install_packages
-    enable_ip_forwarding
-    generate_keys
-    create_config
-    configure_firewall
-    handle_selinux
-    start_services
+        # Installation steps
+        install_packages
+        enable_ip_forwarding
+
+        # Configure firewall (detect mode from config)
+        if [[ -n "$LAN_INTERFACE" ]]; then
+            # Site-to-site mode detected
+            MODE="site-to-site"
+        else
+            # Regular client mode
+            MODE="client"
+        fi
+        configure_firewall
+        handle_selinux
+        start_services
+    else
+        # Normal mode: create new config
+
+        # Ask user to select mode (server or peer)
+        prompt_mode_selection
+
+        # Get user configuration based on mode
+        if [[ "$MODE" == "server" ]]; then
+            prompt_user_config
+        else
+            # Both client and site-to-site use the same prompt function
+            prompt_client_config
+        fi
+
+        # Check existing config after we know the interface name
+        check_existing_config
+
+        # Installation steps
+        install_packages
+        enable_ip_forwarding
+
+        # Mode-specific configuration
+        if [[ "$MODE" == "server" ]]; then
+            generate_keys
+            create_config
+        else
+            # Both client and site-to-site generate keys and config the same way
+            generate_client_keys
+            create_client_config
+        fi
+
+        configure_firewall
+        handle_selinux
+        start_services
+    fi
 
     # Summary
     show_summary
 
-    log "=== WireGuard Server Setup Completed Successfully ==="
+    log "=== WireGuard Setup Completed Successfully ==="
 }
 
 # Execute main function

@@ -166,6 +166,58 @@ get_primary_interface_network() {
     echo "${network_base}/${cidr}"
 }
 
+get_site_to_site_networks() {
+    # Extract all site-to-site remote networks from server config
+    # Site peers have AllowedIPs with both /32 (peer VPN IP) and other CIDR networks (remote LANs)
+    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    local site_networks=""
+
+    [[ ! -f "$config_file" ]] && { echo ""; return; }
+
+    # Parse all [Peer] sections and extract remote networks (not /32)
+    local in_peer=false
+    local current_allowed=""
+
+    while IFS= read -r line; do
+        # Trim whitespace
+        line=$(echo "$line" | xargs)
+
+        # Check if we're entering a new peer section
+        if [[ "$line" =~ ^\[Peer\] ]]; then
+            in_peer=true
+            current_allowed=""
+        # Check for AllowedIPs line
+        elif [[ "$in_peer" == true ]] && [[ "$line" =~ ^AllowedIPs[[:space:]]*=[[:space:]]*(.*) ]]; then
+            current_allowed="${BASH_REMATCH[1]}"
+
+            # Extract networks that are NOT /32 (those are remote LANs from site-to-site peers)
+            # Split by comma and check each network
+            IFS=',' read -ra networks <<< "$current_allowed"
+            for net in "${networks[@]}"; do
+                net=$(echo "$net" | xargs)  # Trim spaces
+
+                # Skip /32 (individual peer IPs) and only include networks
+                if [[ ! "$net" =~ /32$ ]]; then
+                    # This is a remote network (site-to-site)
+                    if [[ -z "$site_networks" ]]; then
+                        site_networks="$net"
+                    else
+                        # Check if not already added (avoid duplicates)
+                        if [[ ! "$site_networks" =~ $net ]]; then
+                            site_networks="${site_networks}, ${net}"
+                        fi
+                    fi
+                fi
+            done
+        # If we hit another section marker, we're done with this peer
+        elif [[ "$line" =~ ^\[ ]]; then
+            in_peer=false
+        fi
+    done < "$config_file"
+
+    echo "$site_networks"
+}
+
 get_next_available_ip() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local server_address=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}')
@@ -435,7 +487,14 @@ prompt_peer_ip() {
             [[ "$peer_net" != "$server_net" ]] && { print_error "Must be in ${server_net}.0/${server_cidr}"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Wrong network"; PEER_IP=""; continue; }
 
             local ip_only=$(echo "$PEER_IP" | cut -d'/' -f1)
-            grep -qP "AllowedIPs\s*=\s*${ip_only}/32" "$config_file" 2>/dev/null && { print_error "IP in use"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "In use"; PEER_IP=""; continue; }
+            # Check if IP exists in any AllowedIPs line (handles comma-separated lists)
+            if grep -E "^AllowedIPs[[:space:]]*=" "$config_file" 2>/dev/null | grep -q "[[:space:],]${ip_only}/32\|^AllowedIPs[[:space:]]*=[[:space:]]*${ip_only}/32"; then
+                print_error "IP in use: ${ip_only}"
+                read -p "Retry? (y/n): " r
+                [[ "$r" =~ ^[Yy] ]] || error_exit "In use"
+                PEER_IP=""
+                continue
+            fi
             break
         done
     else
@@ -506,8 +565,14 @@ configure_routing() {
     echo ""
 
     if [[ "$PEER_TYPE" == "client" ]]; then
-        echo "  1) VPN network only [RECOMMENDED]"
-        echo "     Only access other VPN clients and server"
+        # Check for site-to-site networks
+        local site_nets=$(get_site_to_site_networks)
+
+        echo "  1) VPN network + all site-to-site LANs [RECOMMENDED]"
+        echo "     Access VPN clients, server, and all connected remote sites"
+        if [[ -n "$site_nets" ]]; then
+            echo "     (Auto-detected remote sites: ${site_nets})"
+        fi
         echo ""
         echo "  2) All traffic (0.0.0.0/0)"
         echo "     Route ALL internet traffic through VPN (use VPN as exit node)"
@@ -533,8 +598,17 @@ configure_routing() {
     case "$routing_choice" in
         1)
             if [[ "$PEER_TYPE" == "client" ]]; then
+                # Start with VPN network
                 ALLOWED_IPS="${vpn_network}"
-                ROUTING_DESC="VPN network only (${vpn_network})"
+
+                # Auto-detect and add all site-to-site remote networks
+                local site_nets=$(get_site_to_site_networks)
+                if [[ -n "$site_nets" ]]; then
+                    ALLOWED_IPS="${ALLOWED_IPS}, ${site_nets}"
+                    ROUTING_DESC="VPN network + site-to-site LANs (${vpn_network}, ${site_nets})"
+                else
+                    ROUTING_DESC="VPN network only (${vpn_network})"
+                fi
             else
                 # Site/P2P: VPN + LAN
                 ALLOWED_IPS="${vpn_network}"
@@ -562,17 +636,26 @@ configure_routing() {
             fi
             ;;
         2)
-            ALLOWED_IPS="${vpn_network}"
-            ROUTING_DESC="VPN network only (${vpn_network})"
+            if [[ "$PEER_TYPE" == "client" ]]; then
+                # All traffic through VPN (exit node)
+                ALLOWED_IPS="0.0.0.0/0"
+                ROUTING_DESC="All traffic through VPN (exit node)"
+            else
+                # Site/P2P: VPN network only (no LAN access)
+                ALLOWED_IPS="${vpn_network}"
+                ROUTING_DESC="VPN network only (${vpn_network})"
+            fi
             ;;
         3)
             if [[ "$PEER_TYPE" == "client" ]]; then
+                # Custom networks for clients
                 echo ""
                 echo "Custom networks: Enter comma-separated CIDR ranges"
                 echo "  Examples: 10.0.0.0/24,192.168.1.0/24"
                 read -p "Enter custom AllowedIPs: " ALLOWED_IPS
                 ROUTING_DESC="Custom routing (${ALLOWED_IPS})"
             else
+                # Site/P2P: All traffic (exit node)
                 ALLOWED_IPS="0.0.0.0/0"
                 ROUTING_DESC="All traffic through VPN (exit node)"
             fi
