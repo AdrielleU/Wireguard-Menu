@@ -87,6 +87,96 @@ validate_port() {
     [[ "$port" =~ ^[0-9]+$ ]] && [[ $port -ge 1 ]] && [[ $port -le 65535 ]]
 }
 
+# Convert subnet mask to CIDR notation
+# Accepts: 255.255.255.0, /24, or 24
+# Returns: 24 (just the number)
+convert_to_cidr() {
+    local input="$1"
+
+    # If already in /24 format, strip the slash
+    if [[ "$input" =~ ^/([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    # If just a number like 24
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        echo "$input"
+        return 0
+    fi
+
+    # Convert dotted decimal (255.255.255.0) to CIDR
+    case "$input" in
+        255.255.255.255) echo "32" ;;
+        255.255.255.254) echo "31" ;;
+        255.255.255.252) echo "30" ;;
+        255.255.255.248) echo "29" ;;
+        255.255.255.240) echo "28" ;;
+        255.255.255.224) echo "27" ;;
+        255.255.255.192) echo "26" ;;
+        255.255.255.128) echo "25" ;;
+        255.255.255.0)   echo "24" ;;
+        255.255.254.0)   echo "23" ;;
+        255.255.252.0)   echo "22" ;;
+        255.255.248.0)   echo "21" ;;
+        255.255.240.0)   echo "20" ;;
+        255.255.224.0)   echo "19" ;;
+        255.255.192.0)   echo "18" ;;
+        255.255.128.0)   echo "17" ;;
+        255.255.0.0)     echo "16" ;;
+        255.254.0.0)     echo "15" ;;
+        255.252.0.0)     echo "14" ;;
+        255.248.0.0)     echo "13" ;;
+        255.240.0.0)     echo "12" ;;
+        255.224.0.0)     echo "11" ;;
+        255.192.0.0)     echo "10" ;;
+        255.128.0.0)     echo "9"  ;;
+        255.0.0.0)       echo "8"  ;;
+        254.0.0.0)       echo "7"  ;;
+        252.0.0.0)       echo "6"  ;;
+        248.0.0.0)       echo "5"  ;;
+        240.0.0.0)       echo "4"  ;;
+        224.0.0.0)       echo "3"  ;;
+        192.0.0.0)       echo "2"  ;;
+        128.0.0.0)       echo "1"  ;;
+        0.0.0.0)         echo "0"  ;;
+        *) return 1 ;;  # Invalid format
+    esac
+}
+
+# Convert CIDR to dotted decimal
+cidr_to_dotted() {
+    local cidr="$1"
+    case "$cidr" in
+        32) echo "255.255.255.255" ;;
+        31) echo "255.255.255.254" ;;
+        30) echo "255.255.255.252" ;;
+        29) echo "255.255.255.248" ;;
+        28) echo "255.255.255.240" ;;
+        27) echo "255.255.255.224" ;;
+        26) echo "255.255.255.192" ;;
+        25) echo "255.255.255.128" ;;
+        24) echo "255.255.255.0" ;;
+        23) echo "255.255.254.0" ;;
+        22) echo "255.255.252.0" ;;
+        21) echo "255.255.248.0" ;;
+        20) echo "255.255.240.0" ;;
+        19) echo "255.255.224.0" ;;
+        18) echo "255.255.192.0" ;;
+        17) echo "255.255.128.0" ;;
+        16) echo "255.255.0.0" ;;
+        15) echo "255.254.0.0" ;;
+        14) echo "255.252.0.0" ;;
+        13) echo "255.248.0.0" ;;
+        12) echo "255.240.0.0" ;;
+        11) echo "255.224.0.0" ;;
+        10) echo "255.192.0.0" ;;
+        9)  echo "255.128.0.0" ;;
+        8)  echo "255.0.0.0" ;;
+        *) echo "255.255.255.0" ;;  # Default to /24
+    esac
+}
+
 detect_servers() {
     local servers=()
     if [[ -d "$WG_CONFIG_DIR" ]]; then
@@ -474,6 +564,7 @@ prompt_peer_ip() {
 
     local server_cidr=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' | cut -d'/' -f2 || echo "24")
     local server_net=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}' || echo "")
+    local server_subnet=$(cidr_to_dotted "$server_cidr")
 
     if [[ -z "$server_net" ]]; then
         print_error "Could not read server address from ${config_file}"
@@ -482,30 +573,73 @@ prompt_peer_ip() {
     fi
 
     if [[ -z "$PEER_IP" ]]; then
+        # Step 1: Ask for IP address only (no CIDR)
+        local peer_ip_only=""
         while true; do
-            local suggested=$(get_next_available_ip)
+            local suggested=$(get_next_available_ip | cut -d'/' -f1)
             echo ""
-            read -p "Tunnel IP [${suggested}/${server_cidr}]: " input
-            PEER_IP="${input:-${suggested}/${server_cidr}}"
-            [[ ! "$PEER_IP" =~ / ]] && PEER_IP="${PEER_IP}/${server_cidr}"
+            echo "Tunnel IP address (without subnet mask)"
+            read -p "Enter IP [${suggested}]: " input
+            peer_ip_only="${input:-${suggested}}"
 
-            validate_cidr "$PEER_IP" || { print_error "Invalid IP"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid"; PEER_IP=""; continue; }
+            # Validate it's a valid IP
+            if ! validate_ip "$peer_ip_only"; then
+                print_error "Invalid IP address format"
+                read -p "Retry? (y/n): " r
+                [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid IP"
+                continue
+            fi
 
-            local peer_net=$(echo "$PEER_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-            [[ "$peer_net" != "$server_net" ]] && { print_error "Must be in ${server_net}.0/${server_cidr}"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Wrong network"; PEER_IP=""; continue; }
+            # Check if IP is in correct network range
+            local peer_net=$(echo "$peer_ip_only" | awk -F. '{print $1"."$2"."$3}')
+            if [[ "$peer_net" != "$server_net" ]]; then
+                print_error "Must be in ${server_net}.0 network"
+                read -p "Retry? (y/n): " r
+                [[ "$r" =~ ^[Yy] ]] || error_exit "Wrong network"
+                continue
+            fi
 
-            local ip_only=$(echo "$PEER_IP" | cut -d'/' -f1)
             # Check if IP exists in any AllowedIPs line (handles comma-separated lists)
-            if grep -E "^AllowedIPs[[:space:]]*=" "$config_file" 2>/dev/null | grep -q "[[:space:],]${ip_only}/32\|^AllowedIPs[[:space:]]*=[[:space:]]*${ip_only}/32"; then
-                print_error "IP in use: ${ip_only}"
+            if grep -E "^AllowedIPs[[:space:]]*=" "$config_file" 2>/dev/null | grep -q "[[:space:],]${peer_ip_only}/32\|^AllowedIPs[[:space:]]*=[[:space:]]*${peer_ip_only}/32"; then
+                print_error "IP in use: ${peer_ip_only}"
                 read -p "Retry? (y/n): " r
                 [[ "$r" =~ ^[Yy] ]] || error_exit "In use"
-                PEER_IP=""
                 continue
             fi
             break
         done
+
+        # Step 2: Ask for subnet mask separately
+        local peer_cidr=""
+        while true; do
+            echo ""
+            echo "Subnet mask (e.g., /24, 24, or ${server_subnet})"
+            read -p "Enter subnet [/${server_cidr}]: " input
+            input="${input:-/${server_cidr}}"
+
+            # Convert to CIDR number
+            if peer_cidr=$(convert_to_cidr "$input"); then
+                # Validate CIDR range (8-32 is reasonable for host)
+                if [[ $peer_cidr -ge 8 ]] && [[ $peer_cidr -le 32 ]]; then
+                    break
+                else
+                    print_error "CIDR must be between 8 and 32"
+                    read -p "Retry? (y/n): " r
+                    [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid CIDR"
+                fi
+            else
+                print_error "Invalid subnet format. Use: /24, 24, or 255.255.255.0"
+                read -p "Retry? (y/n): " r
+                [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid"
+            fi
+        done
+
+        # Combine IP + CIDR
+        PEER_IP="${peer_ip_only}/${peer_cidr}"
+        print_success "Peer IP: ${PEER_IP}"
+
     else
+        # Command-line argument provided
         [[ ! "$PEER_IP" =~ / ]] && PEER_IP="${PEER_IP}/${server_cidr}"
         validate_cidr "$PEER_IP" || error_exit "Invalid IP"
         local peer_net=$(echo "$PEER_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
