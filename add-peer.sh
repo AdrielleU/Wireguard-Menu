@@ -44,7 +44,7 @@ KEEPALIVE=""             # Custom keepalive (defaults to DEFAULT_KEEPALIVE)
 # HELPER FUNCTIONS
 ################################################################################
 
-# Colors, print_*, error_exit, check_root, peer_validate_name sourced from utils.sh
+# Colors, print_*, die, check_root, peer_validate_name sourced from utils.sh
 
 validate_cidr() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
@@ -155,7 +155,7 @@ detect_servers() {
             servers+=("$(basename "$conf" .conf)")
         done
     fi
-    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found. Run setup.sh first."
+    [[ ${#servers[@]} -gt 0 ]] || die "No WireGuard servers found. Run setup.sh first."
     echo "${servers[@]}"
 }
 
@@ -164,7 +164,7 @@ select_server() {
     local server_count=${#servers[@]}
 
     if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || error_exit "WireGuard server '${WG_INTERFACE}' not found."
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "WireGuard server '${WG_INTERFACE}' not found."
         print_success "Using server: ${WG_INTERFACE}"
         return
     fi
@@ -192,7 +192,7 @@ select_server() {
     read -p "Select server (1-${server_count}): " selection
 
     if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$server_count" ]; then
-        error_exit "Invalid selection"
+        die "Invalid selection"
     fi
 
     WG_INTERFACE="${servers[$((selection-1))]}"
@@ -289,7 +289,7 @@ get_next_available_ip() {
         fi
     done
 
-    error_exit "No available IP addresses in the ${network_base}.0/24 range"
+    die "No available IP addresses in the ${network_base}.0/24 range"
 }
 
 get_public_ip() {
@@ -320,7 +320,7 @@ reload_server() {
         print_success "WireGuard restarted for ${WG_INTERFACE}"
         print_info "Routes updated based on AllowedIPs"
     else
-        error_exit "Failed to restart ${WG_INTERFACE}"
+        die "Failed to restart ${WG_INTERFACE}"
     fi
 }
 
@@ -359,7 +359,7 @@ select_peer_type() {
         1) PEER_TYPE="client" ;;
         2) PEER_TYPE="site" ;;
         3) PEER_TYPE="p2p" ;;
-        *) error_exit "Invalid selection" ;;
+        *) die "Invalid selection" ;;
     esac
     print_success "Selected: $(get_label "$PEER_TYPE")"
 }
@@ -371,14 +371,14 @@ select_peer_type() {
 get_server_info() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local server_listen_port=$(grep -E "^ListenPort\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}')
-    [[ -z "$server_listen_port" ]] && error_exit "Could not read ListenPort from ${config_file}"
+    [[ -z "$server_listen_port" ]] && die "Could not read ListenPort from ${config_file}"
 
     # Get server public key
     local keys_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
     if [[ -f "${keys_dir}/server-publickey" ]]; then
         SERVER_PUBLIC_KEY=$(cat "${keys_dir}/server-publickey")
     else
-        error_exit "Server public key not found at ${keys_dir}/server-publickey"
+        die "Server public key not found at ${keys_dir}/server-publickey"
     fi
 
     # Get server endpoint
@@ -449,7 +449,7 @@ get_server_info() {
 
     # Validate port
     if ! [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] || [ "$SERVER_PORT" -lt 1 ] || [ "$SERVER_PORT" -gt 65535 ]; then
-        error_exit "Invalid port number. Must be between 1-65535"
+        die "Invalid port number. Must be between 1-65535"
     fi
 }
 
@@ -467,22 +467,22 @@ prompt_peer_name() {
             if ! peer_validate_name "$PEER_NAME"; then
                 print_error "Invalid: Use 3-30 alphanumeric, dash, or underscore (no spaces)"
                 read -p "Retry? (y/n): " retry
-                [[ "$retry" =~ ^[Yy] ]] || error_exit "Name required"
+                [[ "$retry" =~ ^[Yy] ]] || die "Name required"
                 continue
             fi
 
             if grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null; then
                 print_error "${label} '${PEER_NAME}' already exists"
                 read -p "Retry? (y/n): " retry
-                [[ "$retry" =~ ^[Yy] ]] || error_exit "Name exists"
+                [[ "$retry" =~ ^[Yy] ]] || die "Name exists"
                 PEER_NAME=""
                 continue
             fi
             break
         done
     else
-        peer_validate_name "$PEER_NAME" || error_exit "Invalid name format"
-        grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null && error_exit "Name already exists"
+        peer_validate_name "$PEER_NAME" || die "Invalid name format"
+        grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null && die "Name already exists"
     fi
 }
 
@@ -496,12 +496,12 @@ prompt_remote_network() {
             read -p "Enter CIDR: " REMOTE_NETWORK
             REMOTE_NETWORK=$(echo "$REMOTE_NETWORK" | xargs)
 
-            [[ -z "$REMOTE_NETWORK" ]] && { print_error "Required"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Required"; continue; }
-            validate_cidr "$REMOTE_NETWORK" || { print_error "Invalid CIDR"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid"; REMOTE_NETWORK=""; continue; }
+            [[ -z "$REMOTE_NETWORK" ]] && { print_error "Required"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || die "Required"; continue; }
+            validate_cidr "$REMOTE_NETWORK" || { print_error "Invalid CIDR"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || die "Invalid"; REMOTE_NETWORK=""; continue; }
             break
         done
     else
-        validate_cidr "$REMOTE_NETWORK" || error_exit "Invalid CIDR"
+        validate_cidr "$REMOTE_NETWORK" || die "Invalid CIDR"
     fi
 }
 
@@ -513,11 +513,11 @@ prompt_peer_listen_port() {
             echo ""
             read -p "Remote peer listen port [51820]: " input_port
             PEER_LISTEN_PORT="${input_port:-51820}"
-            validate_port "$PEER_LISTEN_PORT" || { print_error "Invalid port (1-65535)"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid"; PEER_LISTEN_PORT=""; continue; }
+            validate_port "$PEER_LISTEN_PORT" || { print_error "Invalid port (1-65535)"; read -p "Retry? (y/n): " r; [[ "$r" =~ ^[Yy] ]] || die "Invalid"; PEER_LISTEN_PORT=""; continue; }
             break
         done
     else
-        validate_port "$PEER_LISTEN_PORT" || error_exit "Invalid port"
+        validate_port "$PEER_LISTEN_PORT" || die "Invalid port"
     fi
 }
 
@@ -526,7 +526,7 @@ prompt_peer_ip() {
 
     # Debug: Check if config file exists
     if [[ ! -f "$config_file" ]]; then
-        error_exit "Configuration file not found: ${config_file}"
+        die "Configuration file not found: ${config_file}"
     fi
 
     local server_cidr=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' | cut -d'/' -f2 || echo "24")
@@ -553,7 +553,7 @@ prompt_peer_ip() {
             if ! validate_ip "$peer_ip_only"; then
                 print_error "Invalid IP address format"
                 read -p "Retry? (y/n): " r
-                [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid IP"
+                [[ "$r" =~ ^[Yy] ]] || die "Invalid IP"
                 continue
             fi
 
@@ -562,7 +562,7 @@ prompt_peer_ip() {
             if [[ "$peer_net" != "$server_net" ]]; then
                 print_error "Must be in ${server_net}.0 network"
                 read -p "Retry? (y/n): " r
-                [[ "$r" =~ ^[Yy] ]] || error_exit "Wrong network"
+                [[ "$r" =~ ^[Yy] ]] || die "Wrong network"
                 continue
             fi
 
@@ -570,7 +570,7 @@ prompt_peer_ip() {
             if grep -E "^AllowedIPs[[:space:]]*=" "$config_file" 2>/dev/null | grep -q "[[:space:],]${peer_ip_only}/32\|^AllowedIPs[[:space:]]*=[[:space:]]*${peer_ip_only}/32"; then
                 print_error "IP in use: ${peer_ip_only}"
                 read -p "Retry? (y/n): " r
-                [[ "$r" =~ ^[Yy] ]] || error_exit "In use"
+                [[ "$r" =~ ^[Yy] ]] || die "In use"
                 continue
             fi
             break
@@ -592,12 +592,12 @@ prompt_peer_ip() {
                 else
                     print_error "CIDR must be between 8 and 32"
                     read -p "Retry? (y/n): " r
-                    [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid CIDR"
+                    [[ "$r" =~ ^[Yy] ]] || die "Invalid CIDR"
                 fi
             else
                 print_error "Invalid subnet format. Use: /24, 24, or 255.255.255.0"
                 read -p "Retry? (y/n): " r
-                [[ "$r" =~ ^[Yy] ]] || error_exit "Invalid"
+                [[ "$r" =~ ^[Yy] ]] || die "Invalid"
             fi
         done
 
@@ -608,9 +608,9 @@ prompt_peer_ip() {
     else
         # Command-line argument provided
         [[ ! "$PEER_IP" =~ / ]] && PEER_IP="${PEER_IP}/${server_cidr}"
-        validate_cidr "$PEER_IP" || error_exit "Invalid IP"
+        validate_cidr "$PEER_IP" || die "Invalid IP"
         local peer_net=$(echo "$PEER_IP" | cut -d'/' -f1 | awk -F. '{print $1"."$2"."$3}')
-        [[ "$peer_net" == "$server_net" ]] || error_exit "Wrong network"
+        [[ "$peer_net" == "$server_net" ]] || die "Wrong network"
     fi
 }
 
@@ -770,7 +770,7 @@ configure_routing() {
             fi
             ;;
         *)
-            error_exit "Invalid routing mode selection"
+            die "Invalid routing mode selection"
             ;;
     esac
 }
@@ -805,14 +805,14 @@ generate_keypair() {
     print_info "Generating encryption keys..."
 
     mkdir -p "$keys_dir"
-    cd "$keys_dir" || error_exit "Failed to access ${keys_dir}"
+    cd "$keys_dir" || die "Failed to access ${keys_dir}"
 
     umask 077
 
     local private_key_file="${keys_dir}/${PEER_NAME}-privatekey"
     local public_key_file="${keys_dir}/${PEER_NAME}-publickey"
 
-    wg genkey | tee "$private_key_file" | wg pubkey > "$public_key_file" || error_exit "Failed to generate keys"
+    wg genkey | tee "$private_key_file" | wg pubkey > "$public_key_file" || die "Failed to generate keys"
     chmod 600 "$private_key_file" "$public_key_file"
 
     PEER_PRIVATE_KEY=$(cat "$private_key_file")
@@ -833,7 +833,7 @@ add_peer_to_server() {
     if needs_listen_port "$PEER_TYPE"; then
         echo ""
         read -p "Remote peer's public IP/domain: " host
-        [[ -z "$host" ]] && error_exit "Endpoint required for P2P"
+        [[ -z "$host" ]] && die "Endpoint required for P2P"
         endpoint="${host}:${PEER_LISTEN_PORT}"
     fi
 

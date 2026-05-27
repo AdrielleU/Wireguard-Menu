@@ -53,7 +53,7 @@ parse_arguments() {
                 sed -n '3,24p' "$0" | sed 's/^# \?//'
                 exit 0
                 ;;
-            *) error_exit "Unknown option: $1" ;;
+            *) die "Unknown option: $1" ;;
         esac
     done
 }

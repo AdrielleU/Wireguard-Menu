@@ -5,7 +5,7 @@
 #
 # Provides:
 #   - Color helpers + print_success/error/warning/info
-#   - error_exit, check_root, log
+#   - die, check_root, log
 #   - peer_* namespace: peer_validate_name, peer_list, peer_pubkey, peer_remove
 #   - validate_interface_name, detect_servers
 #   - peer-block markers (PEER_BEGIN_PREFIX, PEER_END_PREFIX)
@@ -49,14 +49,14 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
-error_exit() {
+die() {
     print_error "$1"
     log "ERROR: $1"
     exit 1
 }
 
 check_root() {
-    [[ $EUID -eq 0 ]] || error_exit "This script must be run as root (use sudo)"
+    [[ $EUID -eq 0 ]] || die "This script must be run as root (use sudo)"
 }
 
 # ---------- audit logging (HIPAA / systemd journal) ----------
@@ -176,10 +176,10 @@ peer_pubkey() {
 peer_remove() {
     local config_file="$1"
     local name="$2"
-    [[ -f "$config_file" ]] || error_exit "Config not found: $config_file"
+    [[ -f "$config_file" ]] || die "Config not found: $config_file"
 
     local tmp
-    tmp=$(mktemp) || error_exit "mktemp failed"
+    tmp=$(mktemp) || die "mktemp failed"
     trap 'rm -f "$tmp"' RETURN
 
     local perms owner
@@ -191,7 +191,7 @@ peer_remove() {
         skip && $0 ~ end_re { skip=0; next }
         skip { next }
         { print }
-    ' "$config_file" > "$tmp" || error_exit "Failed to rewrite config"
+    ' "$config_file" > "$tmp" || die "Failed to rewrite config"
 
     # Collapse 3+ blank lines to single blank
     sed -i '/^$/N;/^\n$/D' "$tmp"

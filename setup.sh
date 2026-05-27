@@ -61,7 +61,7 @@
 set -euo pipefail
 
 # Shared helpers — manifest_add (setup writes; reset.sh reads).
-# Sourced first so local print_*/error_exit/check_root defined below win.
+# Sourced first so local print_*/die/check_root defined below win.
 source "$(dirname "$0")/utils.sh"
 
 ################################################################################
@@ -141,7 +141,7 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$LOG_FILE"
 }
 
-error_exit() {
+die() {
     local message="$1"
     print_error "$message"
     log "ERROR: $message"
@@ -583,7 +583,7 @@ prompt_user_config() {
         done
     else
         if ! check_interface_conflicts "$WG_INTERFACE"; then
-            error_exit "Interface $WG_INTERFACE is already in use. Please choose a different name."
+            die "Interface $WG_INTERFACE is already in use. Please choose a different name."
         fi
     fi
 
@@ -612,10 +612,10 @@ prompt_user_config() {
         done
     else
         if ! validate_port "$WG_PORT"; then
-            error_exit "Invalid port number: $WG_PORT"
+            die "Invalid port number: $WG_PORT"
         fi
         if ! check_port_conflicts "$WG_PORT"; then
-            error_exit "Port $WG_PORT is already in use. Please choose a different port."
+            die "Port $WG_PORT is already in use. Please choose a different port."
         fi
     fi
 
@@ -649,7 +649,7 @@ prompt_user_config() {
         done
     else
         if ! validate_network_cidr "$SERVER_NETWORK"; then
-            error_exit "Invalid network CIDR format: $SERVER_NETWORK"
+            die "Invalid network CIDR format: $SERVER_NETWORK"
         fi
     fi
 
@@ -691,7 +691,7 @@ prompt_user_config() {
         done
     else
         if ! validate_ip_cidr "$SERVER_IP"; then
-            error_exit "Invalid IP/CIDR format: $SERVER_IP"
+            die "Invalid IP/CIDR format: $SERVER_IP"
         fi
 
         # Validate that server IP matches network when both are provided via arguments
@@ -701,7 +701,7 @@ prompt_user_config() {
         local network_prefix=$(echo "$network_base" | cut -d'.' -f1-3)
 
         if [[ "$server_network_prefix" != "$network_prefix" ]]; then
-            error_exit "Server IP $SERVER_IP must be within the network range ${SERVER_NETWORK}"
+            die "Server IP $SERVER_IP must be within the network range ${SERVER_NETWORK}"
         fi
     fi
 
@@ -745,7 +745,7 @@ prompt_user_config() {
     read -p "Continue with this configuration? (Y/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Nn]$ ]]; then
-        error_exit "Configuration cancelled by user"
+        die "Configuration cancelled by user"
     fi
 
     log "Configuration: Interface=${WG_INTERFACE}, Port=${WG_PORT}, ServerIP=${SERVER_IP}, Network=${SERVER_NETWORK}, ExitNode=${EXIT_NODE}"
@@ -881,7 +881,7 @@ prompt_client_config() {
     read -p "Continue with this configuration? (Y/n): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Nn]$ ]]; then
-        error_exit "Configuration cancelled by user"
+        die "Configuration cancelled by user"
     fi
 
     if [[ "$MODE" == "site-to-site" ]]; then
@@ -898,7 +898,7 @@ prompt_client_config() {
 check_root() {
     print_info "Checking root privileges..."
     if [[ $EUID -ne 0 ]]; then
-        error_exit "This script must be run as root (use sudo)"
+        die "This script must be run as root (use sudo)"
     fi
     print_success "Running as root"
     log "Root privileges confirmed"
@@ -955,7 +955,7 @@ check_os() {
                 ;;
         esac
     else
-        error_exit "Cannot detect OS version"
+        die "Cannot detect OS version"
     fi
 }
 
@@ -1001,7 +1001,7 @@ check_existing_config() {
             read -p "Stop the service and overwrite configuration? (y/N): " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                error_exit "Installation cancelled by user"
+                die "Installation cancelled by user"
             fi
 
             print_info "Stopping WireGuard service..."
@@ -1011,7 +1011,7 @@ check_existing_config() {
             read -p "Do you want to overwrite it? (y/N): " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                error_exit "Installation cancelled by user"
+                die "Installation cancelled by user"
             fi
         fi
 
@@ -1059,14 +1059,14 @@ install_packages() {
 
         case "$OS_TYPE" in
             rhel)
-                $PACKAGE_MANAGER install -y "${packages_needed[@]}" || error_exit "Failed to install packages"
+                $PACKAGE_MANAGER install -y "${packages_needed[@]}" || die "Failed to install packages"
                 ;;
             debian)
-                apt update || error_exit "Failed to update package lists"
-                apt install -y "${packages_needed[@]}" || error_exit "Failed to install packages"
+                apt update || die "Failed to update package lists"
+                apt install -y "${packages_needed[@]}" || die "Failed to install packages"
                 ;;
             *)
-                error_exit "Cannot install packages on unknown OS type"
+                die "Cannot install packages on unknown OS type"
                 ;;
         esac
 
@@ -1080,7 +1080,7 @@ enable_ip_forwarding() {
     print_info "Enabling IP forwarding..."
 
     # Enable temporarily
-    sysctl -w net.ipv4.ip_forward=1 &>/dev/null || error_exit "Failed to enable IP forwarding"
+    sysctl -w net.ipv4.ip_forward=1 &>/dev/null || die "Failed to enable IP forwarding"
 
     # Make permanent
     local sysctl_conf="/etc/sysctl.d/99-wireguard.conf"
@@ -1107,7 +1107,7 @@ generate_keys() {
 
     # Create interface-specific directories
     mkdir -p "$WG_KEYS_DIR"
-    cd "$WG_KEYS_DIR" || error_exit "Failed to access $WG_KEYS_DIR"
+    cd "$WG_KEYS_DIR" || die "Failed to access $WG_KEYS_DIR"
 
     # Set restrictive umask for key generation
     umask 077
@@ -1116,7 +1116,7 @@ generate_keys() {
     local public_key_file="${WG_KEYS_DIR}/server-publickey"
 
     if [[ ! -f "$private_key_file" ]]; then
-        wg genkey | tee "$private_key_file" | wg pubkey > "$public_key_file" || error_exit "Failed to generate keys"
+        wg genkey | tee "$private_key_file" | wg pubkey > "$public_key_file" || die "Failed to generate keys"
         chmod 600 "$private_key_file" "$public_key_file"
         print_success "Server keys generated in ${WG_KEYS_DIR}"
         log "Server keys generated: $private_key_file and $public_key_file"
@@ -1167,7 +1167,7 @@ EOF
 
 EOF
 
-    chmod 600 "$WG_CONFIG_FILE" || error_exit "Failed to set permissions on config file"
+    chmod 600 "$WG_CONFIG_FILE" || die "Failed to set permissions on config file"
     print_success "Configuration file created: $WG_CONFIG_FILE"
     log "Configuration created: $WG_CONFIG_FILE"
 }
@@ -1177,7 +1177,7 @@ generate_client_keys() {
 
     # Create interface-specific directories
     mkdir -p "$WG_KEYS_DIR"
-    cd "$WG_KEYS_DIR" || error_exit "Failed to access $WG_KEYS_DIR"
+    cd "$WG_KEYS_DIR" || die "Failed to access $WG_KEYS_DIR"
 
     # Set restrictive umask for key generation
     umask 077
@@ -1186,7 +1186,7 @@ generate_client_keys() {
     local public_key_file="${WG_KEYS_DIR}/client-publickey"
 
     if [[ ! -f "$private_key_file" ]]; then
-        wg genkey | tee "$private_key_file" | wg pubkey > "$public_key_file" || error_exit "Failed to generate client keys"
+        wg genkey | tee "$private_key_file" | wg pubkey > "$public_key_file" || die "Failed to generate client keys"
         chmod 600 "$private_key_file" "$public_key_file"
         print_success "Client keys generated in ${WG_KEYS_DIR}"
         log "Client keys generated: $private_key_file and $public_key_file"
@@ -1240,7 +1240,7 @@ PersistentKeepalive = 25
 EOF
     fi
 
-    chmod 600 "$WG_CONFIG_FILE" || error_exit "Failed to set permissions on config file"
+    chmod 600 "$WG_CONFIG_FILE" || die "Failed to set permissions on config file"
     print_success "Configuration file created: $WG_CONFIG_FILE"
     log "Configuration created: $WG_CONFIG_FILE"
 
@@ -1269,7 +1269,7 @@ import_existing_config() {
 
     # Validate config file exists
     if [[ ! -f "$CONFIG_FILE_PATH" ]]; then
-        error_exit "Config file not found: $CONFIG_FILE_PATH"
+        die "Config file not found: $CONFIG_FILE_PATH"
     fi
 
     # Extract interface name from filename if not provided
@@ -1292,7 +1292,7 @@ import_existing_config() {
         read -p "Overwrite existing config? (y/N): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            error_exit "Import cancelled by user"
+            die "Import cancelled by user"
         fi
         # Backup existing config
         local backup_file="${WG_CONFIG_FILE}.backup.$(date +%Y%m%d-%H%M%S)"
@@ -1301,7 +1301,7 @@ import_existing_config() {
     fi
 
     # Copy config file
-    cp "$CONFIG_FILE_PATH" "$WG_CONFIG_FILE" || error_exit "Failed to copy config file"
+    cp "$CONFIG_FILE_PATH" "$WG_CONFIG_FILE" || die "Failed to copy config file"
     chmod 600 "$WG_CONFIG_FILE"
     print_success "Config imported to: $WG_CONFIG_FILE"
 
@@ -1389,7 +1389,7 @@ configure_firewalld() {
 
         # Enable masquerading for exit node functionality
         if [[ "$EXIT_NODE" == true ]]; then
-            firewall-cmd --permanent --zone=public --add-masquerade || error_exit "Failed to enable masquerading"
+            firewall-cmd --permanent --zone=public --add-masquerade || die "Failed to enable masquerading"
             print_info "Masquerading enabled for exit node mode (VPN → Internet)"
             manifest_add "$WG_INTERFACE" FW_FIREWALLD "masquerade:public"
         fi
@@ -1436,7 +1436,7 @@ configure_firewalld() {
         print_success "Firewall restarted successfully"
     else
         print_warning "Firewall restart failed, trying reload..."
-        firewall-cmd --reload || error_exit "Failed to reload firewalld"
+        firewall-cmd --reload || die "Failed to reload firewalld"
     fi
 
     echo ""
@@ -1464,7 +1464,7 @@ configure_ufw() {
     print_info "Configuring ufw..."
 
     # Allow WireGuard port
-    ufw allow ${WG_PORT}/udp || error_exit "Failed to add WireGuard port"
+    ufw allow ${WG_PORT}/udp || die "Failed to add WireGuard port"
     manifest_add "$WG_INTERFACE" FW_UFW "allow:${WG_PORT}/udp"
 
     # Enable forwarding in ufw (essential for site-to-site VPN)
@@ -1626,8 +1626,8 @@ start_services() {
     print_info "Starting WireGuard service..."
 
     # Enable and start WireGuard
-    systemctl enable wg-quick@${WG_INTERFACE} || error_exit "Failed to enable WireGuard service"
-    systemctl start wg-quick@${WG_INTERFACE} || error_exit "Failed to start WireGuard service"
+    systemctl enable wg-quick@${WG_INTERFACE} || die "Failed to enable WireGuard service"
+    systemctl start wg-quick@${WG_INTERFACE} || die "Failed to start WireGuard service"
     manifest_add "$WG_INTERFACE" SERVICE "wg-quick@${WG_INTERFACE}"
 
     # Verify it's running (with retries)
@@ -1656,7 +1656,7 @@ start_services() {
         print_info "Checking for errors..."
         journalctl -xeu wg-quick@${WG_INTERFACE}.service --no-pager -n 20
         echo ""
-        error_exit "Failed to start ${WG_INTERFACE}. Check the error logs above."
+        die "Failed to start ${WG_INTERFACE}. Check the error logs above."
     fi
 
     print_success "WireGuard service is running"

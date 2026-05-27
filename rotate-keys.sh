@@ -31,14 +31,14 @@ print_success() { echo -e "${GREEN}[✓]${NC} $1" >&2; }
 print_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
 print_warning() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
 print_info() { echo -e "${BLUE}[i]${NC} $1" >&2; }
-error_exit() { print_error "$1"; exit 1; }
+die() { print_error "$1"; exit 1; }
 
 ################################################################################
 # COMMON HELPERS
 ################################################################################
 
 check_root() {
-    [[ $EUID -eq 0 ]] || error_exit "This script must be run as root (use sudo)"
+    [[ $EUID -eq 0 ]] || die "This script must be run as root (use sudo)"
 }
 
 detect_servers() {
@@ -51,7 +51,7 @@ detect_servers() {
             [[ -f "$conf" ]] && servers+=("$(basename "$conf" .conf)")
         done
     fi
-    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found. Run setup.sh first."
+    [[ ${#servers[@]} -gt 0 ]] || die "No WireGuard servers found. Run setup.sh first."
     echo "${servers[@]}"
 }
 
@@ -59,7 +59,7 @@ select_server() {
     local servers=($(detect_servers))
 
     if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || error_exit "WireGuard server '${WG_INTERFACE}' not found."
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "WireGuard server '${WG_INTERFACE}' not found."
         return
     fi
 
@@ -84,7 +84,7 @@ select_server() {
 
     echo ""
     read -p "Select server (1-${#servers[@]}): " selection
-    [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -le ${#servers[@]} ]] || error_exit "Invalid selection"
+    [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -le ${#servers[@]} ]] || die "Invalid selection"
     WG_INTERFACE="${servers[$((selection-1))]}"
 }
 
@@ -137,16 +137,16 @@ select_rotation_type() {
     case "$choice" in
         1) ROTATION_TYPE="peer" ;;
         2) ROTATION_TYPE="server" ;;
-        *) error_exit "Invalid selection" ;;
+        *) die "Invalid selection" ;;
     esac
 }
 
 select_peer() {
     [[ -n "$PEER_NAME" ]] && peer_exists "$PEER_NAME" && return
-    [[ -n "$PEER_NAME" ]] && error_exit "Peer '${PEER_NAME}' not found"
+    [[ -n "$PEER_NAME" ]] && die "Peer '${PEER_NAME}' not found"
 
     local peers=($(list_peers))
-    [[ ${#peers[@]} -gt 0 ]] || error_exit "No peers found in ${WG_INTERFACE}"
+    [[ ${#peers[@]} -gt 0 ]] || die "No peers found in ${WG_INTERFACE}"
 
     echo ""
     print_info "Select peer to rotate keys for:"
@@ -160,7 +160,7 @@ select_peer() {
 
     echo ""
     read -p "Select peer (1-${#peers[@]}): " selection
-    [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -le ${#peers[@]} ]] || error_exit "Invalid selection"
+    [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -le ${#peers[@]} ]] || die "Invalid selection"
     PEER_NAME="${peers[$((selection-1))]}"
 }
 
@@ -183,7 +183,7 @@ rotate_server_keys() {
     read -p "Type 'yes' to confirm server key rotation: " confirmation
 
     if [[ "$confirmation" != "yes" ]]; then
-        error_exit "Server key rotation cancelled"
+        die "Server key rotation cancelled"
     fi
 
     # Remove old keys
@@ -194,9 +194,9 @@ rotate_server_keys() {
     # Generate new keys
     print_info "Generating new server encryption keys..."
     mkdir -p "$keys_dir"
-    cd "$keys_dir" || error_exit "Failed to access ${keys_dir}"
+    cd "$keys_dir" || die "Failed to access ${keys_dir}"
     umask 077
-    wg genkey | tee "${keys_dir}/server-privatekey" | wg pubkey > "${keys_dir}/server-publickey" || error_exit "Failed to generate keys"
+    wg genkey | tee "${keys_dir}/server-privatekey" | wg pubkey > "${keys_dir}/server-publickey" || die "Failed to generate keys"
     chmod 600 "${keys_dir}/server-privatekey" "${keys_dir}/server-publickey"
 
     local SERVER_PRIVATE_KEY=$(cat "${keys_dir}/server-privatekey")
@@ -261,7 +261,7 @@ EOF
     print_info "Restarting WireGuard server..."
     systemctl stop "wg-quick@${WG_INTERFACE}" 2>/dev/null || true
     sleep 1
-    systemctl start "wg-quick@${WG_INTERFACE}" || error_exit "Failed to start ${WG_INTERFACE}"
+    systemctl start "wg-quick@${WG_INTERFACE}" || die "Failed to start ${WG_INTERFACE}"
     print_success "WireGuard server restarted with new keys"
 
     # Summary
@@ -302,7 +302,7 @@ rotate_peer_keys() {
     read -p "Type 'yes' to confirm peer key rotation: " confirmation
 
     if [[ "$confirmation" != "yes" ]]; then
-        error_exit "Peer key rotation cancelled"
+        die "Peer key rotation cancelled"
     fi
 
     # Get peer IP from server config
@@ -311,17 +311,17 @@ rotate_peer_keys() {
         /^#[[:space:]]*(Client|Site|Peer-to-Peer):[[:space:]]*'"$PEER_NAME"'[[:space:]]*$/ {found=1; next}
         found && /^[[:space:]]*AllowedIPs[[:space:]]*=/ {print $3; exit}
     ' "$config_file" | cut -d',' -f1)
-    [[ -n "$peer_ip" ]] || error_exit "Could not find IP for peer '${PEER_NAME}'"
+    [[ -n "$peer_ip" ]] || die "Could not find IP for peer '${PEER_NAME}'"
 
     # Get server info
     local server_port=$(grep -oP '^ListenPort\s*=\s*\K\d+' "$config_file")
-    local server_pubkey=$(cat "${keys_dir}/server-publickey" 2>/dev/null) || error_exit "Server public key not found"
+    local server_pubkey=$(cat "${keys_dir}/server-publickey" 2>/dev/null) || die "Server public key not found"
     local server_endpoint=$(grep -oP '^Endpoint\s*=\s*\K[^:]+' "$peer_config" 2>/dev/null || echo "YOUR_SERVER_IP")
 
     # Generate new peer keys
     print_info "Generating new encryption keys..."
     umask 077
-    wg genkey | tee "${keys_dir}/${PEER_NAME}-privatekey" | wg pubkey > "${keys_dir}/${PEER_NAME}-publickey" || error_exit "Failed to generate keys"
+    wg genkey | tee "${keys_dir}/${PEER_NAME}-privatekey" | wg pubkey > "${keys_dir}/${PEER_NAME}-publickey" || die "Failed to generate keys"
     chmod 600 "${keys_dir}/${PEER_NAME}-privatekey" "${keys_dir}/${PEER_NAME}-publickey"
 
     local peer_private_key=$(cat "${keys_dir}/${PEER_NAME}-privatekey")
@@ -379,7 +379,7 @@ EOF
             print_success "WireGuard server restarted successfully"
             print_warning "All peers were briefly disconnected during restart"
         else
-            error_exit "Failed to start ${WG_INTERFACE}"
+            die "Failed to start ${WG_INTERFACE}"
         fi
     fi
 

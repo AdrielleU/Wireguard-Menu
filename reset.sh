@@ -72,7 +72,7 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$LOG_FILE"
 }
 
-error_exit() {
+die() {
     local message="$1"
     print_error "$message"
     log "ERROR: $message"
@@ -81,7 +81,7 @@ error_exit() {
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        error_exit "This script must be run as root (use sudo)"
+        die "This script must be run as root (use sudo)"
     fi
 }
 

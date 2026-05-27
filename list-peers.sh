@@ -28,7 +28,7 @@ print_success() { echo -e "${GREEN}[✓]${NC} $1" >&2; }
 print_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
 print_warning() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
 print_info() { echo -e "${BLUE}[i]${NC} $1" >&2; }
-error_exit() { print_error "$1"; exit 1; }
+die() { print_error "$1"; exit 1; }
 
 ################################################################################
 # PEER TYPE HELPERS
@@ -58,7 +58,7 @@ get_type_icon() {
 
 extract_peers() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    [[ -f "$config_file" ]] || error_exit "Server '${WG_INTERFACE}' not found"
+    [[ -f "$config_file" ]] || die "Server '${WG_INTERFACE}' not found"
 
     local in_peer=false
     local peer_type=""
@@ -178,7 +178,7 @@ get_transfer() {
 
 detect_servers() {
     local servers=($(ls "${WG_CONFIG_DIR}"/*.conf 2>/dev/null | xargs -n1 basename -s .conf))
-    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found"
+    [[ ${#servers[@]} -gt 0 ]] || die "No WireGuard servers found"
     echo "${servers[@]}"
 }
 
@@ -186,7 +186,7 @@ select_server() {
     local servers=($(detect_servers))
 
     if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || error_exit "Server '${WG_INTERFACE}' not found"
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "Server '${WG_INTERFACE}' not found"
         return
     fi
 
@@ -212,7 +212,7 @@ select_server() {
 
     echo "" >&2
     read -p "Select server (1-${#servers[@]}): " selection >&2
-    [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -le ${#servers[@]} ]] || error_exit "Invalid selection"
+    [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -le ${#servers[@]} ]] || die "Invalid selection"
     WG_INTERFACE="${servers[$((selection-1))]}"
 }
 
@@ -235,7 +235,7 @@ view_peer() {
         fi
     done
 
-    [[ "$found" == false ]] && error_exit "Peer '${name}' not found"
+    [[ "$found" == false ]] && die "Peer '${name}' not found"
 
     IFS='|' read -r type name pubkey allowed_ips endpoint <<< "$peer_data"
 
@@ -385,7 +385,7 @@ parse_args() {
             -p|--peer) PEER_NAME="$2"; shift 2 ;;
             -d|--detailed) DETAILED=true; shift ;;
             -h|--help) show_help ;;
-            *) error_exit "Unknown option: $1 (use -h for help)" ;;
+            *) die "Unknown option: $1 (use -h for help)" ;;
         esac
     done
 

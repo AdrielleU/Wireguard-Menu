@@ -23,10 +23,10 @@ select_server() {
     local -a servers
     mapfile -t servers < <(detect_servers)
     local server_count=${#servers[@]}
-    [[ $server_count -gt 0 ]] || error_exit "No WireGuard servers found. Run setup.sh first."
+    [[ $server_count -gt 0 ]] || die "No WireGuard servers found. Run setup.sh first."
 
     if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || error_exit "WireGuard server '${WG_INTERFACE}' not found."
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "WireGuard server '${WG_INTERFACE}' not found."
         print_success "Using server: ${WG_INTERFACE}"
         return
     fi
@@ -57,7 +57,7 @@ select_server() {
     echo ""
     read -p "Select server (1-${server_count}): " selection
     if ! [[ "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > server_count )); then
-        error_exit "Invalid selection"
+        die "Invalid selection"
     fi
     WG_INTERFACE="${servers[$((selection-1))]}"
     print_success "Selected server: ${WG_INTERFACE}"
@@ -68,12 +68,12 @@ select_peer() {
     local -a peers
     mapfile -t peers < <(peer_list "$config_file")
     local peer_count=${#peers[@]}
-    [[ $peer_count -gt 0 ]] || error_exit "No peers found in ${WG_INTERFACE}"
+    [[ $peer_count -gt 0 ]] || die "No peers found in ${WG_INTERFACE}"
 
     if [[ -n "$PEER_NAME" ]]; then
         local found=0
         for p in "${peers[@]}"; do [[ "$p" == "$PEER_NAME" ]] && found=1 && break; done
-        [[ $found -eq 1 ]] || error_exit "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
+        [[ $found -eq 1 ]] || die "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
         print_success "Using peer: ${PEER_NAME}"
         return
     fi
@@ -88,7 +88,7 @@ select_peer() {
     echo ""
     read -p "Select peer to remove (1-${peer_count}): " selection
     if ! [[ "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > peer_count )); then
-        error_exit "Invalid selection"
+        die "Invalid selection"
     fi
     PEER_NAME="${peers[$((selection-1))]}"
     print_success "Selected peer: ${PEER_NAME}"
@@ -183,7 +183,7 @@ the removal.
 EOF
                 exit 0
                 ;;
-            *) error_exit "Unknown option: $1" ;;
+            *) die "Unknown option: $1" ;;
         esac
     done
 }
@@ -212,7 +212,7 @@ main() {
     echo ""
     read -p "Are you sure? (y/N): " -n 1 -r
     echo
-    [[ $REPLY =~ ^[Yy]$ ]] || error_exit "Peer removal cancelled"
+    [[ $REPLY =~ ^[Yy]$ ]] || die "Peer removal cancelled"
 
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local pubkey

@@ -37,7 +37,7 @@ Options:
 EOF
                 exit 0
                 ;;
-            *) error_exit "Unknown option: $1" ;;
+            *) die "Unknown option: $1" ;;
         esac
     done
 }
@@ -45,10 +45,10 @@ EOF
 select_server() {
     local -a servers
     mapfile -t servers < <(detect_servers)
-    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found"
+    [[ ${#servers[@]} -gt 0 ]] || die "No WireGuard servers found"
 
     if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || error_exit "Server '${WG_INTERFACE}' not found"
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "Server '${WG_INTERFACE}' not found"
         return
     fi
 
@@ -61,7 +61,7 @@ select_server() {
     local i=1
     for s in "${servers[@]}"; do printf "  %d) %s\n" "$i" "$s"; ((i++)) || true; done
     read -p "Select server (1-${#servers[@]}): " sel
-    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#servers[@]} )) || error_exit "Invalid selection"
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#servers[@]} )) || die "Invalid selection"
     WG_INTERFACE="${servers[$((sel-1))]}"
 }
 
@@ -84,12 +84,12 @@ select_peer() {
     local cf="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local -a names
     mapfile -t names < <(grep -oP "^${PEER_BEGIN_PREFIX}\K\S+" "$cf" 2>/dev/null)
-    [[ ${#names[@]} -gt 0 ]] || error_exit "No marker-format peers in ${WG_INTERFACE}. (Legacy peers must be re-added via add-peer.sh.)"
+    [[ ${#names[@]} -gt 0 ]] || die "No marker-format peers in ${WG_INTERFACE}. (Legacy peers must be re-added via add-peer.sh.)"
 
     if [[ -n "$PEER_NAME" ]]; then
         local found=0
         for n in "${names[@]}"; do [[ "$n" == "$PEER_NAME" ]] && found=1 && break; done
-        [[ $found -eq 1 ]] || error_exit "Peer '${PEER_NAME}' not found (or in legacy format)"
+        [[ $found -eq 1 ]] || die "Peer '${PEER_NAME}' not found (or in legacy format)"
         return
     fi
 
@@ -101,7 +101,7 @@ select_peer() {
         ((i++)) || true
     done
     read -p "Select peer to toggle (1-${#names[@]}): " sel
-    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#names[@]} )) || error_exit "Invalid selection"
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#names[@]} )) || die "Invalid selection"
     PEER_NAME="${names[$((sel-1))]}"
 }
 
@@ -109,7 +109,7 @@ select_peer() {
 # Markers themselves are never touched. Other lines get `# ` prefixed/stripped.
 toggle_block() {
     local cf="$1" name="$2" action="$3"   # action: enable|disable
-    local tmp; tmp=$(mktemp) || error_exit "mktemp failed"
+    local tmp; tmp=$(mktemp) || die "mktemp failed"
     trap 'rm -f "$tmp"' RETURN
 
     local perms owner
@@ -130,7 +130,7 @@ toggle_block() {
             }
         }
         { print }
-    ' "$cf" > "$tmp" || error_exit "Failed to rewrite config"
+    ' "$cf" > "$tmp" || die "Failed to rewrite config"
 
     mv -f "$tmp" "$cf"
     chmod "$perms" "$cf"
@@ -151,7 +151,7 @@ main() {
     local cf="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local state action new
     state=$(peer_state "$cf" "$PEER_NAME")
-    [[ -n "$state" ]] || error_exit "Could not determine state for '${PEER_NAME}'"
+    [[ -n "$state" ]] || die "Could not determine state for '${PEER_NAME}'"
     if [[ "$state" == "enabled" ]]; then action=disable; new=disabled
     else                                  action=enable;  new=enabled
     fi
@@ -162,7 +162,7 @@ main() {
     echo "Action:    ${action}"
     echo ""
     read -p "Type '${action}' to confirm: " reply
-    [[ "$reply" == "$action" ]] || error_exit "Cancelled"
+    [[ "$reply" == "$action" ]] || die "Cancelled"
 
     toggle_block "$cf" "$PEER_NAME" "$action"
     print_success "Peer ${PEER_NAME} is now ${new} in config"

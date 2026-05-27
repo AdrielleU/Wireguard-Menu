@@ -45,20 +45,20 @@ print_info() {
 # HELPER FUNCTIONS
 ################################################################################
 
-error_exit() {
+die() {
     print_error "$1"
     exit 1
 }
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        error_exit "This script must be run as root (use sudo)"
+        die "This script must be run as root (use sudo)"
     fi
 }
 
 check_qrencode() {
     if ! command -v qrencode &> /dev/null; then
-        error_exit "qrencode is not installed. Install it with: dnf install qrencode (RHEL) or apt install qrencode (Ubuntu)"
+        die "qrencode is not installed. Install it with: dnf install qrencode (RHEL) or apt install qrencode (Ubuntu)"
     fi
 }
 
@@ -79,7 +79,7 @@ detect_servers() {
     fi
 
     if [[ ${#servers[@]} -eq 0 ]]; then
-        error_exit "No WireGuard servers found. Run setup.sh first."
+        die "No WireGuard servers found. Run setup.sh first."
     fi
 
     echo "${servers[@]}"
@@ -92,7 +92,7 @@ select_server() {
     # If interface specified via argument, validate it
     if [[ -n "$WG_INTERFACE" ]]; then
         if [[ ! -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]]; then
-            error_exit "WireGuard server '${WG_INTERFACE}' not found."
+            die "WireGuard server '${WG_INTERFACE}' not found."
         fi
         print_success "Using server: ${WG_INTERFACE}"
         return
@@ -132,7 +132,7 @@ select_server() {
 
     # Validate selection
     if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$server_count" ]; then
-        error_exit "Invalid selection"
+        die "Invalid selection"
     fi
 
     WG_INTERFACE="${servers[$((selection-1))]}"
@@ -162,14 +162,14 @@ select_client() {
 
     # Check if any clients exist
     if [[ $client_count -eq 0 ]]; then
-        error_exit "No clients found in ${WG_INTERFACE}"
+        die "No clients found in ${WG_INTERFACE}"
     fi
 
     # If client specified via argument, validate it
     if [[ -n "$CLIENT_NAME" ]]; then
         local client_config="${WG_CONFIG_DIR}/${WG_INTERFACE}/${CLIENT_NAME}.conf"
         if [[ ! -f "$client_config" ]]; then
-            error_exit "Client config '${CLIENT_NAME}' not found in ${WG_INTERFACE}"
+            die "Client config '${CLIENT_NAME}' not found in ${WG_INTERFACE}"
         fi
 
         print_success "Using client: ${CLIENT_NAME}"
@@ -194,7 +194,7 @@ select_client() {
 
     # Validate selection
     if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$client_count" ]; then
-        error_exit "Invalid selection"
+        die "Invalid selection"
     fi
 
     CLIENT_NAME="${clients[$((selection-1))]}"
@@ -205,7 +205,7 @@ show_qr_code() {
     local client_config="${WG_CONFIG_DIR}/${WG_INTERFACE}/${CLIENT_NAME}.conf"
 
     if [[ ! -f "$client_config" ]]; then
-        error_exit "Client config not found: ${client_config}"
+        die "Client config not found: ${client_config}"
     fi
 
     echo ""
