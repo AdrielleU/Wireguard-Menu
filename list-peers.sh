@@ -7,28 +7,14 @@
 
 set -euo pipefail
 
-WG_CONFIG_DIR="/etc/wireguard"
+source "$(dirname "$0")/utils.sh"
+
 WG_INTERFACE=""
 PEER_NAME=""
 DETAILED=false
 
-################################################################################
-# COLORS
-################################################################################
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
+# MAGENTA is local — utils.sh doesn't define it (only Sites use it here)
 MAGENTA='\033[0;35m'
-NC='\033[0m'
-
-print_success() { echo -e "${GREEN}[✓]${NC} $1" >&2; }
-print_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
-print_info() { echo -e "${BLUE}[i]${NC} $1" >&2; }
-die() { print_error "$1"; exit 1; }
 
 ################################################################################
 # PEER TYPE HELPERS
@@ -56,54 +42,41 @@ get_type_icon() {
 # PEER EXTRACTION
 ################################################################################
 
+# Emit one pipe-delimited record per peer:  type|name|pubkey|allowed_ips|endpoint
+# Walks BEGIN_PEER/END_PEER blocks. The # Client:/Site:/Peer-to-Peer: line
+# inside each block carries the type; defaults to Client if absent.
 extract_peers() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     [[ -f "$config_file" ]] || die "Server '${WG_INTERFACE}' not found"
 
-    local in_peer=false
-    local peer_type=""
-    local peer_name=""
-    local pubkey=""
-    local peer_allowed_ips=""
-    local peer_endpoint=""
-    local peers_found=false
+    local in_block=false peers_found=false
+    local peer_type="" peer_name="" pubkey="" allowed_ips="" endpoint=""
 
     while IFS= read -r line; do
-        if [[ "$line" =~ ^#[[:space:]]*(Client|Site|Peer-to-Peer):[[:space:]]*(.+)$ ]]; then
-            peer_type="${BASH_REMATCH[1]}"
-            peer_name=$(echo "${BASH_REMATCH[2]}" | xargs)
-            in_peer=false
+        if [[ "$line" =~ ^#\ BEGIN_PEER\ (.+)$ ]]; then
+            in_block=true
+            peer_name="${BASH_REMATCH[1]}"
+            peer_type="Client"; pubkey=""; allowed_ips=""; endpoint=""
             continue
         fi
-
-        if [[ "$line" =~ ^\[Peer\]$ ]]; then
-            in_peer=true
-            pubkey=""
-            peer_allowed_ips=""
-            peer_endpoint=""
-            continue
-        fi
-
-        if [[ "$in_peer" == true ]]; then
-            if [[ "$line" =~ ^PublicKey[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-                pubkey="${BASH_REMATCH[1]}"
-            elif [[ "$line" =~ ^AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-                peer_allowed_ips="${BASH_REMATCH[1]}"
-            elif [[ "$line" =~ ^Endpoint[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-                peer_endpoint="${BASH_REMATCH[1]}"
-            fi
-
-            if [[ -n "$peer_name" && -n "$pubkey" && -n "$peer_allowed_ips" ]]; then
-                echo "${peer_type}|${peer_name}|${pubkey}|${peer_allowed_ips}|${peer_endpoint}"
+        if [[ "$line" =~ ^#\ END_PEER\  ]]; then
+            if [[ -n "$peer_name" && -n "$pubkey" && -n "$allowed_ips" ]]; then
+                echo "${peer_type}|${peer_name}|${pubkey}|${allowed_ips}|${endpoint}"
                 peers_found=true
-                peer_name=""
-                peer_type=""
-                in_peer=false
             fi
+            in_block=false
+            continue
+        fi
+        $in_block || continue
+        if   [[ "$line" =~ ^#[[:space:]]*(Client|Site|Peer-to-Peer): ]]; then peer_type="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^PublicKey[[:space:]]*=[[:space:]]*(.+)$ ]];     then pubkey="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]];    then allowed_ips="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^Endpoint[[:space:]]*=[[:space:]]*(.+)$ ]];      then endpoint="${BASH_REMATCH[1]}"
         fi
     done < "$config_file"
 
-    # Fallback: if no commented peers found, list from config files
+    # Fallback: orphan peer .conf files in /etc/wireguard/<iface>/ that
+    # never made it into the server config as marker blocks (out-of-band adds).
     if [[ "$peers_found" == false ]]; then
         local peer_dir="${WG_CONFIG_DIR}/${WG_INTERFACE}"
         if [[ -d "$peer_dir" ]]; then
@@ -112,8 +85,6 @@ extract_peers() {
                 [[ -f "$conf" ]] || continue
                 local name=$(basename "$conf" .conf)
                 [[ "$name" == "${WG_INTERFACE}" ]] && continue
-
-                # Extract basic info from config file
                 local allowed=$(grep -oP '^AllowedIPs\s*=\s*\K.+' "$conf" 2>/dev/null | head -1 | xargs)
                 echo "Client|${name}|unknown|${allowed:-unknown}|"
             done
@@ -176,11 +147,7 @@ get_transfer() {
 # SERVER SELECTION
 ################################################################################
 
-detect_servers() {
-    local servers=($(ls "${WG_CONFIG_DIR}"/*.conf 2>/dev/null | xargs -n1 basename -s .conf))
-    [[ ${#servers[@]} -gt 0 ]] || die "No WireGuard servers found"
-    echo "${servers[@]}"
-}
+# detect_servers comes from utils.sh
 
 select_server() {
     local servers=($(detect_servers))
@@ -203,7 +170,7 @@ select_server() {
     local i=1
     for iface in "${servers[@]}"; do
         local ip=$(grep -oP '^Address\s*=\s*\K\S+' "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -1)
-        local count=$(grep -cP '^#\s*(Client|Site|Peer-to-Peer):' "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null || echo "0")
+        local count=$(grep -c '^# BEGIN_PEER ' "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null || echo "0")
         local status=""
         systemctl is-active --quiet "wg-quick@${iface}" 2>/dev/null && status="${GREEN}●${NC}" || status="${YELLOW}○${NC}"
         printf "  ${BLUE}%d)${NC} %s %b - %s (%d peers)\n" "$i" "$iface" "$status" "$ip" "$count" >&2
