@@ -66,7 +66,7 @@ select_server() {
 select_peer() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local -a peers
-    mapfile -t peers < <(list_config_peers "$config_file")
+    mapfile -t peers < <(peer_list "$config_file")
     local peer_count=${#peers[@]}
     [[ $peer_count -gt 0 ]] || error_exit "No peers found in ${WG_INTERFACE}"
 
@@ -216,14 +216,14 @@ main() {
 
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local pubkey
-    pubkey=$(get_peer_pubkey "$config_file" "$PEER_NAME")
+    pubkey=$(peer_pubkey "$config_file" "$PEER_NAME")
     # Fallback: stored pubkey file (older configs)
     if [[ -z "$pubkey" && -f "${WG_CONFIG_DIR}/${WG_INTERFACE}/${PEER_NAME}-publickey" ]]; then
         pubkey=$(cat "${WG_CONFIG_DIR}/${WG_INTERFACE}/${PEER_NAME}-publickey")
     fi
 
     print_info "Removing peer block from ${config_file}..."
-    remove_peer_block "$config_file" "$PEER_NAME"
+    peer_remove "$config_file" "$PEER_NAME"
     print_success "Config rewritten"
 
     live_remove_peer "$pubkey"

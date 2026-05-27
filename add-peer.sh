@@ -44,7 +44,7 @@ KEEPALIVE=""             # Custom keepalive (defaults to DEFAULT_KEEPALIVE)
 # HELPER FUNCTIONS
 ################################################################################
 
-# Colors, print_*, error_exit, check_root, validate_peer_name sourced from utils.sh
+# Colors, print_*, error_exit, check_root, peer_validate_name sourced from utils.sh
 
 validate_cidr() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
@@ -464,7 +464,7 @@ prompt_peer_name() {
             read -p "Enter name: " PEER_NAME
             PEER_NAME=$(echo "$PEER_NAME" | xargs)
 
-            if ! validate_peer_name "$PEER_NAME"; then
+            if ! peer_validate_name "$PEER_NAME"; then
                 print_error "Invalid: Use 3-30 alphanumeric, dash, or underscore (no spaces)"
                 read -p "Retry? (y/n): " retry
                 [[ "$retry" =~ ^[Yy] ]] || error_exit "Name required"
@@ -481,7 +481,7 @@ prompt_peer_name() {
             break
         done
     else
-        validate_peer_name "$PEER_NAME" || error_exit "Invalid name format"
+        peer_validate_name "$PEER_NAME" || error_exit "Invalid name format"
         grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null && error_exit "Name already exists"
     fi
 }

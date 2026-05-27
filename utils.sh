@@ -6,12 +6,11 @@
 # Provides:
 #   - Color helpers + print_success/error/warning/info
 #   - error_exit, check_root, log
-#   - validate_peer_name (strict, pivpn-style)
-#   - validate_interface_name
-#   - detect_servers
-#   - peer-block markers (PEER_BEGIN_RE, PEER_END_RE) and helpers
+#   - peer_* namespace: peer_validate_name, peer_list, peer_pubkey, peer_remove
+#   - validate_interface_name, detect_servers
+#   - peer-block markers (PEER_BEGIN_PREFIX, PEER_END_PREFIX)
 #   - log_audit (structured systemd journal entry)
-#   - manifest_add / manifest_path (install manifest helpers)
+#   - manifest_* namespace: manifest_add, manifest_path, manifest_entries
 ################################################################################
 
 # ---------- constants ----------
@@ -78,7 +77,7 @@ log_audit() {
 #   - alphanumeric, dot, dash, underscore, at-sign
 #   - cannot start with . or -
 #   - cannot be the literal "server" or match an interface name pattern
-validate_peer_name() {
+peer_validate_name() {
     local name="$1"
     if [[ -z "$name" ]]; then
         print_error "Peer name cannot be empty"
@@ -151,14 +150,14 @@ detect_servers() {
 # list-peers.sh reads to render the type column.
 
 # List peer names declared in <iface>.conf, one per line, in file order.
-list_config_peers() {
+peer_list() {
     local config_file="$1"
     [[ -f "$config_file" ]] || return 0
     awk 'match($0, /^# BEGIN_PEER ([^ ]+)/, m) { print m[1] }' "$config_file"
 }
 
 # Echo the public key recorded for the given peer in <iface>.conf (or empty).
-get_peer_pubkey() {
+peer_pubkey() {
     local config_file="$1"
     local name="$2"
     [[ -f "$config_file" ]] || return 0
@@ -174,7 +173,7 @@ get_peer_pubkey() {
 }
 
 # Delete a peer's full block from <iface>.conf in place. Preserves perms/owner.
-remove_peer_block() {
+peer_remove() {
     local config_file="$1"
     local name="$2"
     [[ -f "$config_file" ]] || error_exit "Config not found: $config_file"

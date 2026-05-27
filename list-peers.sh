@@ -63,7 +63,7 @@ extract_peers() {
     local in_peer=false
     local peer_type=""
     local peer_name=""
-    local peer_pubkey=""
+    local pubkey=""
     local peer_allowed_ips=""
     local peer_endpoint=""
     local peers_found=false
@@ -78,7 +78,7 @@ extract_peers() {
 
         if [[ "$line" =~ ^\[Peer\]$ ]]; then
             in_peer=true
-            peer_pubkey=""
+            pubkey=""
             peer_allowed_ips=""
             peer_endpoint=""
             continue
@@ -86,15 +86,15 @@ extract_peers() {
 
         if [[ "$in_peer" == true ]]; then
             if [[ "$line" =~ ^PublicKey[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-                peer_pubkey="${BASH_REMATCH[1]}"
+                pubkey="${BASH_REMATCH[1]}"
             elif [[ "$line" =~ ^AllowedIPs[[:space:]]*=[[:space:]]*(.+)$ ]]; then
                 peer_allowed_ips="${BASH_REMATCH[1]}"
             elif [[ "$line" =~ ^Endpoint[[:space:]]*=[[:space:]]*(.+)$ ]]; then
                 peer_endpoint="${BASH_REMATCH[1]}"
             fi
 
-            if [[ -n "$peer_name" && -n "$peer_pubkey" && -n "$peer_allowed_ips" ]]; then
-                echo "${peer_type}|${peer_name}|${peer_pubkey}|${peer_allowed_ips}|${peer_endpoint}"
+            if [[ -n "$peer_name" && -n "$pubkey" && -n "$peer_allowed_ips" ]]; then
+                echo "${peer_type}|${peer_name}|${pubkey}|${peer_allowed_ips}|${peer_endpoint}"
                 peers_found=true
                 peer_name=""
                 peer_type=""

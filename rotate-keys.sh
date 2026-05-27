@@ -99,14 +99,14 @@ list_peers() {
             local conf_files=("$peer_dir"/*.conf)
             shopt -u nullglob
 
-            local peer_list=()
+            local peer_names=()
             for conf in "${conf_files[@]}"; do
                 [[ -f "$conf" ]] || continue
                 local name=$(basename "$conf" .conf)
                 [[ "$name" == "${WG_INTERFACE}" ]] && continue
-                peer_list+=("$name")
+                peer_names+=("$name")
             done
-            peers=$(printf "%s\n" "${peer_list[@]}" 2>/dev/null || true)
+            peers=$(printf "%s\n" "${peer_names[@]}" 2>/dev/null || true)
         fi
     fi
 
