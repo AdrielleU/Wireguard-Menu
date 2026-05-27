@@ -230,9 +230,6 @@ remove_peer_block() {
 #   FW_UFW|allow:51820/udp
 #   FW_UFW|route:wg0
 #   FW_NFT|wg0
-#   FW_IPT|input:51820/udp
-#   FW_IPT|forward:wg0
-#   FW_IPT|nat:10.0.0.0/24
 #   SELINUX_PORT|wireguard_port_t:udp:51820
 #   FILE|/etc/wireguard/wg0.conf
 #   DIR|/etc/wireguard/wg0

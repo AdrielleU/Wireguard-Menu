@@ -31,7 +31,7 @@
 #
 # Features:
 #   - Automatic OS detection and package manager selection
-#   - Automatic firewall detection (firewalld, ufw, iptables, nftables)
+#   - Automatic firewall detection (firewalld, ufw, nftables)
 #   - Support for multiple WireGuard servers on same VM
 #   - Network/port/interface conflict detection
 #   - SELinux support (RHEL-based systems)
@@ -1040,7 +1040,7 @@ install_packages() {
     fi
 
     # Check other utilities
-    for cmd in iptables ip; do
+    for cmd in nft ip; do
         if ! check_command "$cmd"; then
             case "$OS_TYPE" in
                 rhel)
@@ -1146,8 +1146,8 @@ ListenPort = ${WG_PORT}
 PrivateKey = ${SERVER_PRIVATE_KEY}
 EOF
 
-    # Exit-node NAT is handled by the firewall backend (firewalld/nftables/iptables)
-    # in configure_firewall(); we no longer write PostUp/PostDown iptables rules into
+    # Exit-node NAT is handled by the firewall backend (firewalld/nftables)
+    # in configure_firewall(); we no longer write PostUp/PostDown rules into
     # wg0.conf, since that conflicts with firewalld-managed masquerading.
     if [[ "$EXIT_NODE" == true ]]; then
         log "Exit node enabled; NAT will be configured by ${FIREWALL_TYPE:-firewall backend}"
@@ -1330,14 +1330,9 @@ detect_firewall() {
     elif systemctl is-active --quiet ufw 2>/dev/null; then
         FIREWALL_TYPE="ufw"
         print_success "Detected: ufw"
-    elif check_command iptables && iptables -L -n &>/dev/null; then
-        if check_command nft && nft list tables 2>/dev/null | grep -q .; then
-            FIREWALL_TYPE="nftables"
-            print_success "Detected: nftables"
-        else
-            FIREWALL_TYPE="iptables"
-            print_success "Detected: iptables"
-        fi
+    elif check_command nft; then
+        FIREWALL_TYPE="nftables"
+        print_success "Detected: nftables"
     else
         FIREWALL_TYPE="none"
         print_warning "No firewall detected"
@@ -1358,15 +1353,13 @@ configure_firewall() {
         ufw)
             configure_ufw
             ;;
-        iptables)
-            configure_iptables
-            ;;
         nftables)
             configure_nftables
             ;;
         none)
-            print_warning "No firewall to configure, creating basic iptables rules"
-            configure_iptables
+            print_warning "No firewall service detected; falling back to nftables rules"
+            FIREWALL_TYPE="nftables"
+            configure_nftables
             ;;
     esac
 
@@ -1489,26 +1482,6 @@ configure_ufw() {
     print_info "  - Port ${WG_PORT}/udp opened"
     print_info "  - Forwarding enabled for site-to-site VPN"
     log "ufw configured with port ${WG_PORT}/udp and forwarding enabled"
-}
-
-configure_iptables() {
-    print_info "Configuring iptables..."
-
-    # Allow FORWARD traffic for VPN (essential for site-to-site)
-    iptables -A FORWARD -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-    iptables -A FORWARD -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
-    manifest_add "$WG_INTERFACE" FW_IPT "fwd:${WG_INTERFACE}"
-
-    # Enable masquerading only if exit node mode is enabled
-    if [[ "$EXIT_NODE" == true ]]; then
-        iptables -t nat -A POSTROUTING -s ${SERVER_NETWORK} -o ${PRIMARY_INTERFACE} -j MASQUERADE 2>/dev/null || true
-        print_info "Masquerading enabled for exit node mode"
-        manifest_add "$WG_INTERFACE" FW_IPT "nat:${SERVER_NETWORK}:${PRIMARY_INTERFACE}"
-    fi
-
-    print_success "iptables configured"
-    print_info "  - FORWARD rules configured for site-to-site VPN"
-    log "iptables rules applied for ${WG_INTERFACE}"
 }
 
 configure_nftables() {

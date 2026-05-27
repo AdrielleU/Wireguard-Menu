@@ -346,8 +346,9 @@ remove_firewall_rules() {
         remove_firewalld_rules "$iface"
     elif command -v ufw &> /dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
         remove_ufw_rules "$iface"
-    elif command -v iptables &> /dev/null; then
-        remove_iptables_rules "$iface"
+    elif command -v nft &> /dev/null; then
+        nft delete table inet wireguard 2>/dev/null || true
+        print_success "nftables: removed inet wireguard table"
     else
         print_info "No active firewall detected"
     fi
@@ -545,27 +546,6 @@ remove_ufw_rules() {
     ufw reload 2>/dev/null || true
 
     print_success "UFW rules cleaned up"
-}
-
-remove_iptables_rules() {
-    local iface="$1"
-
-    print_info "Removing iptables rules..."
-
-    # Remove FORWARD rules
-    iptables -D FORWARD -i ${iface} -j ACCEPT 2>/dev/null || true
-    iptables -D FORWARD -o ${iface} -j ACCEPT 2>/dev/null || true
-
-    # Remove POSTROUTING masquerade rules
-    iptables -t nat -D POSTROUTING -o ${iface} -j MASQUERADE 2>/dev/null || true
-
-    # Try to save rules (command differs by distro)
-    if command -v iptables-save &>/dev/null; then
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null || \
-        iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
-    fi
-
-    print_success "Iptables rules cleaned up"
 }
 
 remove_server_config() {
@@ -772,20 +752,6 @@ replay_manifest() {
                         ;;
                 esac
                 print_success "ufw undo: $value"
-                ;;
-            FW_IPT)
-                local kind="${value%%:*}"; local rest="${value#*:}"
-                case "$kind" in
-                    fwd)
-                        iptables -D FORWARD -i "$rest" -j ACCEPT 2>/dev/null || true
-                        iptables -D FORWARD -o "$rest" -j ACCEPT 2>/dev/null || true
-                        ;;
-                    nat)
-                        local net="${rest%%:*}"; local oif="${rest#*:}"
-                        iptables -t nat -D POSTROUTING -s "$net" -o "$oif" -j MASQUERADE 2>/dev/null || true
-                        ;;
-                esac
-                print_success "iptables undo: $value"
                 ;;
             FW_NFT)
                 # Coarse but precise enough — the table is exclusively ours

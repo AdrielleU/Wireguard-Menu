@@ -11,9 +11,9 @@
 #      kernel interface — catches the wg-quick race where the service comes
 #      up "successfully" but the IP never makes it onto the interface
 #   4. the firewall backend recorded in the per-interface manifest is still
-#      effective: firewalld/ufw services active, or nftables/iptables rules
-#      we wrote at setup time still present in the kernel. Without this, the
-#      VPN looks healthy but the UDP port is closed and peers can't connect.
+#      effective: firewalld/ufw services active, or nftables rules we wrote
+#      at setup time still present in the kernel. Without this, the VPN
+#      looks healthy but the UDP port is closed and peers can't connect.
 #
 # Peer reachability is reported informationally only — peers may legitimately
 # be offline, so they don't trigger restarts.
@@ -100,10 +100,10 @@ check_interface() {
 
 # Verify the firewall backend(s) recorded in this interface's manifest are
 # still effective. For firewalld/ufw we check the service is active (a stopped
-# service means no rules are loaded). For nftables/iptables the "service"
-# concept doesn't apply, so we check that the specific FORWARD rule we wrote
-# at setup time is still present in the running kernel — a flush or reboot
-# without persistence would silently lose it.
+# service means no rules are loaded). For nftables the "service" concept
+# doesn't apply, so we check that the specific FORWARD rule we wrote at setup
+# time is still present in the running kernel — a flush or reboot without
+# persistence would silently lose it.
 # Returns "ok" or a short failure reason.
 check_firewall() {
     local iface="$1"
@@ -131,12 +131,6 @@ check_firewall() {
                 if ! command -v nft &>/dev/null \
                    || ! nft list table inet wireguard 2>/dev/null | grep -q "iifname \"${iface}\""; then
                     echo "firewall-rules-missing:nftables"; return
-                fi
-                ;;
-            FW_IPT)
-                if ! command -v iptables &>/dev/null \
-                   || ! iptables -S FORWARD 2>/dev/null | grep -q -- "-i ${iface}"; then
-                    echo "firewall-rules-missing:iptables"; return
                 fi
                 ;;
         esac
@@ -205,8 +199,8 @@ process_interface() {
     fi
 
     # Interface is up — verify the firewall we configured is still effective.
-    # A stopped firewalld/ufw silently closes the UDP port; flushed nftables/
-    # iptables drops FORWARD traffic. Neither shows up in `wg-quick` status.
+    # A stopped firewalld/ufw silently closes the UDP port; flushed nftables
+    # drops FORWARD traffic. Neither shows up in `wg-quick` status.
     local fw_result; fw_result=$(check_firewall "$iface")
     if [[ "$fw_result" != "ok" ]]; then
         print_warning "${iface}: ${fw_result}"
@@ -235,7 +229,7 @@ process_interface() {
                     return 1
                 fi
             else
-                # nftables/iptables rules vanished — no safe auto-recovery from cron
+                # nftables rules vanished — no safe auto-recovery from cron
                 print_warning "${iface}: cannot auto-recover ${fw_result}; rerun setup-wireguard.sh firewall config"
                 return 1
             fi
