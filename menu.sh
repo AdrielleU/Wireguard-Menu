@@ -102,7 +102,7 @@ show_menu() {
     echo -e "${BLUE}Peer Management:${NC}"
     echo "  1) Add Peer (Client or Site)         (add-peer.sh)"
     echo "  2) Remove Peer                       (remove-peer.sh)"
-    echo "  3) List/View Peers                   (list-peer.sh)"
+    echo "  3) List/View Peers                   (list-peers.sh)"
     echo "  4) Toggle Peer (enable/disable)      (toggle-peer.sh)"
     echo ""
 
@@ -118,7 +118,7 @@ show_menu() {
     echo ""
 
     echo -e "${BLUE}Auditing:${NC}"
-    echo " 10) Connection Logging                (log-connection.sh)"
+    echo " 10) Connection Logging                (log-connections.sh)"
     echo ""
 
     echo -e "${BLUE}System:${NC}"
@@ -177,7 +177,7 @@ main() {
         case $choice in
             1)  run_script "add-peer.sh"        "Add Peer (Client or Site)" ;;
             2)  run_script "remove-peer.sh"     "Remove Peer" ;;
-            3)  run_script "list-peer.sh"       "List/View Peers" ;;
+            3)  run_script "list-peers.sh"       "List/View Peers" ;;
             4)  run_script "toggle-peer.sh"     "Toggle Peer (enable/disable)" ;;
             5)  run_script "show-qr.sh"         "Show QR Code for Client" ;;
             6)  run_script "setup.sh" "Setup WireGuard Server" ;;
@@ -189,7 +189,7 @@ main() {
                 ;;
             8)  run_script "rotate-keys.sh"     "Rotate Keys (Server or Peer)" ;;
             9)  run_script "reset.sh" "Reset/Cleanup WireGuard" ;;
-            10) run_script "log-connection.sh"  "Connection Logging" ;;
+            10) run_script "log-connections.sh"  "Connection Logging" ;;
             11)
                 echo ""
                 print_info "Exiting WireGuard Management Menu"

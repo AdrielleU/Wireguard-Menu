@@ -21,7 +21,7 @@ LOG_FILE="${LOG_FILE:-/var/log/wireguard-setup.log}"
 # Peer-block markers — written around every [Peer] entry in <iface>.conf
 # by add-peer.sh and required by all readers (list/remove/toggle/rotate).
 # A separate `# Client: name` / `# Site: name` / `# Peer-to-Peer: name`
-# line inside the block carries the peer type for list-peer.sh.
+# line inside the block carries the peer type for list-peers.sh.
 PEER_BEGIN_PREFIX="# BEGIN_PEER "
 PEER_END_PREFIX="# END_PEER "
 
@@ -148,7 +148,7 @@ detect_servers() {
 #
 # BEGIN_PEER / END_PEER are the authoritative block delimiters used by every
 # reader below. The Client/Site/Peer-to-Peer line is type metadata that
-# list-peer.sh reads to render the type column.
+# list-peers.sh reads to render the type column.
 
 # List peer names declared in <iface>.conf, one per line, in file order.
 list_config_peers() {

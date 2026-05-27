@@ -341,11 +341,11 @@ sudo ./remove-peer.sh
 sudo ./remove-peer.sh --interface wg0 --name old-laptop
 ```
 
-### 5. list-peer.sh
+### 5. list-peers.sh
 **List all peers or view specific peer status**
 
 ```bash
-./list-peer.sh [OPTIONS]
+./list-peers.sh [OPTIONS]
 ```
 
 **Options:**
@@ -365,16 +365,16 @@ sudo ./remove-peer.sh --interface wg0 --name old-laptop
 **Example:**
 ```bash
 # List all peers
-./list-peer.sh
+./list-peers.sh
 
 # List peers on specific interface
-./list-peer.sh -i wg0
+./list-peers.sh -i wg0
 
 # View specific peer details
-./list-peer.sh -p laptop
+./list-peers.sh -p laptop
 
 # List with detailed info
-./list-peer.sh -d
+./list-peers.sh -d
 ```
 
 ### 6. rotate-keys.sh
@@ -477,7 +477,7 @@ Or use individual scripts:
 sudo ./add-peer.sh --interface wg0 --name new-phone --type client
 
 # View peer status
-./list-peer.sh -i wg0 -p laptop
+./list-peers.sh -i wg0 -p laptop
 
 # Remove old peer
 sudo ./remove-peer.sh --interface wg0 --name old-device
@@ -719,12 +719,12 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── add-peer.sh                      # Add a new peer (client/site/p2p)
 ├── remove-peer.sh                   # Remove a peer
 ├── toggle-peer.sh                   # Enable/disable a peer without removing it
-├── list-peer.sh                     # List/view all peers with status
+├── list-peers.sh                     # List/view all peers with status
 ├── rotate-keys.sh                   # Rotate server or peer keys
 ├── show-qr.sh                       # Display peer config as QR code
 ├── reset.sh               # Cleanup / reset WireGuard state
 ├── healthcheck.sh                   # One-shot health check (cron / systemd timer)
-├── log-connection.sh                # Connection logger for systemd journal
+├── log-connections.sh                # Connection logger for systemd journal
 ├── systemd/
 │   ├── wireguard-connection-log.service   # Oneshot service for the connection logger
 │   └── wireguard-connection-log.timer     # Fires the service every 2 min
@@ -860,7 +860,7 @@ sudo wg-quick down wg0    # tear down
 | Add a `[Peer]` block + client config | `sudo ./add-peer.sh` |
 | Remove a `[Peer]` block | `sudo ./remove-peer.sh` |
 | Disable a peer without deleting it | `sudo ./toggle-peer.sh` |
-| Inspect peers / handshakes | `./list-peer.sh` |
+| Inspect peers / handshakes | `./list-peers.sh` |
 | Show config as a QR code | `./show-qr.sh` |
 | Rotate server or peer keys | `sudo ./rotate-keys.sh` |
 | Import an existing `.conf` file | `sudo ./setup.sh --config <file>` |
@@ -902,7 +902,7 @@ trigger restarts — peers can legitimately be offline.
 
 ## Connection Logging
 
-`log-connection.sh` is a small one-shot poller that diffs `wg show dump`
+`log-connections.sh` is a small one-shot poller that diffs `wg show dump`
 against a state file and writes connect/disconnect events to the systemd
 journal under the `wireguard-connections` tag. Pair it with the included
 systemd timer and you get a "who connected when, from what IP" audit trail

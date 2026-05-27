@@ -2,7 +2,7 @@
 ################################################################################
 # WireGuard List Peer Script
 # Description: List all peers or view a specific peer's status
-# Usage: ./list-peer.sh [OPTIONS]
+# Usage: ./list-peers.sh [OPTIONS]
 ################################################################################
 
 set -euo pipefail

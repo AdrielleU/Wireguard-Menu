@@ -1,11 +1,11 @@
 [Unit]
 Description=WireGuard connection audit logger
-Documentation=file:///home/wireguard-scripts/log-connection.sh
+Documentation=file:///home/wireguard-scripts/log-connections.sh
 After=wg-quick.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/wireguard-scripts/log-connection.sh
+ExecStart=/home/wireguard-scripts/log-connections.sh
 
 # Hardening
 PrivateTmp=yes
