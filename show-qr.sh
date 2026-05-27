@@ -2,7 +2,7 @@
 ################################################################################
 # WireGuard Show QR Code Script
 # Description: Display client or site config as QR code for mobile devices
-# Usage: sudo ./qr-show.sh [OPTIONS]
+# Usage: sudo ./show-qr.sh [OPTIONS]
 ################################################################################
 
 set -euo pipefail

@@ -107,7 +107,7 @@ show_menu() {
     echo ""
 
     echo -e "${BLUE}Peer Configuration:${NC}"
-    echo "  5) Show QR Code for Client           (qr-show.sh)"
+    echo "  5) Show QR Code for Client           (show-qr.sh)"
     echo ""
 
     echo -e "${BLUE}Server Setup & Management:${NC}"
@@ -179,7 +179,7 @@ main() {
             2)  run_script "remove-peer.sh"     "Remove Peer" ;;
             3)  run_script "list-peer.sh"       "List/View Peers" ;;
             4)  run_script "toggle-peer.sh"     "Toggle Peer (enable/disable)" ;;
-            5)  run_script "qr-show.sh"         "Show QR Code for Client" ;;
+            5)  run_script "show-qr.sh"         "Show QR Code for Client" ;;
             6)  run_script "setup.sh" "Setup WireGuard Server" ;;
             7)
                 echo ""

@@ -929,7 +929,7 @@ show_summary() {
     if [[ "$PEER_TYPE" == "client" ]]; then
         echo ""
         echo "Next: Distribute config"
-        echo "  Mobile: sudo ./qr-show.sh ${PEER_NAME}"
+        echo "  Mobile: sudo ./show-qr.sh ${PEER_NAME}"
         echo "  Desktop: scp root@server:${config} ~/"
     else
         echo "  Remote LAN: ${REMOTE_NETWORK}"

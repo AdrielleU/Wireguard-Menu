@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Remote endpoint information
 
 - **Mobile Support**
-  - `qr-show.sh` - Display client configs as QR codes for mobile devices
+  - `show-qr.sh` - Display client configs as QR codes for mobile devices
   - Easy onboarding for iOS/Android WireGuard apps
 
 - **Security - Key Rotation**

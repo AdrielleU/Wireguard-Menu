@@ -278,7 +278,7 @@ EOF
             echo "  - ${peer}: ${keys_dir}/${peer}.conf"
         done
         echo ""
-        print_info "Distribute via SCP or QR code (./qr-show.sh)"
+        print_info "Distribute via SCP or QR code (./show-qr.sh)"
     fi
     echo ""
 }
@@ -396,7 +396,7 @@ EOF
     echo ""
     print_info "Distribute new config:"
     echo "  scp root@server:${peer_config} ~/"
-    echo "  sudo ./qr-show.sh -i ${WG_INTERFACE} -c ${PEER_NAME}"
+    echo "  sudo ./show-qr.sh -i ${WG_INTERFACE} -c ${PEER_NAME}"
     echo ""
 }
 

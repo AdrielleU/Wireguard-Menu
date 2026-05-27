@@ -417,11 +417,11 @@ sudo ./rotate-keys.sh -s -i wg0
 sudo ./rotate-keys.sh -p laptop -i wg0
 ```
 
-### 7. qr-show.sh
+### 7. show-qr.sh
 **Display client config as QR code for mobile devices**
 
 ```bash
-sudo ./qr-show.sh [OPTIONS]
+sudo ./show-qr.sh [OPTIONS]
 ```
 
 **Options:**
@@ -441,10 +441,10 @@ apt install qrencode
 **Example:**
 ```bash
 # Interactive mode
-sudo ./qr-show.sh
+sudo ./show-qr.sh
 
 # With arguments
-sudo ./qr-show.sh --interface wg0 --client phone
+sudo ./show-qr.sh --interface wg0 --client phone
 ```
 
 ## Typical Workflows
@@ -462,7 +462,7 @@ sudo ./qr-show.sh --interface wg0 --client phone
 
 3. Show QR code for mobile:
    ```bash
-   sudo ./qr-show.sh
+   sudo ./show-qr.sh
    ```
 
 ### Daily Operations
@@ -721,7 +721,7 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── toggle-peer.sh                   # Enable/disable a peer without removing it
 ├── list-peer.sh                     # List/view all peers with status
 ├── rotate-keys.sh                   # Rotate server or peer keys
-├── qr-show.sh                       # Display peer config as QR code
+├── show-qr.sh                       # Display peer config as QR code
 ├── reset.sh               # Cleanup / reset WireGuard state
 ├── healthcheck.sh                   # One-shot health check (cron / systemd timer)
 ├── log-connection.sh                # Connection logger for systemd journal
@@ -861,7 +861,7 @@ sudo wg-quick down wg0    # tear down
 | Remove a `[Peer]` block | `sudo ./remove-peer.sh` |
 | Disable a peer without deleting it | `sudo ./toggle-peer.sh` |
 | Inspect peers / handshakes | `./list-peer.sh` |
-| Show config as a QR code | `./qr-show.sh` |
+| Show config as a QR code | `./show-qr.sh` |
 | Rotate server or peer keys | `sudo ./rotate-keys.sh` |
 | Import an existing `.conf` file | `sudo ./setup.sh --config <file>` |
 | Tear everything down | `sudo ./reset.sh` |
