@@ -155,7 +155,7 @@ detect_servers() {
             servers+=("$(basename "$conf" .conf)")
         done
     fi
-    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found. Run setup-wireguard.sh first."
+    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found. Run setup.sh first."
     echo "${servers[@]}"
 }
 
@@ -936,7 +936,7 @@ show_summary() {
         echo ""
         echo "Next: Deploy to remote"
         echo "  1. scp root@server:${config} remote:/etc/wireguard/wg0.conf"
-        [[ "$PEER_TYPE" == "p2p" ]] && echo "  2. sudo wg-quick up wg0" || echo "  2. sudo ./setup-wireguard.sh --config wg0.conf"
+        [[ "$PEER_TYPE" == "p2p" ]] && echo "  2. sudo wg-quick up wg0" || echo "  2. sudo ./setup.sh --config wg0.conf"
     fi
     echo ""
 }

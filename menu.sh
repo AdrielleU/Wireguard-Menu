@@ -2,7 +2,7 @@
 ################################################################################
 # WireGuard Management Menu
 # Description: Interactive menu for WireGuard management scripts
-# Usage: ./wireguard-menu.sh
+# Usage: ./menu.sh
 ################################################################################
 
 set -euo pipefail
@@ -111,10 +111,10 @@ show_menu() {
     echo ""
 
     echo -e "${BLUE}Server Setup & Management:${NC}"
-    echo "  6) Setup WireGuard Server            (setup-wireguard.sh)"
+    echo "  6) Setup WireGuard Server            (setup.sh)"
     echo "  7) Restart / Reload Server"
     echo "  8) Rotate Keys (Server or Peer)      (rotate-keys.sh)"
-    echo "  9) Reset/Cleanup WireGuard           (reset-wireguard.sh)"
+    echo "  9) Reset/Cleanup WireGuard           (reset.sh)"
     echo ""
 
     echo -e "${BLUE}Auditing:${NC}"
@@ -180,7 +180,7 @@ main() {
             3)  run_script "list-peer.sh"       "List/View Peers" ;;
             4)  run_script "toggle-peer.sh"     "Toggle Peer (enable/disable)" ;;
             5)  run_script "qr-show.sh"         "Show QR Code for Client" ;;
-            6)  run_script "setup-wireguard.sh" "Setup WireGuard Server" ;;
+            6)  run_script "setup.sh" "Setup WireGuard Server" ;;
             7)
                 echo ""
                 restart_or_reload
@@ -188,7 +188,7 @@ main() {
                 read -rp "Press Enter to continue..."
                 ;;
             8)  run_script "rotate-keys.sh"     "Rotate Keys (Server or Peer)" ;;
-            9)  run_script "reset-wireguard.sh" "Reset/Cleanup WireGuard" ;;
+            9)  run_script "reset.sh" "Reset/Cleanup WireGuard" ;;
             10) run_script "log-connection.sh"  "Connection Logging" ;;
             11)
                 echo ""

@@ -16,12 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 62% code reduction (1126 lines → 429 lines)
   - Interactive menu for selecting server or peer rotation
   - Maintains all functionality from both previous scripts
-  - Updated wireguard-menu.sh to reflect single key rotation option
+  - Updated menu.sh to reflect single key rotation option
 
 ## [2.0.0] - 2025-10-23
 
 ### Added
-- **Interactive Menu System** (`wireguard-menu.sh`)
+- **Interactive Menu System** (`menu.sh`)
   - Clean terminal interface for all operations
   - Organized categories: Client Management, Client Configuration, Server Setup
   - Auto-detects script availability

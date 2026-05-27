@@ -51,7 +51,7 @@ detect_servers() {
             [[ -f "$conf" ]] && servers+=("$(basename "$conf" .conf)")
         done
     fi
-    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found. Run setup-wireguard.sh first."
+    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found. Run setup.sh first."
     echo "${servers[@]}"
 }
 

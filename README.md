@@ -72,7 +72,7 @@ WireGuard has been included in the mainline Linux kernel since version 5.6 (Marc
 The easiest way to manage your WireGuard servers:
 
 ```bash
-./wireguard-menu.sh
+./menu.sh
 ```
 
 This displays a clean menu with all available management operations:
@@ -85,7 +85,7 @@ This displays a clean menu with all available management operations:
 
 Set up your first WireGuard server with defaults:
 ```bash
-sudo ./setup-wireguard.sh
+sudo ./setup.sh
 ```
 
 You'll be prompted for:
@@ -100,7 +100,7 @@ Press Enter to accept defaults, or type custom values.
 
 Provide configuration via command-line arguments:
 ```bash
-sudo ./setup-wireguard.sh \
+sudo ./setup.sh \
   --interface wg0 \
   --port 51820 \
   --server-ip 10.0.0.1/24 \
@@ -111,7 +111,7 @@ sudo ./setup-wireguard.sh \
 
 Provide some arguments, get prompted for others:
 ```bash
-sudo ./setup-wireguard.sh --port 51820
+sudo ./setup.sh --port 51820
 # Will prompt for interface name, server IP, and network
 ```
 
@@ -119,12 +119,12 @@ sudo ./setup-wireguard.sh --port 51820
 
 First server (uses defaults):
 ```bash
-sudo ./setup-wireguard.sh
+sudo ./setup.sh
 ```
 
 Second server (different interface, port, and network):
 ```bash
-sudo ./setup-wireguard.sh \
+sudo ./setup.sh \
   --interface wg1 \
   --port 51821 \
   --server-ip 10.0.1.1/24 \
@@ -133,7 +133,7 @@ sudo ./setup-wireguard.sh \
 
 Third server:
 ```bash
-sudo ./setup-wireguard.sh \
+sudo ./setup.sh \
   --interface wg2 \
   --port 51822 \
   --server-ip 10.0.2.1/24 \
@@ -144,7 +144,7 @@ sudo ./setup-wireguard.sh \
 
 View all options:
 ```bash
-./setup-wireguard.sh --help
+./setup.sh --help
 ```
 
 ## Command-Line Options
@@ -252,20 +252,20 @@ systemctl status wg-quick@wg0
 
 ## Available Scripts
 
-### 1. wireguard-menu.sh
+### 1. menu.sh
 **Interactive menu for all WireGuard operations**
 
 ```bash
-./wireguard-menu.sh
+./menu.sh
 ```
 
 Displays a clean, organized menu of all available scripts. Best for interactive use.
 
-### 2. setup-wireguard.sh
+### 2. setup.sh
 **Initial WireGuard server setup**
 
 ```bash
-sudo ./setup-wireguard.sh [OPTIONS]
+sudo ./setup.sh [OPTIONS]
 ```
 
 **Options:**
@@ -278,10 +278,10 @@ sudo ./setup-wireguard.sh [OPTIONS]
 **Example:**
 ```bash
 # Interactive mode
-sudo ./setup-wireguard.sh
+sudo ./setup.sh
 
 # With arguments
-sudo ./setup-wireguard.sh --interface wg1 --port 51821 --server-ip 10.0.1.1/24 --network 10.0.1.0/24
+sudo ./setup.sh --interface wg1 --port 51821 --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ```
 
 ### 3. add-peer.sh
@@ -452,7 +452,7 @@ sudo ./qr-show.sh --interface wg0 --client phone
 ### First-time Setup
 1. Run server setup:
    ```bash
-   sudo ./setup-wireguard.sh
+   sudo ./setup.sh
    ```
 
 2. Add your first peer:
@@ -468,7 +468,7 @@ sudo ./qr-show.sh --interface wg0 --client phone
 ### Daily Operations
 Use the interactive menu for convenience:
 ```bash
-./wireguard-menu.sh
+./menu.sh
 ```
 
 Or use individual scripts:
@@ -543,7 +543,7 @@ LAN and routing will break.
 On the hub server:
 
 ```bash
-sudo ./setup-wireguard.sh \
+sudo ./setup.sh \
   --interface wg0 \
   --port 51820 \
   --server-ip 10.0.0.1/24 \
@@ -619,7 +619,7 @@ sudo systemctl restart wg-quick@wg0
 
 ### 4. Hub: forwarding between spokes
 
-`setup-wireguard.sh` already places `wg0` in firewalld's `trusted` zone, and
+`setup.sh` already places `wg0` in firewalld's `trusted` zone, and
 firewalld permits forwarding between interfaces in the same trusted zone by
 default — so no extra rules are needed for `wg0 → wg0` spoke-to-spoke
 traffic. IP forwarding is enabled persistently in step 6 of the script.
@@ -701,28 +701,28 @@ The script checks for port conflicts automatically. If you see this error:
 ss -ulnp | grep 51820
 
 # Choose a different port
-sudo ./setup-wireguard.sh --port 51821
+sudo ./setup.sh --port 51821
 ```
 
 ### Network conflicts
 The script warns about network conflicts. Use a different network range:
 ```bash
-sudo ./setup-wireguard.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
+sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ```
 
 ## Project Structure
 
 ```
 /home/wireguard-scripts/
-├── wireguard-menu.sh                # Interactive menu (start here!)
-├── setup-wireguard.sh               # Initial server setup
+├── menu.sh                # Interactive menu (start here!)
+├── setup.sh               # Initial server setup
 ├── add-peer.sh                      # Add a new peer (client/site/p2p)
 ├── remove-peer.sh                   # Remove a peer
 ├── toggle-peer.sh                   # Enable/disable a peer without removing it
 ├── list-peer.sh                     # List/view all peers with status
 ├── rotate-keys.sh                   # Rotate server or peer keys
 ├── qr-show.sh                       # Display peer config as QR code
-├── reset-wireguard.sh               # Cleanup / reset WireGuard state
+├── reset.sh               # Cleanup / reset WireGuard state
 ├── healthcheck.sh                   # One-shot health check (cron / systemd timer)
 ├── log-connection.sh                # Connection logger for systemd journal
 ├── systemd/
@@ -738,7 +738,7 @@ sudo ./setup-wireguard.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ## Manual Setup (no scripts)
 
 Mirrors the official [WireGuard QuickStart](https://www.wireguard.com/quickstart/).
-Read this section to understand exactly what `setup-wireguard.sh` and
+Read this section to understand exactly what `setup.sh` and
 `add-peer.sh` are doing under the hood, or to deploy WireGuard somewhere the
 scripts cannot run.
 
@@ -856,15 +856,15 @@ sudo wg-quick down wg0    # tear down
 
 | Manual step | Script equivalent |
 | ----------- | ----------------- |
-| Install + create iface + keys + conf | `sudo ./setup-wireguard.sh` |
+| Install + create iface + keys + conf | `sudo ./setup.sh` |
 | Add a `[Peer]` block + client config | `sudo ./add-peer.sh` |
 | Remove a `[Peer]` block | `sudo ./remove-peer.sh` |
 | Disable a peer without deleting it | `sudo ./toggle-peer.sh` |
 | Inspect peers / handshakes | `./list-peer.sh` |
 | Show config as a QR code | `./qr-show.sh` |
 | Rotate server or peer keys | `sudo ./rotate-keys.sh` |
-| Import an existing `.conf` file | `sudo ./setup-wireguard.sh --config <file>` |
-| Tear everything down | `sudo ./reset-wireguard.sh` |
+| Import an existing `.conf` file | `sudo ./setup.sh --config <file>` |
+| Tear everything down | `sudo ./reset.sh` |
 
 ## Health Check
 

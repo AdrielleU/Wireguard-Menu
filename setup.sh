@@ -37,7 +37,7 @@
 #   - SELinux support (RHEL-based systems)
 #   - Automatic kernel module detection and loading
 #
-# Usage: sudo ./setup-wireguard.sh [OPTIONS]
+# Usage: sudo ./setup.sh [OPTIONS]
 # Options:
 #   --server-ip IP        Server IP address (default: 10.0.0.1/24)
 #   --network CIDR        VPN network CIDR (default: 10.0.0.0/24)
@@ -48,19 +48,19 @@
 #
 # Examples:
 #   # First server with defaults
-#   sudo ./setup-wireguard.sh
+#   sudo ./setup.sh
 #
 #   # Second server on same VM
-#   sudo ./setup-wireguard.sh --interface wg1 --port 51821 \
+#   sudo ./setup.sh --interface wg1 --port 51821 \
 #        --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 #
 #   # Create exit node server
-#   sudo ./setup-wireguard.sh --exit-node
+#   sudo ./setup.sh --exit-node
 ################################################################################
 
 set -euo pipefail
 
-# Shared helpers — manifest_add (setup writes; reset-wireguard.sh reads).
+# Shared helpers — manifest_add (setup writes; reset.sh reads).
 # Sourced first so local print_*/error_exit/check_root defined below win.
 source "$(dirname "$0")/utils.sh"
 
@@ -1758,7 +1758,7 @@ show_summary() {
         echo "    - A unique port number (e.g., 51820, 51821, 51822)"
         echo "    - A unique network range (e.g., 10.0.0.0/24, 10.0.1.0/24)"
         echo ""
-        echo "  Example: sudo ./setup-wireguard.sh --interface wg1 --port 51821 --server-ip 10.0.1.1/24 --network 10.0.1.0/24"
+        echo "  Example: sudo ./setup.sh --interface wg1 --port 51821 --server-ip 10.0.1.1/24 --network 10.0.1.0/24"
         echo ""
     fi
 }

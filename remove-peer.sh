@@ -23,7 +23,7 @@ select_server() {
     local -a servers
     mapfile -t servers < <(detect_servers)
     local server_count=${#servers[@]}
-    [[ $server_count -gt 0 ]] || error_exit "No WireGuard servers found. Run setup-wireguard.sh first."
+    [[ $server_count -gt 0 ]] || error_exit "No WireGuard servers found. Run setup.sh first."
 
     if [[ -n "$WG_INTERFACE" ]]; then
         [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || error_exit "WireGuard server '${WG_INTERFACE}' not found."

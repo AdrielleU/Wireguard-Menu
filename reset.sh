@@ -2,7 +2,7 @@
 ################################################################################
 # WireGuard Reset/Cleanup Script
 # Description: Remove WireGuard configurations selectively or completely
-# Usage: sudo ./reset-wireguard.sh [OPTIONS]
+# Usage: sudo ./reset.sh [OPTIONS]
 #
 # Modes:
 #   1. Selective Mode (default): Choose which server(s) to remove
@@ -446,7 +446,7 @@ remove_firewalld_rules() {
         print_success "Removed ${iface} from trusted zone"
     fi
 
-    # Remove port from internal zone (setup-wireguard.sh opens port on internal zone)
+    # Remove port from internal zone (setup.sh opens port on internal zone)
     if [[ -n "$wg_port" ]]; then
         print_info "Checking port ${wg_port}/udp on internal zone..."
         if timeout 5 firewall-cmd --zone=internal --query-port=${wg_port}/udp 2>/dev/null; then
@@ -1140,9 +1140,9 @@ main() {
     print_info "Next steps:"
     if [[ ${#remaining_servers[@]} -gt 0 ]]; then
         echo "  - Other servers are still active"
-        echo "  - Use wireguard-menu.sh to manage them"
+        echo "  - Use menu.sh to manage them"
     else
-        echo "  - Run setup-wireguard.sh to create a new server"
+        echo "  - Run setup.sh to create a new server"
     fi
 
     if [[ "$REMOVE_PACKAGES" == true ]]; then

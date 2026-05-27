@@ -79,7 +79,7 @@ detect_servers() {
     fi
 
     if [[ ${#servers[@]} -eq 0 ]]; then
-        error_exit "No WireGuard servers found. Run setup-wireguard.sh first."
+        error_exit "No WireGuard servers found. Run setup.sh first."
     fi
 
     echo "${servers[@]}"

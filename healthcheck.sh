@@ -230,7 +230,7 @@ process_interface() {
                 fi
             else
                 # nftables rules vanished — no safe auto-recovery from cron
-                print_warning "${iface}: cannot auto-recover ${fw_result}; rerun setup-wireguard.sh firewall config"
+                print_warning "${iface}: cannot auto-recover ${fw_result}; rerun setup.sh firewall config"
                 return 1
             fi
         else

@@ -209,7 +209,7 @@ remove_peer_block() {
 
 # ---------- install manifest ----------
 # One manifest per WireGuard interface, e.g. /etc/wireguard/.manifest-wg0
-# Each line: TYPE|VALUE  (so reset-wireguard.sh can act on them precisely)
+# Each line: TYPE|VALUE  (so reset.sh can act on them precisely)
 #   SYSCTL|/etc/sysctl.d/99-wireguard-wg0.conf
 #   SERVICE|wg-quick@wg0
 #   FW_FIREWALLD|port:51820/udp
