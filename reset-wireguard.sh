@@ -19,6 +19,9 @@
 
 set -euo pipefail
 
+# Shared helpers — needed for manifest_path / manifest_entries.
+source "$(dirname "$0")/utils.sh"
+
 ################################################################################
 # CONFIGURATION
 ################################################################################
@@ -708,6 +711,98 @@ remove_server_config() {
     fi
 }
 
+################################################################################
+# MANIFEST REPLAY
+# Read /etc/wireguard/.manifest-<iface> and undo each recorded side-effect
+# precisely. Existing best-effort cleanup still runs after this as a safety net,
+# so legacy installs (no manifest) keep working.
+################################################################################
+replay_manifest() {
+    local iface="$1"
+    local manifest
+    manifest=$(manifest_path "$iface")
+    if [[ ! -f "$manifest" ]]; then
+        print_info "No install manifest for ${iface} (legacy install — falling back to best-effort cleanup)"
+        return 0
+    fi
+
+    print_info "Replaying install manifest: ${manifest}"
+    local entry type value
+    while IFS='|' read -r type value; do
+        [[ -z "$type" ]] && continue
+        case "$type" in
+            SYSCTL)
+                if [[ -f "$value" ]]; then
+                    rm -f "$value" && print_success "Removed sysctl file: $value"
+                fi
+                ;;
+            SERVICE)
+                systemctl stop "$value" 2>/dev/null || true
+                systemctl disable "$value" 2>/dev/null || true
+                print_success "Stopped/disabled: $value"
+                ;;
+            FW_FIREWALLD)
+                local kind="${value%%:*}"
+                local rest="${value#*:}"
+                case "$kind" in
+                    port)
+                        local zone="${rest%%:*}"; local port="${rest#*:}"
+                        firewall-cmd --permanent --zone="$zone" --remove-port="$port" 2>/dev/null || true
+                        ;;
+                    trusted-iface)
+                        firewall-cmd --permanent --zone=trusted --remove-interface="$rest" 2>/dev/null || true
+                        ;;
+                    masquerade)
+                        firewall-cmd --permanent --zone="$rest" --remove-masquerade 2>/dev/null || true
+                        ;;
+                    direct)
+                        # Best-effort — direct rules are removed by the existing logic too
+                        :
+                        ;;
+                esac
+                print_success "firewalld undo: $value"
+                ;;
+            FW_UFW)
+                local kind="${value%%:*}"; local rest="${value#*:}"
+                case "$kind" in
+                    allow) ufw delete allow "$rest" 2>/dev/null || true ;;
+                    iface)
+                        ufw delete allow in on "$rest"  2>/dev/null || true
+                        ufw delete allow out on "$rest" 2>/dev/null || true
+                        ;;
+                esac
+                print_success "ufw undo: $value"
+                ;;
+            FW_IPT)
+                local kind="${value%%:*}"; local rest="${value#*:}"
+                case "$kind" in
+                    fwd)
+                        iptables -D FORWARD -i "$rest" -j ACCEPT 2>/dev/null || true
+                        iptables -D FORWARD -o "$rest" -j ACCEPT 2>/dev/null || true
+                        ;;
+                    nat)
+                        local net="${rest%%:*}"; local oif="${rest#*:}"
+                        iptables -t nat -D POSTROUTING -s "$net" -o "$oif" -j MASQUERADE 2>/dev/null || true
+                        ;;
+                esac
+                print_success "iptables undo: $value"
+                ;;
+            FW_NFT)
+                # Coarse but precise enough — the table is exclusively ours
+                nft delete table inet wireguard 2>/dev/null || true
+                print_success "nftables undo: removed inet wireguard table"
+                ;;
+        esac
+    done < "$manifest"
+
+    # Apply firewall reload after batched undos
+    if command -v firewall-cmd &>/dev/null; then firewall-cmd --reload 2>/dev/null || true; fi
+    if command -v ufw &>/dev/null; then ufw reload 2>/dev/null || true; fi
+
+    rm -f "$manifest"
+    print_success "Manifest replayed and removed"
+}
+
 remove_selected_servers() {
     print_info "Removing selected WireGuard server(s)..."
     echo ""
@@ -721,6 +816,7 @@ remove_selected_servers() {
         echo "=========================================="
         echo ""
 
+        replay_manifest "$iface"
         stop_wireguard_service "$iface"
         remove_firewall_rules "$iface"
         remove_wireguard_interface "$iface"
@@ -787,6 +883,12 @@ remove_all_servers() {
     echo "  - ${total_clients} total client/site peer(s)"
     echo "  - ${total_configs} total config file(s)"
     echo "  - ${total_keys} total key file(s)"
+    echo ""
+
+    print_info "Replaying install manifests..."
+    for iface in "${all_servers[@]}"; do
+        replay_manifest "$iface"
+    done
     echo ""
 
     print_info "Stopping all WireGuard services..."

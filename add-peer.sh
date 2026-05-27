@@ -7,11 +7,14 @@
 
 set -euo pipefail
 
+# Shared helpers (colors, validation, markers, manifest)
+source "$(dirname "$0")/utils.sh"
+
 ################################################################################
 # CONFIGURATION
 ################################################################################
 
-WG_CONFIG_DIR="/etc/wireguard"
+# WG_CONFIG_DIR inherited from utils.sh
 
 # Default DNS servers (can be customized during peer creation)
 DEFAULT_DNS_SERVERS="1.1.1.1, 8.8.8.8"
@@ -38,49 +41,13 @@ DNS_SERVERS=""           # Custom DNS (defaults to DEFAULT_DNS_SERVERS)
 KEEPALIVE=""             # Custom keepalive (defaults to DEFAULT_KEEPALIVE)
 
 ################################################################################
-# COLORS
-################################################################################
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-print_success() { echo -e "${GREEN}[✓]${NC} $1" >&2; }
-print_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
-print_warning() { echo -e "${YELLOW}[!]${NC} $1" >&2; }
-print_info() { echo -e "${BLUE}[i]${NC} $1" >&2; }
-
-################################################################################
 # HELPER FUNCTIONS
 ################################################################################
 
-error_exit() { print_error "$1"; exit 1; }
-check_root() { [[ $EUID -eq 0 ]] || error_exit "This script must be run as root (use sudo)"; }
+# Colors, print_*, error_exit, check_root, validate_peer_name sourced from utils.sh
+
 validate_cidr() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; }
 validate_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-
-validate_peer_name() {
-    local name="$1"
-
-    # Check if empty
-    [[ -z "$name" ]] && return 1
-
-    # Check length (3-30 chars)
-    local len=${#name}
-    [[ $len -lt 3 || $len -gt 30 ]] && return 1
-
-    # Check for invalid characters (only alphanumeric, dash, underscore)
-    [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]] && return 1
-
-    # Check doesn't start/end with dash or underscore
-    [[ "$name" =~ ^[-_] ]] && return 1
-    [[ "$name" =~ [-_]$ ]] && return 1
-
-    return 0
-}
 
 validate_port() {
     local port="$1"
@@ -872,12 +839,14 @@ add_peer_to_server() {
 
     cat >> "$config_file" <<EOF
 
+${PEER_BEGIN_PREFIX}${PEER_NAME}
 # ${label}: ${PEER_NAME}
 [Peer]
 PublicKey = ${PEER_PUBLIC_KEY}
 EOF
     [[ -n "$endpoint" ]] && echo "Endpoint = ${endpoint}" >> "$config_file"
     echo "AllowedIPs = ${allowed}" >> "$config_file"
+    echo "${PEER_END_PREFIX}${PEER_NAME}" >> "$config_file"
 }
 
 create_peer_config() {
@@ -967,7 +936,7 @@ show_summary() {
         echo ""
         echo "Next: Deploy to remote"
         echo "  1. scp root@server:${config} remote:/etc/wireguard/wg0.conf"
-        [[ "$PEER_TYPE" == "p2p" ]] && echo "  2. sudo wg-quick up wg0" || echo "  2. sudo ./setup-site-remote.sh --config wg0.conf"
+        [[ "$PEER_TYPE" == "p2p" ]] && echo "  2. sudo wg-quick up wg0" || echo "  2. sudo ./setup-wireguard.sh --config wg0.conf"
     fi
     echo ""
 }

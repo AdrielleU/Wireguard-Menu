@@ -1,198 +1,183 @@
 #!/bin/bash
+################################################################################
+# WireGuard Peer Toggle
+# Description: Enable or disable a peer in <iface>.conf without removing it.
+#              Comments out the peer's [Peer] block in place; hot-reloads with
+#              wg syncconf so other peers stay connected.
+# Usage: sudo ./toggle-peer.sh [OPTIONS]
+#
+# Requires the new BEGIN_PEER / END_PEER marker format written by add-peer.sh.
+# Peers from older configs (legacy `# Client: name` form) are not supported —
+# remove and re-add them with add-peer.sh to get the markers.
+################################################################################
 
-# ============================================
-# WireGuard Peer Toggle Tool
-# ============================================
-# Enables or disables a peer by commenting/uncommenting
-# the peer block in the server config
-# Does NOT delete any files
+set -euo pipefail
 
-# Configuration - Modify these values as needed
-INTERFACE="wg0"
-CONFIG_DIR="/etc/wireguard"
+source "$(dirname "$0")/utils.sh"
 
-# ============================================
-# Colors
-# ============================================
+WG_INTERFACE=""
+PEER_NAME=""
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -i|--interface) WG_INTERFACE="$2"; shift 2 ;;
+            -n|--name|-p|--peer) PEER_NAME="$2"; shift 2 ;;
+            -h|--help)
+                cat <<EOF
+Usage: sudo $0 [OPTIONS]
 
-# ============================================
-# Functions
-# ============================================
+Toggle (enable/disable) a peer in <iface>.conf without deleting any files.
+Hot-reloads via 'wg syncconf' — other peers stay connected.
 
-# Audit logging function for HIPAA compliance - logs to systemd journal
-log_audit() {
-    local action="$1"
-    local details="$2"
-    local user=$(whoami)
-    local source_ip=$(who am i | awk '{print $5}' | tr -d '()')
-
-    # Log to systemd journal with structured metadata
-    logger -t wireguard-audit -p auth.info \
-        "action=$action user=$user source_ip=${source_ip:-local} $details"
+Options:
+  -i, --interface NAME   WireGuard interface (e.g., wg0)
+  -n, --name NAME        Peer name to toggle
+  -h, --help             Show this help
+EOF
+                exit 0
+                ;;
+            *) error_exit "Unknown option: $1" ;;
+        esac
+    done
 }
 
-# ============================================
-# Main Script
-# ============================================
+select_server() {
+    local -a servers
+    mapfile -t servers < <(detect_servers)
+    [[ ${#servers[@]} -gt 0 ]] || error_exit "No WireGuard servers found"
 
-CONFIG_FILE="$CONFIG_DIR/$INTERFACE.conf"
-
-echo -e "${CYAN}============================================${NC}"
-echo -e "${CYAN}WireGuard Peer Toggle Tool${NC}"
-echo -e "${CYAN}============================================${NC}"
-echo -e "Enable or disable peers on interface: ${BLUE}$INTERFACE${NC}"
-echo ""
-
-# Check if config exists
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo -e "${RED}Error: Config file not found: $CONFIG_FILE${NC}"
-    echo "Please set up WireGuard server first."
-    exit 1
-fi
-
-# List existing clients
-echo -e "${YELLOW}Existing clients:${NC}"
-# Match only client name lines (no = or [ characters)
-if grep -qE "^#\s*[a-zA-Z0-9_-]+\s*$" "$CONFIG_FILE"; then
-    # List clients and check if they're active or disabled
-    while IFS= read -r line; do
-        CLIENT=$(echo "$line" | sed 's/^#\s*//' | sed 's/\s*$//')
-        LINE_NUM=$(grep -nE "^#\s*${CLIENT}\s*$" "$CONFIG_FILE" | cut -d: -f1 | head -1)
-        NEXT_LINE=$(sed -n "$((LINE_NUM + 1))p" "$CONFIG_FILE")
-
-        if echo "$NEXT_LINE" | grep -qE "^#\s+\[Peer\]"; then
-            echo -e "  - $CLIENT ${YELLOW}(DISABLED)${NC}"
-        else
-            echo -e "  - $CLIENT ${GREEN}(ACTIVE)${NC}"
-        fi
-    done < <(grep -E "^#\s*[a-zA-Z0-9_-]+\s*$" "$CONFIG_FILE")
-    echo ""
-else
-    echo "  None configured yet"
-    echo ""
-    echo "No clients to toggle."
-    exit 0
-fi
-
-# Prompt for client name to toggle
-read -p "Enter client name to toggle: " CLIENT_NAME
-
-if [ -z "$CLIENT_NAME" ]; then
-    echo "No client name provided. Exiting."
-    exit 0
-fi
-
-# Validate client name format
-if ! [[ "$CLIENT_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo -e "${RED}Error: Invalid client name format${NC}"
-    echo "Client name can only contain letters, numbers, dashes, and underscores"
-    exit 1
-fi
-
-# Check if client exists in config
-if ! grep -qE "^#\s*${CLIENT_NAME}\s*$" "$CONFIG_FILE"; then
-    echo -e "${RED}Error: Client '$CLIENT_NAME' not found in $CONFIG_FILE${NC}"
-    exit 1
-fi
-
-# Check if peer is active or disabled
-LINE_NUM=$(grep -nE "^#\s*${CLIENT_NAME}\s*$" "$CONFIG_FILE" | cut -d: -f1 | head -1)
-NEXT_LINE=$(sed -n "$((LINE_NUM + 1))p" "$CONFIG_FILE")
-
-if echo "$NEXT_LINE" | grep -qE "^#.*\[Peer\]"; then
-    PEER_DISABLED=true
-    ACTION="enable"
-    CURRENT_STATUS="${YELLOW}DISABLED${NC}"
-else
-    PEER_DISABLED=false
-    ACTION="disable"
-    CURRENT_STATUS="${GREEN}ACTIVE${NC}"
-fi
-
-echo ""
-echo -e "Client '${BLUE}$CLIENT_NAME${NC}' is currently: $CURRENT_STATUS"
-echo -e "This will ${YELLOW}$ACTION${NC} the client."
-echo ""
-read -p "Type '$ACTION' to confirm: " CONFIRM
-
-if [ "$CONFIRM" != "$ACTION" ]; then
-    echo -e "${YELLOW}Toggle cancelled.${NC}"
-    exit 0
-fi
-
-echo ""
-
-# Toggle the peer
-# Find all lines in the peer section (until next blank line or next [Peer] or EOF)
-PEER_START=$((LINE_NUM + 1))
-
-# Find the end of this peer section
-PEER_END=$PEER_START
-while true; do
-    LINE_CONTENT=$(sed -n "${PEER_END}p" "$CONFIG_FILE")
-
-    # Stop at blank line, next comment (potential next peer), or EOF
-    if [ -z "$LINE_CONTENT" ] || [[ "$LINE_CONTENT" =~ ^#[[:space:]]*[a-zA-Z0-9_-]+[[:space:]]*$ ]] || [ $PEER_END -gt $((LINE_NUM + 10)) ]; then
-        PEER_END=$((PEER_END - 1))
-        break
+    if [[ -n "$WG_INTERFACE" ]]; then
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || error_exit "Server '${WG_INTERFACE}' not found"
+        return
     fi
 
-    PEER_END=$((PEER_END + 1))
-done
+    if [[ ${#servers[@]} -eq 1 ]]; then
+        WG_INTERFACE="${servers[0]}"
+        return
+    fi
 
-if [ "$PEER_DISABLED" = true ]; then
-    # Enable: Remove comment from all peer config lines
-    echo -e "${BLUE}Enabling peer (lines $PEER_START to $PEER_END)...${NC}"
-    for i in $(seq $PEER_START $PEER_END); do
-        sed -i "${i}s/^#\s\+//" "$CONFIG_FILE"
+    print_info "Multiple servers detected (use -i to skip menu)"
+    local i=1
+    for s in "${servers[@]}"; do printf "  %d) %s\n" "$i" "$s"; ((i++)) || true; done
+    read -p "Select server (1-${#servers[@]}): " sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#servers[@]} )) || error_exit "Invalid selection"
+    WG_INTERFACE="${servers[$((sel-1))]}"
+}
+
+# Disable marker — distinct from intrinsic `# ` comments so we can round-trip
+# without eating the descriptive `# Client: name` line.
+DISABLE_PREFIX="#! "
+
+# Echo "enabled" or "disabled" for a peer name. Requires marker format.
+peer_state() {
+    local cf="$1" name="$2"
+    awk -v name="$name" -v dp="$DISABLE_PREFIX" '
+        $0 == "# BEGIN_PEER " name { in_b=1; next }
+        in_b && $0 == "# END_PEER " name { exit }
+        in_b && index($0, dp) == 1 { print "disabled"; exit }
+        in_b && /^[[:space:]]*\[Peer\]/ { print "enabled"; exit }
+    ' "$cf"
+}
+
+select_peer() {
+    local cf="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    local -a names
+    mapfile -t names < <(grep -oP "^${PEER_BEGIN_PREFIX}\K\S+" "$cf" 2>/dev/null)
+    [[ ${#names[@]} -gt 0 ]] || error_exit "No marker-format peers in ${WG_INTERFACE}. (Legacy peers must be re-added via add-peer.sh.)"
+
+    if [[ -n "$PEER_NAME" ]]; then
+        local found=0
+        for n in "${names[@]}"; do [[ "$n" == "$PEER_NAME" ]] && found=1 && break; done
+        [[ $found -eq 1 ]] || error_exit "Peer '${PEER_NAME}' not found (or in legacy format)"
+        return
+    fi
+
+    echo "Peers on ${WG_INTERFACE}:"
+    local i=1
+    for n in "${names[@]}"; do
+        local s; s=$(peer_state "$cf" "$n")
+        printf "  %d) %-20s [%s]\n" "$i" "$n" "${s:-unknown}"
+        ((i++)) || true
     done
+    read -p "Select peer to toggle (1-${#names[@]}): " sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#names[@]} )) || error_exit "Invalid selection"
+    PEER_NAME="${names[$((sel-1))]}"
+}
 
-    echo -e "${GREEN}✓ Peer enabled in server config${NC}"
+# Toggle the [Peer] block between BEGIN_PEER/END_PEER markers in place.
+# Markers themselves are never touched. Other lines get `# ` prefixed/stripped.
+toggle_block() {
+    local cf="$1" name="$2" action="$3"   # action: enable|disable
+    local tmp; tmp=$(mktemp) || error_exit "mktemp failed"
+    trap 'rm -f "$tmp"' RETURN
 
-else
-    # Disable: Add comment to all peer config lines
-    echo -e "${BLUE}Disabling peer (lines $PEER_START to $PEER_END)...${NC}"
-    for i in $(seq $PEER_START $PEER_END); do
-        sed -i "${i}s/^/# /" "$CONFIG_FILE"
-    done
+    local perms owner
+    perms=$(stat -c '%a' "$cf" 2>/dev/null || echo 600)
+    owner=$(stat -c '%U:%G' "$cf" 2>/dev/null || echo root:root)
 
-    echo -e "${GREEN}✓ Peer disabled in server config${NC}"
-fi
+    awk -v name="$name" -v action="$action" -v dp="$DISABLE_PREFIX" '
+        $0 == "# BEGIN_PEER " name { in_b=1; print; next }
+        in_b && $0 == "# END_PEER " name { in_b=0; print; next }
+        in_b {
+            if (action == "disable") {
+                if ($0 ~ /^[[:space:]]*$/) { print; next }
+                if (index($0, dp) == 1) { print; next }              # already disabled
+                print dp $0; next
+            } else {
+                if (index($0, dp) == 1) { print substr($0, length(dp)+1); next }
+                print; next
+            }
+        }
+        { print }
+    ' "$cf" > "$tmp" || error_exit "Failed to rewrite config"
 
-# Clean up multiple consecutive blank lines (reduce to single blank line)
-sed -i '/^$/N;/^\n$/D' "$CONFIG_FILE"
+    mv -f "$tmp" "$cf"
+    chmod "$perms" "$cf"
+    chown "$owner" "$cf" 2>/dev/null || true
+    if command -v restorecon &>/dev/null && command -v sestatus &>/dev/null \
+       && sestatus 2>/dev/null | grep -q enabled; then
+        restorecon "$cf" 2>/dev/null || true
+    fi
+    trap - RETURN
+}
 
-# Remove trailing blank lines at end of file
-sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$CONFIG_FILE"
+main() {
+    parse_arguments "$@"
+    check_root
+    select_server
+    select_peer
 
-echo -e "${GREEN}✓ Server config updated${NC}"
+    local cf="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    local state action new
+    state=$(peer_state "$cf" "$PEER_NAME")
+    [[ -n "$state" ]] || error_exit "Could not determine state for '${PEER_NAME}'"
+    if [[ "$state" == "enabled" ]]; then action=disable; new=disabled
+    else                                  action=enable;  new=enabled
+    fi
 
-# Audit log entry
-NEW_STATUS=$([ "$PEER_DISABLED" = true ] && echo "enabled" || echo "disabled")
-log_audit "TOGGLE_PEER" "client=$CLIENT_NAME action=$ACTION new_status=$NEW_STATUS interface=$INTERFACE"
-
-echo ""
-echo -e "${BLUE}Applying configuration (hot reload)...${NC}"
-wg syncconf $INTERFACE <(wg-quick strip $INTERFACE)
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✓ Configuration reloaded successfully${NC}"
-    NEW_STATUS_COLOR=$([ "$PEER_DISABLED" = true ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")
-    echo -e "${GREEN}✓${NC} Client is now $NEW_STATUS_COLOR"
-else
-    echo -e "${RED}✗ Hot reload failed${NC}"
     echo ""
-    echo "To apply changes manually, run:"
-    echo "  wg syncconf $INTERFACE <(wg-quick strip $INTERFACE)"
-    echo "  OR"
-    echo "  systemctl restart wg-quick@$INTERFACE"
-fi
+    echo "Peer:      ${PEER_NAME} (${WG_INTERFACE})"
+    echo "Currently: ${state}"
+    echo "Action:    ${action}"
+    echo ""
+    read -p "Type '${action}' to confirm: " reply
+    [[ "$reply" == "$action" ]] || error_exit "Cancelled"
 
-echo ""
-echo -e "${GREEN}Done!${NC}"
+    toggle_block "$cf" "$PEER_NAME" "$action"
+    print_success "Peer ${PEER_NAME} is now ${new} in config"
+
+    if ip link show "$WG_INTERFACE" &>/dev/null; then
+        if wg syncconf "$WG_INTERFACE" <(wg-quick strip "$WG_INTERFACE") 2>/dev/null; then
+            print_success "Hot-reload OK — change is live (other peers unaffected)"
+        else
+            print_warning "Hot-reload failed; restart with: systemctl restart wg-quick@${WG_INTERFACE}"
+        fi
+    else
+        print_info "Interface ${WG_INTERFACE} not up; change applies on next start"
+    fi
+
+    log_audit "TOGGLE_PEER" "client=${PEER_NAME} action=${action} new_status=${new} interface=${WG_INTERFACE}"
+}
+
+main "$@"

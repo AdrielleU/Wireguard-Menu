@@ -60,6 +60,10 @@
 
 set -euo pipefail
 
+# Shared helpers — manifest_add (setup writes; reset-wireguard.sh reads).
+# Sourced first so local print_*/error_exit/check_root defined below win.
+source "$(dirname "$0")/utils.sh"
+
 ################################################################################
 # CONFIGURATION VARIABLES - Defaults
 ################################################################################
@@ -1093,6 +1097,7 @@ net.ipv4.conf.all.rp_filter = 0
 EOF
         log "IP forwarding and rp_filter configured permanently in $sysctl_conf"
     fi
+    manifest_add "$WG_INTERFACE" SYSCTL "$sysctl_conf"
 
     print_success "IP forwarding enabled (rp_filter=disabled)"
 }
@@ -1141,16 +1146,11 @@ ListenPort = ${WG_PORT}
 PrivateKey = ${SERVER_PRIVATE_KEY}
 EOF
 
-    # Add exit node (NAT) configuration if enabled
+    # Exit-node NAT is handled by the firewall backend (firewalld/nftables/iptables)
+    # in configure_firewall(); we no longer write PostUp/PostDown iptables rules into
+    # wg0.conf, since that conflicts with firewalld-managed masquerading.
     if [[ "$EXIT_NODE" == true ]]; then
-        cat >> "$WG_CONFIG_FILE" <<EOF
-
-# Exit Node Configuration - NAT all client traffic to internet
-PostUp = iptables -A FORWARD -i ${WG_INTERFACE} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${INTERNET_INTERFACE} -j MASQUERADE
-PostDown = iptables -D FORWARD -i ${WG_INTERFACE} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${INTERNET_INTERFACE} -j MASQUERADE
-EOF
-        print_info "Added exit node NAT rules for interface: ${INTERNET_INTERFACE}"
-        log "Exit node enabled with NAT on ${INTERNET_INTERFACE}"
+        log "Exit node enabled; NAT will be configured by ${FIREWALL_TYPE:-firewall backend}"
     fi
 
     # Add example client config comments
@@ -1384,6 +1384,7 @@ configure_firewalld() {
         print_info "Opening WireGuard port ${WG_PORT}/udp on public zone"
         if firewall-cmd --permanent --zone=public --add-port=${WG_PORT}/udp 2>/dev/null; then
             print_success "WireGuard port ${WG_PORT}/udp opened on public zone"
+            manifest_add "$WG_INTERFACE" FW_FIREWALLD "port:public:${WG_PORT}/udp"
         else
             print_warning "Failed to add port to public zone (may already exist)"
         fi
@@ -1391,11 +1392,13 @@ configure_firewalld() {
         # Add WireGuard to trusted zone
         print_info "Adding ${WG_INTERFACE} to trusted zone..."
         firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
+        manifest_add "$WG_INTERFACE" FW_FIREWALLD "trusted-iface:${WG_INTERFACE}"
 
         # Enable masquerading for exit node functionality
         if [[ "$EXIT_NODE" == true ]]; then
             firewall-cmd --permanent --zone=public --add-masquerade || error_exit "Failed to enable masquerading"
             print_info "Masquerading enabled for exit node mode (VPN → Internet)"
+            manifest_add "$WG_INTERFACE" FW_FIREWALLD "masquerade:public"
         fi
 
         print_success "Server firewall rules configured"
@@ -1408,12 +1411,14 @@ configure_firewalld() {
         # Add WireGuard to trusted zone
         print_info "Adding ${WG_INTERFACE} to trusted zone..."
         firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
+        manifest_add "$WG_INTERFACE" FW_FIREWALLD "trusted-iface:${WG_INTERFACE}"
 
         # Add direct FORWARD rules (works on all firewalld versions)
         print_info "Adding FORWARD rules for ${WG_INTERFACE} ↔ ${LAN_INTERFACE}..."
         firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${LAN_INTERFACE} -j ACCEPT 2>/dev/null || true
         firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${LAN_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
         firewall-cmd --permanent --direct --add-rule ipv4 filter FORWARD 0 -i ${WG_INTERFACE} -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+        manifest_add "$WG_INTERFACE" FW_FIREWALLD "direct:fwd:${WG_INTERFACE}:${LAN_INTERFACE}"
 
         print_success "Site-to-site firewall rules configured"
         print_info "  - ${WG_INTERFACE} in trusted zone"
@@ -1426,6 +1431,7 @@ configure_firewalld() {
         # Add WireGuard to trusted zone
         print_info "Adding ${WG_INTERFACE} to trusted zone..."
         firewall-cmd --permanent --zone=trusted --add-interface=${WG_INTERFACE} 2>/dev/null || true
+        manifest_add "$WG_INTERFACE" FW_FIREWALLD "trusted-iface:${WG_INTERFACE}"
 
         print_success "Client firewall rules configured"
         print_info "  - ${WG_INTERFACE} in trusted zone"
@@ -1466,6 +1472,7 @@ configure_ufw() {
 
     # Allow WireGuard port
     ufw allow ${WG_PORT}/udp || error_exit "Failed to add WireGuard port"
+    manifest_add "$WG_INTERFACE" FW_UFW "allow:${WG_PORT}/udp"
 
     # Enable forwarding in ufw (essential for site-to-site VPN)
     sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
@@ -1473,6 +1480,7 @@ configure_ufw() {
     # Allow traffic on WireGuard interface
     ufw allow in on ${WG_INTERFACE} 2>/dev/null || true
     ufw allow out on ${WG_INTERFACE} 2>/dev/null || true
+    manifest_add "$WG_INTERFACE" FW_UFW "iface:${WG_INTERFACE}"
 
     # Reload ufw
     ufw reload 2>/dev/null || true
@@ -1489,11 +1497,13 @@ configure_iptables() {
     # Allow FORWARD traffic for VPN (essential for site-to-site)
     iptables -A FORWARD -i ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
     iptables -A FORWARD -o ${WG_INTERFACE} -j ACCEPT 2>/dev/null || true
+    manifest_add "$WG_INTERFACE" FW_IPT "fwd:${WG_INTERFACE}"
 
     # Enable masquerading only if exit node mode is enabled
     if [[ "$EXIT_NODE" == true ]]; then
         iptables -t nat -A POSTROUTING -s ${SERVER_NETWORK} -o ${PRIMARY_INTERFACE} -j MASQUERADE 2>/dev/null || true
         print_info "Masquerading enabled for exit node mode"
+        manifest_add "$WG_INTERFACE" FW_IPT "nat:${SERVER_NETWORK}:${PRIMARY_INTERFACE}"
     fi
 
     print_success "iptables configured"
@@ -1511,6 +1521,7 @@ configure_nftables() {
     # Allow FORWARD traffic for VPN (essential for site-to-site)
     nft add rule inet wireguard forward iifname "${WG_INTERFACE}" accept 2>/dev/null || true
     nft add rule inet wireguard forward oifname "${WG_INTERFACE}" accept 2>/dev/null || true
+    manifest_add "$WG_INTERFACE" FW_NFT "fwd:${WG_INTERFACE}"
 
     # Enable masquerading only if exit node mode is enabled
     if [[ "$EXIT_NODE" == true ]]; then
@@ -1518,6 +1529,7 @@ configure_nftables() {
         nft add chain ip nat postrouting { type nat hook postrouting priority 100 \; } 2>/dev/null || true
         nft add rule ip nat postrouting ip saddr ${SERVER_NETWORK} oifname "${PRIMARY_INTERFACE}" masquerade 2>/dev/null || true
         print_info "Masquerading enabled for exit node mode"
+        manifest_add "$WG_INTERFACE" FW_NFT "nat:${SERVER_NETWORK}:${PRIMARY_INTERFACE}"
     fi
 
     print_success "nftables configured"
@@ -1643,6 +1655,7 @@ start_services() {
     # Enable and start WireGuard
     systemctl enable wg-quick@${WG_INTERFACE} || error_exit "Failed to enable WireGuard service"
     systemctl start wg-quick@${WG_INTERFACE} || error_exit "Failed to start WireGuard service"
+    manifest_add "$WG_INTERFACE" SERVICE "wg-quick@${WG_INTERFACE}"
 
     # Verify it's running (with retries)
     print_info "Verifying service is active..."
