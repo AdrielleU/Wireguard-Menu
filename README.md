@@ -57,6 +57,11 @@ WireGuard has been included in the mainline Linux kernel since version 5.6 (Marc
 
 ## Quick Start
 
+> Curious what these scripts actually do? Skip to
+> [Manual Setup (no scripts)](#manual-setup-no-scripts) below — it walks
+> through the same setup command-by-command, mirroring the official
+> [WireGuard QuickStart](https://www.wireguard.com/quickstart/).
+
 ### Prerequisites
 - Root/sudo access
 - Supported Linux distribution
@@ -71,9 +76,10 @@ The easiest way to manage your WireGuard servers:
 ```
 
 This displays a clean menu with all available management operations:
-- Client Management (add, remove, list, status, rotate keys)
-- Client Configuration (QR codes)
-- Server Setup & Management (initial setup, rotate server keys)
+- Peer Management (add, remove, list, toggle enable/disable)
+- Peer Configuration (QR codes)
+- Server Setup & Management (initial setup, restart/reload, rotate keys, reset)
+- Auditing (connection logging)
 
 ### Quick Setup (Command Line)
 
@@ -278,60 +284,61 @@ sudo ./setup-wireguard.sh
 sudo ./setup-wireguard.sh --interface wg1 --port 51821 --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ```
 
-### 3. add-client.sh
-**Add new clients to WireGuard server**
+### 3. add-peer.sh
+**Add a new peer (client, site, or peer-to-peer) to a WireGuard server**
 
 ```bash
-sudo ./add-client.sh [OPTIONS]
+sudo ./add-peer.sh [OPTIONS]
 ```
 
 **Options:**
 - `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-c, --client NAME` - Client name
-- `--ip IP` - Client IP address (auto-suggested if not provided)
+- `-n, --name NAME` - Peer name
+- `-t, --type TYPE` - Peer type: `client`, `site`, or `p2p`
+- `--ip IP` - Peer tunnel IP (auto-suggested if not provided)
 - `-h, --help` - Show help
 
 **Features:**
 - Auto-detects single server or shows selection menu
-- Suggests next available IP address
-- Generates client keys automatically
-- Creates client config file
-- Hot-reloads server without dropping connections
+- Suggests the next available IP in the VPN subnet
+- Generates the peer keypair automatically
+- Writes the peer config file to `/etc/wireguard/<iface>/<name>.conf`
+- Hot-reloads the server with `wg syncconf` (other peers stay connected)
 
 **Example:**
 ```bash
 # Interactive mode
-sudo ./add-client.sh
+sudo ./add-peer.sh
 
 # With arguments
-sudo ./add-client.sh --interface wg0 --client laptop --ip 10.0.0.2/32
+sudo ./add-peer.sh --interface wg0 --name laptop --type client
 ```
 
-### 4. remove-client.sh
-**Remove clients from WireGuard server**
+### 4. remove-peer.sh
+**Remove a peer from a WireGuard server**
 
 ```bash
-sudo ./remove-client.sh [OPTIONS]
+sudo ./remove-peer.sh [OPTIONS]
 ```
 
 **Options:**
 - `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-c, --client NAME` - Client name to remove
+- `-n, --name NAME` - Peer name to remove
 - `-h, --help` - Show help
 
 **Features:**
-- Removes peer from server configuration
-- Deletes client config files and keys
-- Hot-reloads server without dropping other connections
-- Creates timestamped backup of server config
+- Removes the peer block from the server configuration
+- Deletes the peer's config file and keys
+- Hot-reloads the server (other peers stay connected)
+- Creates a timestamped backup of the server config first
 
 **Example:**
 ```bash
 # Interactive mode
-sudo ./remove-client.sh
+sudo ./remove-peer.sh
 
 # With arguments
-sudo ./remove-client.sh --interface wg0 --client old-laptop
+sudo ./remove-peer.sh --interface wg0 --name old-laptop
 ```
 
 ### 5. list-peer.sh
@@ -448,9 +455,9 @@ sudo ./qr-show.sh --interface wg0 --client phone
    sudo ./setup-wireguard.sh
    ```
 
-2. Add your first client:
+2. Add your first peer:
    ```bash
-   sudo ./add-client.sh
+   sudo ./add-peer.sh
    ```
 
 3. Show QR code for mobile:
@@ -466,14 +473,14 @@ Use the interactive menu for convenience:
 
 Or use individual scripts:
 ```bash
-# Add new client
-sudo ./add-client.sh --interface wg0 --client new-phone
+# Add new peer
+sudo ./add-peer.sh --interface wg0 --name new-phone --type client
 
 # View peer status
-sudo ./list-peer.sh -i wg0 -p laptop
+./list-peer.sh -i wg0 -p laptop
 
-# Remove old client
-sudo ./remove-client.sh --interface wg0 --client old-device
+# Remove old peer
+sudo ./remove-peer.sh --interface wg0 --name old-device
 ```
 
 ### Security Maintenance
@@ -485,6 +492,176 @@ sudo ./rotate-keys.sh -p laptop -i wg0
 # Rotate server keys (affects all peers!)
 sudo ./rotate-keys.sh -s -i wg0
 ```
+
+## Multi-Site (Hub-and-Spoke) Topology
+
+The most common production layout: one site acts as the VPN **hub** (the
+WireGuard server) and the other sites connect to it as **spokes**. Spokes
+talk to each other by routing through the hub, so you don't need a direct
+tunnel from every site to every other site.
+
+This is the right shape when you have, e.g., a cloud VPS as Site A and
+multiple clinic offices (Sites B, C, …) that need to reach each other's
+LANs.
+
+### Example: 3 sites
+
+```
+                   ┌─────────────────────────────────┐
+                   │  Site A — VPN hub (cloud VPS)   │
+                   │  WG tunnel: 10.0.0.1/24         │
+                   │  Public DNS: vpn.example.com    │
+                   └────────────────┬────────────────┘
+                                    │  WireGuard (UDP 51820)
+                  ┌─────────────────┴─────────────────┐
+                  │                                   │
+   ┌──────────────▼──────────────┐     ┌──────────────▼──────────────┐
+   │  Site B — clinic            │     │  Site C — clinic            │
+   │  WG tunnel: 10.0.0.2/24     │     │  WG tunnel: 10.0.0.3/24     │
+   │  LAN:       192.168.20.0/24 │     │  LAN:       192.168.30.0/24 │
+   └─────────────────────────────┘     └─────────────────────────────┘
+```
+
+### CIDR plan
+
+| Component         | CIDR                | Purpose                         |
+| ----------------- | ------------------- | ------------------------------- |
+| WG tunnel overlay | `10.0.0.0/24`       | tunnel IPs across all sites     |
+| Site A tunnel IP  | `10.0.0.1/24`       | hub                             |
+| Site B tunnel IP  | `10.0.0.2/24`       | spoke                           |
+| Site C tunnel IP  | `10.0.0.3/24`       | spoke                           |
+| Site B LAN        | `192.168.20.0/24`   | clinic B internal network       |
+| Site C LAN        | `192.168.30.0/24`   | clinic C internal network       |
+
+Pick non-overlapping subnets. Avoid `192.168.0.0/24` and `192.168.1.0/24`
+for site LANs — they are the default at most home routers, so the moment a
+remote user connects from their house it will collide with another site's
+LAN and routing will break.
+
+### 1. Set up Site A (the hub)
+
+On the hub server:
+
+```bash
+sudo ./setup-wireguard.sh \
+  --interface wg0 \
+  --port 51820 \
+  --server-ip 10.0.0.1/24 \
+  --network 10.0.0.0/24
+```
+
+This installs WireGuard, opens UDP 51820 in firewalld, places `wg0` in the
+`trusted` zone, and starts the service. **Do not** enable exit-node mode —
+hub-only routing between sites does not need MASQUERADE.
+
+### 2. Add each spoke as a `site` peer on the hub
+
+```bash
+# Site B
+sudo ./add-peer.sh --interface wg0 --name siteB --type site \
+  --ip 10.0.0.2 --remote-network 192.168.20.0/24
+
+# Site C
+sudo ./add-peer.sh --interface wg0 --name siteC --type site \
+  --ip 10.0.0.3 --remote-network 192.168.30.0/24
+```
+
+Each invocation writes a `[Peer]` block on the hub with
+`AllowedIPs = <tunnel_ip>/32, <remote_lan>` — telling the hub which traffic
+to push into which tunnel. It also generates a peer config file at
+`/etc/wireguard/wg0/siteB.conf` and `/etc/wireguard/wg0/siteC.conf` that
+you copy to the respective spoke servers.
+
+### 3. Edit each spoke so it can reach the *other* spoke's LAN
+
+The auto-generated spoke config only knows about the hub. To let Site B
+reach Site C (and vice versa), each spoke's `[Peer Site A]` block needs the
+other spokes' LANs added to `AllowedIPs`.
+
+`/etc/wireguard/wg0.conf` on **Site B**:
+
+```ini
+[Interface]
+Address    = 10.0.0.2/24
+PrivateKey = <SITE_B_PRIVATE_KEY>
+
+[Peer]
+# Site A (hub)
+PublicKey           = <SITE_A_PUBLIC_KEY>
+Endpoint            = vpn.example.com:51820
+AllowedIPs          = 10.0.0.0/24, 192.168.30.0/24
+PersistentKeepalive = 25
+```
+
+`AllowedIPs = 10.0.0.0/24, 192.168.30.0/24` is the load-bearing line — it
+routes the WG overlay **plus Site C's LAN** into the tunnel to the hub.
+
+`/etc/wireguard/wg0.conf` on **Site C** (mirror image):
+
+```ini
+[Interface]
+Address    = 10.0.0.3/24
+PrivateKey = <SITE_C_PRIVATE_KEY>
+
+[Peer]
+# Site A (hub)
+PublicKey           = <SITE_A_PUBLIC_KEY>
+Endpoint            = vpn.example.com:51820
+AllowedIPs          = 10.0.0.0/24, 192.168.20.0/24
+PersistentKeepalive = 25
+```
+
+After editing each spoke:
+
+```bash
+sudo systemctl restart wg-quick@wg0
+```
+
+### 4. Hub: forwarding between spokes
+
+`setup-wireguard.sh` already places `wg0` in firewalld's `trusted` zone, and
+firewalld permits forwarding between interfaces in the same trusted zone by
+default — so no extra rules are needed for `wg0 → wg0` spoke-to-spoke
+traffic. IP forwarding is enabled persistently in step 6 of the script.
+
+If you've moved away from the default firewalld policy or are using a
+different backend, make sure FORWARD `wg0 → wg0` is permitted on the hub.
+
+### Verify spoke-to-spoke routing
+
+From a host on Site B's LAN, ping a host on Site C's LAN:
+
+```bash
+ping 192.168.30.10
+traceroute 192.168.30.10
+# expected:
+#   1. 192.168.20.1   ← Site B's LAN gateway / WG box
+#   2. 10.0.0.1       ← hub (Site A) over the tunnel
+#   3. 192.168.30.10  ← target host on Site C
+```
+
+On the hub, `wg show wg0` should show recent handshakes for both spokes and
+counters going up on both `[Peer]` blocks while the ping is running.
+
+### Adding a fourth site later
+
+To add Site D with LAN `192.168.40.0/24`:
+
+1. **On the hub**, add the new spoke peer:
+   ```bash
+   sudo ./add-peer.sh --interface wg0 --name siteD --type site \
+     --ip 10.0.0.4 --remote-network 192.168.40.0/24
+   ```
+2. **On Site D**, install the generated `siteD.conf`, then edit
+   `AllowedIPs` on its `[Peer Site A]` block to include every other spoke's
+   LAN: `10.0.0.0/24, 192.168.20.0/24, 192.168.30.0/24`. Start the service.
+3. **On every existing spoke (B, C)**, append `192.168.40.0/24` to the
+   `AllowedIPs` line, then `systemctl restart wg-quick@wg0`.
+
+That's the manual cost of full mesh-via-hub: each new spoke is one edit on
+every existing spoke. Up to ~10 sites this stays manageable. Past that,
+manage the spoke configs with Ansible (or similar) so a single re-run
+pushes the new `AllowedIPs` everywhere.
 
 ## Firewall Support
 
@@ -536,64 +713,317 @@ sudo ./setup-wireguard.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ## Project Structure
 
 ```
-/home/wireguard-menu/
-├── wireguard-menu.sh         # Interactive menu (start here!)
-├── setup-wireguard.sh        # Initial server setup
-├── add-client.sh             # Add new client
-├── remove-client.sh          # Remove client
-├── list-peer.sh              # List/view all peers with status
-├── rotate-keys.sh            # Rotate server or peer keys
-├── qr-show.sh                # Display client QR code
-├── README.md                 # User documentation (you are here)
-├── CLAUDE.md                 # Development documentation
-├── CONTRIBUTING.md           # Contribution guidelines
-├── CONTRIBUTORS.md           # List of contributors
-├── CODE_OF_CONDUCT.md        # Code of conduct
-├── SECURITY.md               # Security policy
-├── CHANGELOG.md              # Version history
-├── LICENSE                   # MIT License
-├── .gitignore                # Git ignore patterns
-└── .github/                  # GitHub templates
-    ├── ISSUE_TEMPLATE/
-    │   ├── bug_report.md
-    │   └── feature_request.md
-    └── PULL_REQUEST_TEMPLATE.md
+/home/wireguard-scripts/
+├── wireguard-menu.sh                # Interactive menu (start here!)
+├── setup-wireguard.sh               # Initial server setup
+├── add-peer.sh                      # Add a new peer (client/site/p2p)
+├── remove-peer.sh                   # Remove a peer
+├── toggle-peer.sh                   # Enable/disable a peer without removing it
+├── list-peer.sh                     # List/view all peers with status
+├── rotate-keys.sh                   # Rotate server or peer keys
+├── qr-show.sh                       # Display peer config as QR code
+├── reset-wireguard.sh               # Cleanup / reset WireGuard state
+├── healthcheck.sh                   # One-shot health check (cron / systemd timer)
+├── log-connection.sh                # Connection logger for systemd journal
+├── systemd/
+│   ├── wireguard-connection-log.service   # Oneshot service for the connection logger
+│   └── wireguard-connection-log.timer     # Fires the service every 2 min
+├── utils.sh                         # Shared helpers (sourced by other scripts)
+├── README.md                        # All user documentation (you are here)
+├── CHANGELOG.md                     # Version history
+├── LICENSE                          # MIT License
+└── .gitignore                       # Git ignore patterns
+```
+
+## Manual Setup (no scripts)
+
+Mirrors the official [WireGuard QuickStart](https://www.wireguard.com/quickstart/).
+Read this section to understand exactly what `setup-wireguard.sh` and
+`add-peer.sh` are doing under the hood, or to deploy WireGuard somewhere the
+scripts cannot run.
+
+### 0. Install WireGuard
+
+| Distro | Install command |
+| ------ | --------------- |
+| RHEL / CentOS / Rocky / Alma 9 | `sudo dnf install -y wireguard-tools` |
+| RHEL 8 (EPEL) | `sudo dnf install -y epel-release && sudo dnf install -y wireguard-tools` |
+| Fedora | `sudo dnf install -y wireguard-tools` |
+| Ubuntu / Debian | `sudo apt update && sudo apt install -y wireguard` |
+
+```bash
+sudo modprobe wireguard && lsmod | grep wireguard
+```
+
+### 1. Create the interface
+
+```bash
+sudo ip link add dev wg0 type wireguard
+```
+
+### 2. Assign an IP
+
+```bash
+sudo ip address add dev wg0 10.0.0.1/24
+```
+
+### 3. Generate keys
+
+```bash
+umask 077
+wg genkey | tee server-privatekey | wg pubkey > server-publickey
+```
+
+### 4. Write `/etc/wireguard/wg0.conf`
+
+```ini
+[Interface]
+Address    = 10.0.0.1/24
+ListenPort = 51820
+PrivateKey = <SERVER_PRIVATE_KEY>
+
+# NAT for VPN clients reaching the internet is configured by the firewall
+# (firewalld / nftables / iptables) in step 7, not via PostUp/PostDown here.
+# Putting MASQUERADE in both places creates duplicate / conflicting NAT rules.
+
+[Peer]
+# laptop
+PublicKey  = <LAPTOP_PUBLIC_KEY>
+AllowedIPs = 10.0.0.2/32
+```
+
+### 5. Bring it up
+
+```bash
+sudo wg-quick up wg0
+sudo systemctl enable --now wg-quick@wg0   # auto-start on boot
+```
+
+### 6. Forwarding (server only)
+
+```bash
+sudo sysctl -w net.ipv4.ip_forward=1
+echo 'net.ipv4.ip_forward = 1' | sudo tee /etc/sysctl.d/99-wireguard.conf
+```
+
+### 7. Open the firewall
+
+```bash
+# firewalld (RHEL / Fedora)
+sudo firewall-cmd --permanent --add-port=51820/udp
+sudo firewall-cmd --permanent --add-masquerade
+sudo firewall-cmd --reload
+
+# ufw (Ubuntu)
+sudo ufw allow 51820/udp
+
+# iptables
+sudo iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+sudo iptables -A FORWARD -i wg0 -j ACCEPT
+sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+```
+
+### 8. The client side
+
+`/etc/wireguard/wg0.conf` on the client:
+
+```ini
+[Interface]
+Address    = 10.0.0.2/32
+PrivateKey = <LAPTOP_PRIVATE_KEY>
+DNS        = 1.1.1.1                 # optional
+
+[Peer]
+PublicKey           = <SERVER_PUBLIC_KEY>
+Endpoint            = vpn.example.com:51820
+AllowedIPs          = 10.0.0.0/24    # tunnel only the VPN subnet
+# AllowedIPs        = 0.0.0.0/0      # …or route ALL traffic through the VPN
+PersistentKeepalive = 25             # required if the peer is behind NAT
+```
+
+```bash
+sudo wg-quick up wg0
+```
+
+### 9. Verify and tear down
+
+```bash
+sudo wg show              # live status (handshakes, bytes, endpoints)
+sudo wg-quick down wg0    # tear down
+```
+
+### Mapping to the scripts
+
+| Manual step | Script equivalent |
+| ----------- | ----------------- |
+| Install + create iface + keys + conf | `sudo ./setup-wireguard.sh` |
+| Add a `[Peer]` block + client config | `sudo ./add-peer.sh` |
+| Remove a `[Peer]` block | `sudo ./remove-peer.sh` |
+| Disable a peer without deleting it | `sudo ./toggle-peer.sh` |
+| Inspect peers / handshakes | `./list-peer.sh` |
+| Show config as a QR code | `./qr-show.sh` |
+| Rotate server or peer keys | `sudo ./rotate-keys.sh` |
+| Import an existing `.conf` file | `sudo ./setup-wireguard.sh --config <file>` |
+| Tear everything down | `sudo ./reset-wireguard.sh` |
+
+## Health Check
+
+`healthcheck.sh` is a one-shot probe — designed for cron or a systemd timer.
+For each WireGuard interface it verifies:
+
+1. `wg-quick@<iface>` service is active
+2. the kernel interface exists
+3. every `Address = …` declared in `<iface>.conf` is actually assigned to
+   the interface — catches the wg-quick race where the service comes up
+   "successfully" but the IP never makes it onto the interface
+
+If any check fails, `--restart` will `systemctl restart wg-quick@<iface>`
+and re-verify.
+
+```bash
+sudo ./healthcheck.sh                # check all interfaces, exit 1 if any fail
+sudo ./healthcheck.sh -i wg0         # check just wg0
+sudo ./healthcheck.sh --restart      # auto-restart anything unhealthy
+sudo ./healthcheck.sh -v             # verbose (also report healthy)
+```
+
+Exit codes: `0` = all healthy, `1` = at least one unhealthy and `--restart`
+did not recover it. Failures and recoveries are also logged to the systemd
+journal under the `wireguard-audit` tag.
+
+Cron example (every 5 minutes, auto-recover, quiet on success):
+
+```
+*/5 * * * * /home/wireguard-scripts/healthcheck.sh --restart
+```
+
+Peer reachability is reported for context only (with `-v`) but does NOT
+trigger restarts — peers can legitimately be offline.
+
+## Connection Logging
+
+`log-connection.sh` is a small one-shot poller that diffs `wg show dump`
+against a state file and writes connect/disconnect events to the systemd
+journal under the `wireguard-connections` tag. Pair it with the included
+systemd timer and you get a "who connected when, from what IP" audit trail
+that journald rotates and retains for you.
+
+### Install (one-time)
+
+From the repo root, copy the unit files, reload, and enable the timer:
+
+```bash
+sudo cp systemd/wireguard-connection-log.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wireguard-connection-log.timer
+```
+
+The timer fires every 2 minutes (matching WireGuard's handshake interval).
+The script runs in place from `/home/wireguard-scripts/` — no copy to
+`/usr/local/bin/` needed.
+
+> **If your repo lives somewhere other than `/home/wireguard-scripts/`**,
+> rewrite the `ExecStart=` path before copying:
+>
+> ```bash
+> sudo sed "s|/home/wireguard-scripts|$(pwd)|g" systemd/wireguard-connection-log.service \
+>   > /etc/systemd/system/wireguard-connection-log.service
+> sudo cp systemd/wireguard-connection-log.timer /etc/systemd/system/
+> sudo systemctl daemon-reload
+> sudo systemctl enable --now wireguard-connection-log.timer
+> ```
+
+### Verify it's working
+
+```bash
+systemctl list-timers wireguard-connection-log.timer    # next/previous fire time
+sudo systemctl start wireguard-connection-log.service   # fire it once now
+journalctl -t wireguard-connections -n 10               # see any events yet?
+```
+
+If `journalctl` is empty, that's normal — events are only logged on state
+*changes*. To force every current peer to show as a fresh `CONNECT`, wipe
+the state file and re-run:
+
+```bash
+sudo rm -rf /var/lib/wireguard-connections
+sudo systemctl start wireguard-connection-log.service
+journalctl -t wireguard-connections -n 20
+```
+
+### Uninstall
+
+```bash
+sudo systemctl disable --now wireguard-connection-log.timer
+sudo rm /etc/systemd/system/wireguard-connection-log.{service,timer}
+sudo systemctl daemon-reload
+sudo rm -rf /var/lib/wireguard-connections    # optional: drop state
+```
+
+### View logs
+
+```bash
+journalctl -t wireguard-connections -f                       # follow live
+journalctl -t wireguard-connections -n 50                    # last 50
+journalctl -t wireguard-connections | grep peer=remote-clinic
+journalctl -t wireguard-connections --since "1 week ago"
+journalctl -t wireguard-connections -o json-pretty > vpn-audit.json
+```
+
+Each line looks like:
+
+```
+CONNECT peer=remote-clinic iface=wg0 endpoint=203.0.113.45:51820 allowed_ips=10.0.10.1/32,192.168.10.0/24 pubkey=abc...=
+DISCONNECT peer=remote-clinic iface=wg0 endpoint=203.0.113.45:51820 allowed_ips=10.0.10.1/32,192.168.10.0/24 pubkey=abc...=
+```
+
+- `endpoint` — the real public IP:port WireGuard saw (pre-NAT, captured before
+  any masquerading on the server side). For site-to-site, that's the remote
+  site's WAN IP.
+- `allowed_ips` — what this peer is. For a client peer it's just the tunnel IP
+  (e.g. `10.0.10.5/32`). For a site-to-site peer it's the tunnel IP plus any
+  LAN subnets routed behind that site (e.g. `10.0.10.1/32,192.168.10.0/24`).
+- `pubkey` — the cryptographic identity. Stable even if you rename the peer.
+
+### Retention (HIPAA: 6 years)
+
+journald handles rotation, compression, and purging — you just tell it how
+long to keep things. Edit `/etc/systemd/journald.conf`:
+
+```ini
+[Journal]
+Storage=persistent
+SystemMaxUse=2G
+MaxRetentionSec=6year
+```
+
+Then:
+
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemctl restart systemd-journald
+```
+
+`Storage=persistent` ensures logs survive reboots (`/var/log/journal/` instead
+of `/run/log/journal/`). `SystemMaxUse` caps disk usage; `MaxRetentionSec`
+caps age. Tune to your environment — 2 GB is plenty for a small VPN's worth
+of connection events.
+
+### Config-change audit (separate tag)
+
+`add-peer.sh` / `remove-peer.sh` / `toggle-peer.sh` log admin actions under
+the `wireguard-audit` tag (different from `wireguard-connections`):
+
+```bash
+journalctl -t wireguard-audit                                  # admin actions
+journalctl -t wireguard-audit -t wireguard-connections         # combined timeline
 ```
 
 ## Contributing
 
-We welcome contributions from the community! Whether you're fixing bugs, adding features, improving documentation, or testing on different platforms, your help is appreciated.
-
-### How to Contribute
-
-1. Read our [Contributing Guidelines](CONTRIBUTING.md)
-2. Check existing [Issues](../../issues) and [Pull Requests](../../pulls)
-3. Fork the repository and create a feature branch
-4. Make your changes following our coding standards
-5. Test thoroughly on supported platforms
-6. Submit a pull request with clear description
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
-
-### Code of Conduct
-
-We are committed to providing a welcoming and inclusive environment. Please be respectful and considerate in all interactions.
-
-This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you agree to uphold this code.
-
-### Recognition
-
-All contributors are recognized in [CONTRIBUTORS.md](CONTRIBUTORS.md). Your contributions help make WireGuard more accessible to everyone!
-
-## Security
-
-Security is a top priority. If you discover a security vulnerability:
-
-- **DO NOT** create a public issue
-- **DO** report it privately following our [Security Policy](SECURITY.md)
-- We will respond within 48 hours and work with you on disclosure
-
-See [SECURITY.md](SECURITY.md) for complete security information.
+PRs welcome. Fork, branch, change, test on at least one supported distro,
+open a PR. For security issues, please email the maintainer instead of
+opening a public issue.
 
 ## License
 
@@ -614,11 +1044,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ### Project Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) - Version history and release notes
-- [CONTRIBUTING.md](CONTRIBUTING.md) - How to contribute to this project
-- [CONTRIBUTORS.md](CONTRIBUTORS.md) - List of project contributors
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) - Community guidelines and standards
-- [SECURITY.md](SECURITY.md) - Security policy and vulnerability reporting
-- [CLAUDE.md](CLAUDE.md) - Development notes and AI assistance details
 - [LICENSE](LICENSE) - MIT License details
 
 ### External Resources
@@ -626,13 +1051,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [WireGuard Official Documentation](https://www.wireguard.com/)
 - [WireGuard QuickStart](https://www.wireguard.com/quickstart/)
 - [WireGuard Protocol Whitepaper](https://www.wireguard.com/papers/wireguard.pdf)
-
-### Community
-
-- Report bugs: [Issues](../../issues)
-- Request features: [Feature Requests](../../issues/new?template=feature_request.md)
-- Contribute code: [Pull Requests](../../pulls)
-- Security issues: See [SECURITY.md](SECURITY.md)
 
 ---
 

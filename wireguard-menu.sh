@@ -7,53 +7,84 @@
 
 set -euo pipefail
 
-################################################################################
-# COLORS
-################################################################################
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
-
-print_info() {
-    echo -e "${BLUE}[i]${NC} $1"
-}
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/utils.sh"
 
 ################################################################################
-# HELPER FUNCTIONS
+# HELPERS
 ################################################################################
 
-error_exit() {
-    print_error "$1"
-    exit 1
-}
-
-check_script_exists() {
-    local script="$1"
-    if [[ -f "$script" ]]; then
-        return 0
-    else
-        return 1
+# Inline restart/reload. No separate script — these are just systemctl + wg
+# syncconf, and keeping them inline avoids one more file to maintain.
+#   Reload  = hot reconfigure (wg syncconf). Picks up peer add/remove/toggle
+#             changes without dropping connected peers. Will NOT pick up
+#             interface-level changes (Address, ListenPort, etc).
+#   Restart = full wg-quick restart. Picks up everything but drops all peers
+#             for a few seconds.
+restart_or_reload() {
+    if [[ $EUID -ne 0 ]]; then
+        print_error "This action requires root — re-run the menu with sudo"
+        return
     fi
+
+    local -a servers
+    mapfile -t servers < <(detect_servers)
+    if [[ ${#servers[@]} -eq 0 ]]; then
+        print_warning "No WireGuard interfaces found"
+        return
+    fi
+
+    local iface
+    if [[ ${#servers[@]} -eq 1 ]]; then
+        iface="${servers[0]}"
+    else
+        echo "Interfaces:"
+        local i=1
+        for s in "${servers[@]}"; do
+            printf "  %d) %s\n" "$i" "$s"
+            ((i++)) || true
+        done
+        read -rp "Select interface (1-${#servers[@]}): " sel
+        if ! [[ "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#servers[@]} )); then
+            print_error "Invalid selection"
+            return
+        fi
+        iface="${servers[$((sel-1))]}"
+    fi
+
+    echo ""
+    echo "  1) Reload   (hot — peers stay connected, picks up peer changes only)"
+    echo "  2) Restart  (full — drops & re-establishes everything)"
+    echo "  3) Cancel"
+    read -rp "Action for ${iface}: " action
+    case "$action" in
+        1)
+            if wg syncconf "$iface" <(wg-quick strip "$iface") 2>/dev/null; then
+                print_success "${iface}: reloaded (peers unaffected)"
+                log_audit "RELOAD" "interface=${iface}"
+            else
+                print_error "${iface}: reload failed — try a full restart"
+            fi
+            ;;
+        2)
+            if systemctl restart "wg-quick@${iface}"; then
+                print_success "${iface}: restarted"
+                log_audit "RESTART" "interface=${iface}"
+            else
+                print_error "${iface}: restart failed (see: journalctl -u wg-quick@${iface})"
+            fi
+            ;;
+        3|"")
+            print_info "Cancelled"
+            ;;
+        *)
+            print_error "Invalid action"
+            ;;
+    esac
 }
 
 ################################################################################
-# MENU FUNCTIONS
+# MENU
 ################################################################################
 
 show_header() {
@@ -69,27 +100,29 @@ show_menu() {
     show_header
 
     echo -e "${BLUE}Peer Management:${NC}"
-    echo "  1) Add Peer (Client or Site)     (add-peer.sh)"
-    echo "  2) Remove Peer                   (remove-peer.sh)"
-    echo "  3) List/View Peers               (list-peer.sh)"
+    echo "  1) Add Peer (Client or Site)         (add-peer.sh)"
+    echo "  2) Remove Peer                       (remove-peer.sh)"
+    echo "  3) List/View Peers                   (list-peer.sh)"
+    echo "  4) Toggle Peer (enable/disable)      (toggle-peer.sh)"
     echo ""
 
     echo -e "${BLUE}Peer Configuration:${NC}"
-    echo "  4) Show QR Code for Client       (qr-show.sh)"
+    echo "  5) Show QR Code for Client           (qr-show.sh)"
     echo ""
 
     echo -e "${BLUE}Server Setup & Management:${NC}"
-    echo "  5) Setup WireGuard Server        (setup-wireguard.sh)"
-    echo "  6) Rotate Keys (Server or Peer)  (rotate-keys.sh)"
-    echo "  7) Reset/Cleanup WireGuard       (reset-wireguard.sh)"
+    echo "  6) Setup WireGuard Server            (setup-wireguard.sh)"
+    echo "  7) Restart / Reload Server"
+    echo "  8) Rotate Keys (Server or Peer)      (rotate-keys.sh)"
+    echo "  9) Reset/Cleanup WireGuard           (reset-wireguard.sh)"
     echo ""
 
-    echo -e "${BLUE}Remote Site Configuration:${NC}"
-    echo "  8) Setup Remote Site             (setup-site-remote.sh)"
+    echo -e "${BLUE}Auditing:${NC}"
+    echo " 10) Connection Logging                (log-connection.sh)"
     echo ""
 
     echo -e "${BLUE}System:${NC}"
-    echo "  9) Exit"
+    echo " 11) Exit"
     echo ""
     echo "=========================================="
     echo ""
@@ -98,17 +131,18 @@ show_menu() {
 run_script() {
     local script="$1"
     local script_name="$2"
+    local script_path="${SCRIPT_DIR}/${script}"
 
-    if ! check_script_exists "$script"; then
-        print_error "Script not found: $script"
+    if [[ ! -f "$script_path" ]]; then
+        print_error "Script not found: $script_path"
         echo ""
-        read -p "Press Enter to continue..."
+        read -rp "Press Enter to continue..."
         return
     fi
 
-    if [[ ! -x "$script" ]]; then
+    if [[ ! -x "$script_path" ]]; then
         print_warning "Script is not executable. Making it executable..."
-        chmod +x "$script"
+        chmod +x "$script_path"
     fi
 
     echo ""
@@ -116,10 +150,11 @@ run_script() {
     echo "=========================================="
     echo ""
 
-    # Run the script
-    ./"$script"
-
+    set +e
+    "$script_path"
     local exit_code=$?
+    set -e
+
     echo ""
     echo "=========================================="
     if [[ $exit_code -eq 0 ]]; then
@@ -128,7 +163,7 @@ run_script() {
         print_warning "Script exited with code: $exit_code"
     fi
     echo ""
-    read -p "Press Enter to continue..."
+    read -rp "Press Enter to continue..."
 }
 
 ################################################################################
@@ -138,44 +173,33 @@ run_script() {
 main() {
     while true; do
         show_menu
-
-        read -p "Select an option (1-9): " choice
-
+        read -rp "Select an option (1-11): " choice
         case $choice in
-            1)
-                run_script "add-peer.sh" "Add Peer (Client or Site)"
-                ;;
-            2)
-                run_script "remove-peer.sh" "Remove Peer"
-                ;;
-            3)
-                run_script "list-peer.sh" "List/View Peers"
-                ;;
-            4)
-                run_script "qr-show.sh" "Show QR Code for Client"
-                ;;
-            5)
-                run_script "setup-wireguard.sh" "Setup WireGuard Server"
-                ;;
-            6)
-                run_script "rotate-keys.sh" "Rotate Keys (Server or Peer)"
-                ;;
+            1)  run_script "add-peer.sh"        "Add Peer (Client or Site)" ;;
+            2)  run_script "remove-peer.sh"     "Remove Peer" ;;
+            3)  run_script "list-peer.sh"       "List/View Peers" ;;
+            4)  run_script "toggle-peer.sh"     "Toggle Peer (enable/disable)" ;;
+            5)  run_script "qr-show.sh"         "Show QR Code for Client" ;;
+            6)  run_script "setup-wireguard.sh" "Setup WireGuard Server" ;;
             7)
-                run_script "reset-wireguard.sh" "Reset/Cleanup WireGuard"
+                echo ""
+                restart_or_reload
+                echo ""
+                read -rp "Press Enter to continue..."
                 ;;
-            8)
-                run_script "setup-site-remote.sh" "Setup Remote Site"
-                ;;
-            9)
+            8)  run_script "rotate-keys.sh"     "Rotate Keys (Server or Peer)" ;;
+            9)  run_script "reset-wireguard.sh" "Reset/Cleanup WireGuard" ;;
+            10) run_script "log-connection.sh"  "Connection Logging" ;;
+            11)
                 echo ""
                 print_info "Exiting WireGuard Management Menu"
                 echo ""
                 exit 0
                 ;;
             *)
-                print_error "Invalid selection. Please choose 1-9."
+                print_error "Invalid selection. Please choose 1-11."
                 echo ""
-                read -p "Press Enter to continue..."
+                read -rp "Press Enter to continue..."
                 ;;
         esac
     done

@@ -1,0 +1,22 @@
+[Unit]
+Description=WireGuard connection audit logger
+Documentation=file:///home/wireguard-scripts/log-connection.sh
+After=wg-quick.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/wireguard-scripts/log-connection.sh
+
+# Hardening
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/wireguard-connections
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run WireGuard connection logger every 2 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+RandomizedDelaySec=30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
