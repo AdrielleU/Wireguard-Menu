@@ -18,8 +18,10 @@
 WG_CONFIG_DIR="${WG_CONFIG_DIR:-/etc/wireguard}"
 LOG_FILE="${LOG_FILE:-/var/log/wireguard-setup.log}"
 
-# Peer-block markers — written around every [Peer] entry in <iface>.conf.
-# Backwards-compatible reads also accept the legacy `# Client: name` form.
+# Peer-block markers — written around every [Peer] entry in <iface>.conf
+# by add-peer.sh and required by all readers (list/remove/toggle/rotate).
+# A separate `# Client: name` / `# Site: name` / `# Peer-to-Peer: name`
+# line inside the block carries the peer type for list-peer.sh.
 PEER_BEGIN_PREFIX="# BEGIN_PEER "
 PEER_END_PREFIX="# END_PEER "
 
@@ -138,25 +140,21 @@ detect_servers() {
 # Format written by add-peer.sh:
 #
 #   # BEGIN_PEER <name>
-#   # type=<client|site|p2p>
+#   # <Client|Site|Peer-to-Peer>: <name>
 #   [Peer]
 #   PublicKey = ...
 #   AllowedIPs = ...
 #   # END_PEER <name>
 #
-# All readers MUST also accept the legacy form (no markers, just `# Client: <name>`)
-# for configs created before the marker change.
+# BEGIN_PEER / END_PEER are the authoritative block delimiters used by every
+# reader below. The Client/Site/Peer-to-Peer line is type metadata that
+# list-peer.sh reads to render the type column.
 
-# List peer names declared in <iface>.conf. Returns the union of new-format
-# BEGIN_PEER markers and legacy `# Client/Site/Peer-to-Peer:` comments, deduped
-# in the order first seen — so mixed-format configs work during migration.
+# List peer names declared in <iface>.conf, one per line, in file order.
 list_config_peers() {
     local config_file="$1"
     [[ -f "$config_file" ]] || return 0
-    awk '
-        match($0, /^# BEGIN_PEER ([^ ]+)/, m)                              { if (!(m[1] in seen)) { seen[m[1]]=1; print m[1] }; next }
-        match($0, /^#[[:space:]]*(Client|Site|Peer-to-Peer):[[:space:]]*([^[:space:]]+)/, m) { if (!(m[2] in seen)) { seen[m[2]]=1; print m[2] }; next }
-    ' "$config_file"
+    awk 'match($0, /^# BEGIN_PEER ([^ ]+)/, m) { print m[1] }' "$config_file"
 }
 
 # Echo the public key recorded for the given peer in <iface>.conf (or empty).
@@ -164,10 +162,9 @@ get_peer_pubkey() {
     local config_file="$1"
     local name="$2"
     [[ -f "$config_file" ]] || return 0
-    awk -v name="$name" -v begin="^# BEGIN_PEER ${name}$" -v legacy="^#[[:space:]]*(Client|Site|Peer-to-Peer):[[:space:]]*${name}[[:space:]]*$" '
-        $0 ~ begin || $0 ~ legacy { in_peer=1; next }
+    awk -v begin="^# BEGIN_PEER ${name}$" '
+        $0 ~ begin { in_peer=1; next }
         in_peer && /^# END_PEER / { exit }
-        in_peer && /^#[[:space:]]*(Client|Site|Peer-to-Peer):/ { exit }
         in_peer && /^PublicKey[[:space:]]*=/ {
             sub(/^PublicKey[[:space:]]*=[[:space:]]*/, "", $0)
             print $0
@@ -176,8 +173,7 @@ get_peer_pubkey() {
     ' "$config_file"
 }
 
-# Delete a peer's full block from <iface>.conf in place. Handles both the new
-# marker format and the legacy `# Client: name` form. Preserves perms/owner.
+# Delete a peer's full block from <iface>.conf in place. Preserves perms/owner.
 remove_peer_block() {
     local config_file="$1"
     local name="$2"
@@ -191,19 +187,10 @@ remove_peer_block() {
     perms=$(stat -c '%a' "$config_file" 2>/dev/null || echo 600)
     owner=$(stat -c '%U:%G' "$config_file" 2>/dev/null || echo root:root)
 
-    awk -v name="$name" -v begin_re="^# BEGIN_PEER ${name}$" -v end_re="^# END_PEER ${name}$" \
-        -v legacy_re="^#[[:space:]]*(Client|Site|Peer-to-Peer):[[:space:]]*${name}[[:space:]]*$" '
-        # New format: skip from BEGIN_PEER to END_PEER inclusive
+    awk -v begin_re="^# BEGIN_PEER ${name}$" -v end_re="^# END_PEER ${name}$" '
         $0 ~ begin_re { skip=1; next }
         skip && $0 ~ end_re { skip=0; next }
         skip { next }
-        # Legacy format: skip from `# Client: name` until blank line / next legacy marker / EOF
-        $0 ~ legacy_re { legacy=1; next }
-        legacy && /^[[:space:]]*$/ { legacy=0; next }
-        legacy && /^#[[:space:]]*(Client|Site|Peer-to-Peer):/ { legacy=0; print; next }
-        legacy && /^\[Peer\]$/ { next }
-        legacy && /^(PublicKey|AllowedIPs|Endpoint|PersistentKeepalive|PresharedKey)[[:space:]]*=/ { next }
-        legacy { legacy=0 }
         { print }
     ' "$config_file" > "$tmp" || error_exit "Failed to rewrite config"
 
