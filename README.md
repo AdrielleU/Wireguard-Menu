@@ -876,14 +876,18 @@ For each WireGuard interface it verifies:
 3. every `Address = …` declared in `<iface>.conf` is actually assigned to
    the interface — catches the wg-quick race where the service comes up
    "successfully" but the IP never makes it onto the interface
+4. the firewall backend recorded in the per-interface manifest is still
+   effective — firewalld/ufw services active, or the nftables rules we
+   wrote at setup time still present in the kernel. Without this, the
+   VPN looks healthy but the UDP port is closed and peers can't connect.
 
 If any check fails, `--restart` will `systemctl restart wg-quick@<iface>`
-and re-verify.
+(or `systemctl start firewalld|ufw` for the firewall case) and re-verify.
 
 ```bash
 sudo ./healthcheck.sh                # check all interfaces, exit 1 if any fail
 sudo ./healthcheck.sh -i wg0         # check just wg0
-sudo ./healthcheck.sh --restart      # auto-restart anything unhealthy
+sudo ./healthcheck.sh --restart      # auto-recover anything unhealthy
 sudo ./healthcheck.sh -v             # verbose (also report healthy)
 ```
 
@@ -891,7 +895,25 @@ Exit codes: `0` = all healthy, `1` = at least one unhealthy and `--restart`
 did not recover it. Failures and recoveries are also logged to the systemd
 journal under the `wireguard-audit` tag.
 
-Cron example (every 5 minutes, auto-recover, quiet on success):
+### Install as a systemd timer (recommended)
+
+From the repo root, copy the unit files, reload, and enable the timer:
+
+```bash
+sudo cp systemd/wireguard-healthcheck.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wireguard-healthcheck.timer
+```
+
+Verify:
+
+```bash
+systemctl list-timers wireguard-healthcheck.timer        # next/last fire
+systemctl status wireguard-healthcheck.service           # last run + output
+journalctl -t wireguard-audit -n 20                      # HEALTHCHECK_* events
+```
+
+### Or cron (if you prefer)
 
 ```
 */5 * * * * /home/wireguard-scripts/healthcheck.sh --restart
