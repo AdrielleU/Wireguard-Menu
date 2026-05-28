@@ -726,8 +726,8 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── healthcheck.sh                   # One-shot health check (cron / systemd timer)
 ├── log-connections.sh                # Connection logger for systemd journal
 ├── systemd/
-│   ├── wireguard-connection-log.service   # Oneshot service for the connection logger
-│   └── wireguard-connection-log.timer     # Fires the service every 2 min
+│   ├── wireguard-log-connections.service   # Oneshot service for the connection logger
+│   └── wireguard-log-connections.timer     # Fires the service every 2 min
 ├── utils.sh                         # Shared helpers (sourced by other scripts)
 ├── README.md                        # All user documentation (you are here)
 ├── CHANGELOG.md                     # Version history
@@ -935,9 +935,9 @@ that journald rotates and retains for you.
 From the repo root, copy the unit files, reload, and enable the timer:
 
 ```bash
-sudo cp systemd/wireguard-connection-log.{service,timer} /etc/systemd/system/
+sudo cp systemd/wireguard-log-connections.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now wireguard-connection-log.timer
+sudo systemctl enable --now wireguard-log-connections.timer
 ```
 
 The timer fires every 2 minutes (matching WireGuard's handshake interval).
@@ -948,18 +948,18 @@ The script runs in place from `/home/wireguard-scripts/` — no copy to
 > rewrite the `ExecStart=` path before copying:
 >
 > ```bash
-> sudo sed "s|/home/wireguard-scripts|$(pwd)|g" systemd/wireguard-connection-log.service \
->   > /etc/systemd/system/wireguard-connection-log.service
-> sudo cp systemd/wireguard-connection-log.timer /etc/systemd/system/
+> sudo sed "s|/home/wireguard-scripts|$(pwd)|g" systemd/wireguard-log-connections.service \
+>   > /etc/systemd/system/wireguard-log-connections.service
+> sudo cp systemd/wireguard-log-connections.timer /etc/systemd/system/
 > sudo systemctl daemon-reload
-> sudo systemctl enable --now wireguard-connection-log.timer
+> sudo systemctl enable --now wireguard-log-connections.timer
 > ```
 
 ### Verify it's working
 
 ```bash
-systemctl list-timers wireguard-connection-log.timer    # next/previous fire time
-sudo systemctl start wireguard-connection-log.service   # fire it once now
+systemctl list-timers wireguard-log-connections.timer    # next/previous fire time
+sudo systemctl start wireguard-log-connections.service   # fire it once now
 journalctl -t wireguard-connections -n 10               # see any events yet?
 ```
 
@@ -969,15 +969,15 @@ the state file and re-run:
 
 ```bash
 sudo rm -rf /var/lib/wireguard-connections
-sudo systemctl start wireguard-connection-log.service
+sudo systemctl start wireguard-log-connections.service
 journalctl -t wireguard-connections -n 20
 ```
 
 ### Uninstall
 
 ```bash
-sudo systemctl disable --now wireguard-connection-log.timer
-sudo rm /etc/systemd/system/wireguard-connection-log.{service,timer}
+sudo systemctl disable --now wireguard-log-connections.timer
+sudo rm /etc/systemd/system/wireguard-log-connections.{service,timer}
 sudo systemctl daemon-reload
 sudo rm -rf /var/lib/wireguard-connections    # optional: drop state
 ```
