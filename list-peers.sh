@@ -328,7 +328,7 @@ list_peers() {
 # ARGUMENT PARSING
 ################################################################################
 
-show_help() {
+show_usage() {
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
@@ -345,13 +345,13 @@ show_help() {
     exit 0
 }
 
-parse_args() {
+parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
             -i|--interface) WG_INTERFACE="$2"; shift 2 ;;
             -p|--peer) PEER_NAME="$2"; shift 2 ;;
             -d|--detailed) DETAILED=true; shift ;;
-            -h|--help) show_help ;;
+            -h|--help) show_usage ;;
             *) die "Unknown option: $1 (use -h for help)" ;;
         esac
     done
@@ -364,7 +364,7 @@ parse_args() {
 ################################################################################
 
 main() {
-    parse_args "$@"
+    parse_arguments "$@"
 
     if [[ -n "$PEER_NAME" ]]; then
         view_peer "$PEER_NAME"
