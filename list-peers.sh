@@ -150,7 +150,8 @@ get_transfer() {
 # detect_servers comes from utils.sh
 
 select_server() {
-    local servers=($(detect_servers))
+    local servers
+    mapfile -t servers < <(detect_servers)
 
     if [[ -n "$WG_INTERFACE" ]]; then
         [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "Server '${WG_INTERFACE}' not found"
@@ -189,7 +190,8 @@ select_server() {
 
 view_peer() {
     local name="$1"
-    local peers=($(extract_peers))
+    local peers
+    mapfile -t peers < <(extract_peers)
     local found=false
     local peer_data=""
 
@@ -254,7 +256,8 @@ view_peer() {
 ################################################################################
 
 list_peers() {
-    local peers=($(extract_peers))
+    local peers
+    mapfile -t peers < <(extract_peers)
 
     if [[ ${#peers[@]} -eq 0 ]]; then
         print_warning "No peers found in ${WG_INTERFACE}"
@@ -274,12 +277,12 @@ list_peers() {
     for peer_data in "${peers[@]}"; do
         IFS='|' read -r type name pubkey _ _ <<< "$peer_data"
         case "$type" in
-            Client) ((clients++)) ;;
-            Site) ((sites++)) ;;
-            Peer-to-Peer) ((p2p++)) ;;
+            Client) ((clients++)) || true ;;
+            Site) ((sites++)) || true ;;
+            Peer-to-Peer) ((p2p++)) || true ;;
         esac
         local status=$(get_status "$pubkey")
-        [[ "$status" == "connected" ]] && ((connected++))
+        [[ "$status" == "connected" ]] && { ((connected++)) || true; }
     done
 
     echo "Total: ${#peers[@]} peers (${connected} connected)"
@@ -356,7 +359,11 @@ parse_arguments() {
         esac
     done
 
-    [[ -z "$WG_INTERFACE" ]] && select_server
+    # Note: must be `if`, not `... && select_server` — a trailing && that
+    # evaluates false makes this function return 1 and trips the caller's set -e.
+    if [[ -z "$WG_INTERFACE" ]]; then
+        select_server
+    fi
 }
 
 ################################################################################

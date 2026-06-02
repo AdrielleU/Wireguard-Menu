@@ -14,6 +14,9 @@
 ################################################################################
 
 # ---------- constants ----------
+# Several constants/colors below are consumed by scripts that source this file,
+# so their use isn't visible here. File-level suppression of the unused warning.
+# shellcheck disable=SC2034
 WG_CONFIG_DIR="${WG_CONFIG_DIR:-/etc/wireguard}"
 LOG_FILE="${LOG_FILE:-/var/log/wireguard-setup.log}"
 

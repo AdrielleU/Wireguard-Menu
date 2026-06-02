@@ -87,9 +87,9 @@ select_peer() {
     [[ ${#names[@]} -gt 0 ]] || die "No marker-format peers in ${WG_INTERFACE}. (Legacy peers must be re-added via add-peer.sh.)"
 
     if [[ -n "$PEER_NAME" ]]; then
-        local found=0
-        for n in "${names[@]}"; do [[ "$n" == "$PEER_NAME" ]] && found=1 && break; done
-        [[ $found -eq 1 ]] || die "Peer '${PEER_NAME}' not found (or in legacy format)"
+        local match=0
+        for n in "${names[@]}"; do [[ "$n" == "$PEER_NAME" ]] && match=1 && break; done
+        [[ $match -eq 1 ]] || die "Peer '${PEER_NAME}' not found (or in legacy format)"
         return
     fi
 

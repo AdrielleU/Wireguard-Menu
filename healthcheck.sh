@@ -147,7 +147,7 @@ report_peers() {
     now=$(date +%s)
     total=0; stale=0; connected=0
 
-    while IFS=$'\t' read -r pubkey _ endpoint _ handshake _ _ _; do
+    while IFS=$'\t' read -r pubkey _ _ _ handshake _ _ _; do
         [[ -z "$pubkey" ]] && continue
         ((total++)) || true
         if [[ -z "$handshake" || "$handshake" == 0 ]]; then

@@ -71,9 +71,9 @@ select_peer() {
     [[ $peer_count -gt 0 ]] || die "No peers found in ${WG_INTERFACE}"
 
     if [[ -n "$PEER_NAME" ]]; then
-        local found=0
-        for p in "${peers[@]}"; do [[ "$p" == "$PEER_NAME" ]] && found=1 && break; done
-        [[ $found -eq 1 ]] || die "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
+        local match=0
+        for p in "${peers[@]}"; do [[ "$p" == "$PEER_NAME" ]] && match=1 && break; done
+        [[ $match -eq 1 ]] || die "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
         print_success "Using peer: ${PEER_NAME}"
         return
     fi
