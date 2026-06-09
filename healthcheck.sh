@@ -18,6 +18,14 @@
 # Peer reachability is reported informationally only — peers may legitimately
 # be offline, so they don't trigger restarts.
 #
+# Upstream reachability (optional): if a ping target is configured (via
+# --ping-target or the WG_PING_TARGET env var, typically the main server's
+# in-tunnel IP), the interface is also pinged through the tunnel after it and
+# the firewall are confirmed healthy. To ride out transient internet gaps it
+# only restarts after PING_FAIL_THRESHOLD *consecutive* unreachable checks
+# (streak persisted between runs), then re-pings to confirm recovery. Intended
+# for single-upstream site/client boxes; leave it unset on a many-peer server.
+#
 # Exit codes:
 #   0 = all checked interfaces healthy
 #   1 = one or more interfaces unhealthy (and --restart did not recover them)
@@ -27,6 +35,12 @@
 #   sudo ./healthcheck.sh -i wg0              # check just wg0
 #   sudo ./healthcheck.sh --restart           # restart any unhealthy iface
 #   sudo ./healthcheck.sh -v                  # verbose (also report healthy)
+#   sudo ./healthcheck.sh --ping-target 10.0.0.1 --restart   # also verify the
+#                                             # tunnel can reach the server IP
+#   WG_PING_TARGET=10.0.0.1 sudo ./healthcheck.sh --restart  # same, via env
+#   sudo ./healthcheck.sh --ping-target 10.0.0.1 --fail-threshold 5 --restart
+#                                             # restart only after 5 consecutive
+#                                             # unreachable checks (ride out gaps)
 #
 # Cron example (every 5 min, auto-recover, quiet on success):
 #   */5 * * * * /home/wireguard-scripts/healthcheck.sh --restart
@@ -43,12 +57,29 @@ DO_RESTART=false
 VERBOSE=false
 STALE_HANDSHAKE_SECS=300   # report a peer as "stale" if no handshake in this long
 
+# Optional upstream reachability check. Empty = disabled (current/server
+# behavior). Set to the main server's in-tunnel IP for a site/client box to
+# trigger a wg-quick restart when the tunnel stops carrying traffic.
+PING_TARGET="${WG_PING_TARGET:-}"
+PING_COUNT=3               # echo requests per check (success = any one replies)
+PING_TIMEOUT=2             # seconds to wait per request
+
+# Tolerate transient internet gaps: only restart after the target has been
+# unreachable on this many *consecutive* checks (across timer runs), not on a
+# single bad run. At a 5-min timer, 3 ≈ 15 min of sustained loss. The streak is
+# persisted per interface so it survives between runs; a single good check
+# clears it. After a restart that doesn't recover, the streak resets so we
+# back off and re-accumulate before trying again (no restart looping).
+PING_FAIL_THRESHOLD="${WG_PING_FAIL_THRESHOLD:-3}"
+
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -i|--interface) WG_INTERFACE="$2"; shift 2 ;;
-            -r|--restart)   DO_RESTART=true; shift ;;
-            -v|--verbose)   VERBOSE=true; shift ;;
+            -i|--interface)   WG_INTERFACE="$2"; shift 2 ;;
+            -r|--restart)     DO_RESTART=true; shift ;;
+            -p|--ping-target) PING_TARGET="$2"; shift 2 ;;
+            --fail-threshold) PING_FAIL_THRESHOLD="$2"; shift 2 ;;
+            -v|--verbose)     VERBOSE=true; shift ;;
             -h|--help)
                 sed -n '3,24p' "$0" | sed 's/^# \?//'
                 exit 0
@@ -137,6 +168,40 @@ check_firewall() {
     done <<< "$backends"
 
     echo "ok"
+}
+
+# Per-interface consecutive-reachability-failure counter, persisted next to the
+# manifest so it survives between timer runs. Stored as a single integer.
+reach_state_file() { echo "${WG_CONFIG_DIR}/.healthcheck-${1}.reachfail"; }
+
+reach_fail_count() {
+    local n; n=$(cat "$(reach_state_file "$1")" 2>/dev/null)
+    [[ "$n" =~ ^[0-9]+$ ]] && echo "$n" || echo 0
+}
+
+reach_fail_set() {
+    local f; f=$(reach_state_file "$1")
+    mkdir -p "$(dirname "$f")"
+    if echo "$2" > "$f" 2>/dev/null; then chmod 600 "$f" 2>/dev/null || true; fi
+}
+
+# Verify the tunnel can actually carry traffic by pinging a configured target
+# (the upstream server's in-tunnel IP) through this interface. Only runs when a
+# target is set; otherwise we keep the original structural-only behavior so a
+# many-peer server never restarts on an unreachable host.
+# Echoes "ok", "skipped" (no target / no ping binary), or "unreachable:<target>".
+check_reachability() {
+    local iface="$1"
+    [[ -z "$PING_TARGET" ]] && { echo "skipped"; return; }
+    command -v ping &>/dev/null || { echo "skipped"; return; }
+
+    # -I "$iface" forces the probe through the tunnel; -c succeeds if any one
+    # of the requests is answered, so a single dropped packet won't restart us.
+    if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" -I "$iface" "$PING_TARGET" &>/dev/null; then
+        echo "ok"
+    else
+        echo "unreachable:${PING_TARGET}"
+    fi
 }
 
 # Print the peer reachability summary for one interface (informational).
@@ -236,6 +301,50 @@ process_interface() {
         else
             return 1
         fi
+    fi
+
+    # Interface + firewall are healthy. If an upstream target is configured,
+    # confirm the tunnel actually carries traffic. A single failed check is NOT
+    # enough to restart — internet gaps happen — so we only act once the target
+    # has been unreachable on PING_FAIL_THRESHOLD consecutive checks.
+    local reach; reach=$(check_reachability "$iface")
+    if [[ "$reach" == "ok" ]]; then
+        # Good check clears any failure streak.
+        [[ "$(reach_fail_count "$iface")" -ne 0 ]] && reach_fail_set "$iface" 0
+    elif [[ "$reach" != "skipped" ]]; then
+        local fails; fails=$(( $(reach_fail_count "$iface") + 1 ))
+        reach_fail_set "$iface" "$fails"
+        print_warning "${iface}: ${reach} (${fails}/${PING_FAIL_THRESHOLD} consecutive)"
+        log_audit "HEALTHCHECK_FAIL" "interface=${iface} reason=${reach} streak=${fails}/${PING_FAIL_THRESHOLD}"
+
+        if (( fails >= PING_FAIL_THRESHOLD )); then
+            if $DO_RESTART; then
+                print_info "${iface}: ${PING_TARGET} unreachable for ${fails} checks — restarting wg-quick@${iface} ..."
+                if systemctl restart "wg-quick@${iface}"; then
+                    sleep 3
+                    local rereach; rereach=$(check_reachability "$iface")
+                    if [[ "$rereach" == "ok" ]]; then
+                        reach_fail_set "$iface" 0
+                        print_success "${iface}: reachability recovered after restart"
+                        log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=reachability target=${PING_TARGET}"
+                    else
+                        # Restart didn't help (server likely down). Reset the
+                        # streak so we back off and re-accumulate before the
+                        # next restart instead of looping every tick.
+                        reach_fail_set "$iface" 0
+                        print_error "${iface}: still ${rereach} after restart"
+                        log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} reason=${rereach}"
+                        return 1
+                    fi
+                else
+                    print_error "${iface}: systemctl restart failed"
+                    return 1
+                fi
+            else
+                return 1
+            fi
+        fi
+        # Below threshold: tolerate this gap and stay healthy for now.
     fi
 
     if $VERBOSE; then

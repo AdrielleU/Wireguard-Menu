@@ -5,6 +5,11 @@ After=wg-quick.target
 
 [Service]
 Type=oneshot
+# Optional: set WG_PING_TARGET=<server-tunnel-IP> in this file to enable the
+# upstream reachability check (restart the tunnel when the server stops
+# answering). The leading '-' makes the file optional — absent = structural
+# checks only, the original behavior.
+EnvironmentFile=-/etc/wireguard/healthcheck.env
 ExecStart=/home/wireguard-scripts/healthcheck.sh --restart
 
 # Minimal hardening. Less restrictive than the connection-log unit because

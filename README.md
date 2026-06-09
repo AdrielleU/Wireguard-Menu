@@ -880,6 +880,8 @@ For each WireGuard interface it verifies:
    effective — firewalld/ufw services active, or the nftables rules we
    wrote at setup time still present in the kernel. Without this, the
    VPN looks healthy but the UDP port is closed and peers can't connect.
+5. *(optional)* with a ping target configured, that the tunnel can actually
+   reach the upstream server — see [Upstream reachability](#upstream-reachability-site--client-boxes).
 
 If any check fails, `--restart` will `systemctl restart wg-quick@<iface>`
 (or `systemctl start firewalld|ufw` for the firewall case) and re-verify.
@@ -921,6 +923,43 @@ journalctl -t wireguard-audit -n 20                      # HEALTHCHECK_* events
 
 Peer reachability is reported for context only (with `-v`) but does NOT
 trigger restarts — peers can legitimately be offline.
+
+### Upstream reachability (site / client boxes)
+
+On a box with a single upstream (a site-to-site or client connection), an
+unreachable server *is* the signal the tunnel is dead. Give the healthcheck
+a **ping target** — usually the server's in-tunnel IP — and it will, after the
+interface and firewall are confirmed healthy, ping that target *through* the
+tunnel and restart `wg-quick` if it can't reach it.
+
+To ride out transient internet gaps it does **not** react to a single bad run:
+each check sends a few pings (success = any one replies), and it only restarts
+after `--fail-threshold` *consecutive* failed checks (default `3`, ≈15 min at
+the 5-min timer). The streak is persisted per interface and cleared by any good
+check; after a restart that doesn't recover, the streak resets so it backs off
+rather than restarting every tick.
+
+```bash
+# Restart the tunnel only after 3 consecutive checks can't reach 10.0.0.1
+sudo ./healthcheck.sh --ping-target 10.0.0.1 --restart
+
+# Ride out longer gaps — require 5 consecutive failures
+sudo ./healthcheck.sh --ping-target 10.0.0.1 --fail-threshold 5 --restart
+```
+
+For the systemd timer, set it once in `/etc/wireguard/healthcheck.env` (read
+automatically via the unit's optional `EnvironmentFile`) — no need to edit the
+unit:
+
+```bash
+sudo tee /etc/wireguard/healthcheck.env <<'EOF'
+WG_PING_TARGET=10.0.0.1
+WG_PING_FAIL_THRESHOLD=3
+EOF
+```
+
+Leave the target unset on a server hosting many peers — there is no single
+upstream to ping, and you don't want one offline host restarting the tunnel.
 
 ## Connection Logging
 
