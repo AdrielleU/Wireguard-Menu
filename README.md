@@ -939,6 +939,16 @@ the 5-min timer). The streak is persisted per interface and cleared by any good
 check; after a restart that doesn't recover, the streak resets so it backs off
 rather than restarting every tick.
 
+To enable it for the systemd timer, set one line near the top of
+`healthcheck.sh` to your server's in-tunnel IP (the `.1` of your VPN subnet):
+
+```bash
+PING_TARGET="10.0.0.1"   # empty = disabled
+```
+
+That's the only place to set it — the timer runs this same script, so no unit
+edits are needed. For a one-off manual run you can override it with a flag:
+
 ```bash
 # Restart the tunnel only after 3 consecutive checks can't reach 10.0.0.1
 sudo ./healthcheck.sh --ping-target 10.0.0.1 --restart
@@ -947,19 +957,9 @@ sudo ./healthcheck.sh --ping-target 10.0.0.1 --restart
 sudo ./healthcheck.sh --ping-target 10.0.0.1 --fail-threshold 5 --restart
 ```
 
-For the systemd timer, set it once in `/etc/wireguard/healthcheck.env` (read
-automatically via the unit's optional `EnvironmentFile`) — no need to edit the
-unit:
-
-```bash
-sudo tee /etc/wireguard/healthcheck.env <<'EOF'
-WG_PING_TARGET=10.0.0.1
-WG_PING_FAIL_THRESHOLD=3
-EOF
-```
-
-Leave the target unset on a server hosting many peers — there is no single
+Leave `PING_TARGET` empty on a server hosting many peers — there is no single
 upstream to ping, and you don't want one offline host restarting the tunnel.
+Never point it at a roaming peer's IP for the same reason.
 
 ## Connection Logging
 

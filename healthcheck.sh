@@ -18,8 +18,8 @@
 # Peer reachability is reported informationally only — peers may legitimately
 # be offline, so they don't trigger restarts.
 #
-# Upstream reachability (optional): if a ping target is configured (via
-# --ping-target or the WG_PING_TARGET env var, typically the main server's
+# Upstream reachability (optional): if a ping target is configured (set
+# PING_TARGET below, or pass --ping-target — typically the main server's
 # in-tunnel IP), the interface is also pinged through the tunnel after it and
 # the firewall are confirmed healthy. To ride out transient internet gaps it
 # only restarts after PING_FAIL_THRESHOLD *consecutive* unreachable checks
@@ -37,7 +37,6 @@
 #   sudo ./healthcheck.sh -v                  # verbose (also report healthy)
 #   sudo ./healthcheck.sh --ping-target 10.0.0.1 --restart   # also verify the
 #                                             # tunnel can reach the server IP
-#   WG_PING_TARGET=10.0.0.1 sudo ./healthcheck.sh --restart  # same, via env
 #   sudo ./healthcheck.sh --ping-target 10.0.0.1 --fail-threshold 5 --restart
 #                                             # restart only after 5 consecutive
 #                                             # unreachable checks (ride out gaps)
@@ -57,10 +56,12 @@ DO_RESTART=false
 VERBOSE=false
 STALE_HANDSHAKE_SECS=300   # report a peer as "stale" if no handshake in this long
 
-# Optional upstream reachability check. Empty = disabled (current/server
-# behavior). Set to the main server's in-tunnel IP for a site/client box to
-# trigger a wg-quick restart when the tunnel stops carrying traffic.
-PING_TARGET="${WG_PING_TARGET:-}"
+# Optional upstream reachability check.
+#   >>> SET THIS to your WireGuard server's in-tunnel IP (e.g. 10.0.0.1) <<<
+# Leave empty to disable (the original / server behavior). A site/client box
+# pings this through the tunnel and restarts wg-quick when it goes unreachable.
+# The --ping-target flag overrides it for one-off manual runs.
+PING_TARGET=""
 PING_COUNT=3               # echo requests per check (success = any one replies)
 PING_TIMEOUT=2             # seconds to wait per request
 
@@ -70,7 +71,7 @@ PING_TIMEOUT=2             # seconds to wait per request
 # persisted per interface so it survives between runs; a single good check
 # clears it. After a restart that doesn't recover, the streak resets so we
 # back off and re-accumulate before trying again (no restart looping).
-PING_FAIL_THRESHOLD="${WG_PING_FAIL_THRESHOLD:-3}"
+PING_FAIL_THRESHOLD=3
 
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
