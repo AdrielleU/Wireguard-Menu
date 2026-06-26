@@ -180,6 +180,43 @@ detect_servers() {
     (( ${#found[@]} > 0 )) && printf '%s\n' "${found[@]}"
 }
 
+# Resolve the global $WG_INTERFACE: if already set (e.g. via -i) just validate
+# it; if exactly one server exists, pick it silently; otherwise show a numbered
+# menu. The menu and prompt go to stderr so callers that emit data on stdout
+# (e.g. list-peers.sh) stay clean. Dies if none are found or the choice is bad.
+select_server() {
+    local -a servers
+    mapfile -t servers < <(detect_servers)
+    (( ${#servers[@]} > 0 )) || die "No WireGuard servers found. Run setup.sh first."
+
+    if [[ -n "${WG_INTERFACE:-}" ]]; then
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] \
+            || die "WireGuard interface '${WG_INTERFACE}' not found"
+        return 0
+    fi
+    if (( ${#servers[@]} == 1 )); then
+        WG_INTERFACE="${servers[0]}"
+        return 0
+    fi
+
+    print_info "Multiple WireGuard interfaces detected (use -i <iface> to skip this menu)"
+    local i iface status
+    for i in "${!servers[@]}"; do
+        iface="${servers[$i]}"
+        if systemctl is-active --quiet "wg-quick@${iface}" 2>/dev/null; then
+            status="${GREEN}●${NC}"
+        else
+            status="${YELLOW}○${NC}"
+        fi
+        printf '  %b%d)%b %s %b\n' "$BLUE" "$((i + 1))" "$NC" "$iface" "$status" >&2
+    done
+    local sel
+    read -r -p "Select interface (1-${#servers[@]}): " sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#servers[@]} )) \
+        || die "Invalid selection"
+    WG_INTERFACE="${servers[$((sel - 1))]}"
+}
+
 # ---------- peer-block marker helpers ----------
 # Format written by add-peer.sh:
 #
