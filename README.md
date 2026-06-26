@@ -880,6 +880,8 @@ For each WireGuard interface it verifies:
    effective — firewalld/ufw services active, or the nftables rules we
    wrote at setup time still present in the kernel. Without this, the
    VPN looks healthy but the UDP port is closed and peers can't connect.
+5. *(optional)* with a ping target configured, that the tunnel can actually
+   reach the upstream server — see [Upstream reachability](#upstream-reachability-site--client-boxes).
 
 If any check fails, `--restart` will `systemctl restart wg-quick@<iface>`
 (or `systemctl start firewalld|ufw` for the firewall case) and re-verify.
@@ -894,6 +896,35 @@ sudo ./healthcheck.sh -v             # verbose (also report healthy)
 Exit codes: `0` = all healthy, `1` = at least one unhealthy and `--restart`
 did not recover it. Failures and recoveries are also logged to the systemd
 journal under the `wireguard-audit` tag.
+
+### The goal: set-and-forget stability
+
+`healthcheck.sh`, the connection logger, and `test-monitoring.sh` together aim
+to make a WireGuard box something you **configure once and trust to keep itself
+up** — not something you babysit. The design choices all serve that:
+
+- **Self-healing, not just alerting.** On a timer with `--restart`, the box
+  detects *and repairs* the failure modes that leave a tunnel "up" but dead — a
+  missing address after a wg-quick race, a stopped firewall silently closing the
+  port, or (on a site box) a tunnel that no longer carries traffic. You don't get
+  paged at 3am; the box fixes itself and leaves an audit trail.
+- **Safe by default, opt-in for the risky parts.** The structural checks are
+  always on. The one action that could disrupt many peers — restarting on
+  reachability — is **off unless a single interface explicitly opts in** via its
+  own `.conf`, so the main hub can never be bounced by one offline host. Config
+  lives next to the thing it controls, with nothing global to misconfigure.
+- **Restraint built in.** Reachability rides out transient internet gaps
+  (consecutive-failure threshold, persisted streak) and backs off instead of
+  restart-looping during a real outage — stability under failure, not just on a
+  good day.
+- **Proven, not assumed.** `test-monitoring.sh` stands up throwaway interfaces
+  and *actually breaks them* — flushes the address, stops the service, makes the
+  upstream unreachable, ages a peer to idle — then asserts the box detects and
+  recovers each. The safety guarantees above are tested, not just documented.
+
+The result is a small, dependency-free set of shell scripts that give you the
+hands-off reliability you'd otherwise reach for a much heavier orchestration
+stack to get — control over a WireGuard instance with minimal ongoing effort.
 
 ### Install as a systemd timer (recommended)
 
@@ -921,6 +952,73 @@ journalctl -t wireguard-audit -n 20                      # HEALTHCHECK_* events
 
 Peer reachability is reported for context only (with `-v`) but does NOT
 trigger restarts — peers can legitimately be offline.
+
+### Upstream reachability (site / client boxes)
+
+On a box with a single upstream (a site-to-site or client connection), an
+unreachable server *is* the signal the tunnel is dead. Give the healthcheck
+a **ping target** — usually the server's in-tunnel IP — and it will, after the
+interface and firewall are confirmed healthy, ping that target *through* the
+tunnel and restart `wg-quick` if it can't reach it.
+
+To ride out transient internet gaps it does **not** react to a single bad run:
+each check sends a few pings (success = any one replies), and it only restarts
+after `--fail-threshold` *consecutive* failed checks (default `3`, ≈15 min at
+the 5-min timer). The streak is persisted per interface and cleared by any good
+check; after a restart that doesn't recover, the streak resets so it backs off
+rather than restarting every tick.
+
+You enable it **per interface**, by adding a comment line to the `[Interface]`
+section of that box's `/etc/wireguard/<iface>.conf` (the `.1` is your server's
+in-tunnel IP):
+
+```ini
+[Interface]
+# Healthcheck-Reachability = 10.0.0.1
+Address = 10.0.0.2/24
+PrivateKey = ...
+```
+
+`wg`/`wg-quick` ignore `#` comments, so the line is inert config — but
+`healthcheck.sh` reads it and, on the timer, pings that target through the
+tunnel. Because it lives in each tunnel's own conf, **the main hub is never
+pinged or restarted on reachability**: its conf simply has no such line. That's
+the safeguard — there's no single upstream to ping on a many-peer server, and
+one offline host must not bounce the tunnel for everyone. Never point it at a
+roaming peer's IP for the same reason.
+
+**Multiple targets and hostnames.** You can list several targets — IPs and/or
+hostnames — comma- or space-separated, or across several comment lines. The
+tunnel counts as alive if **any one** of them answers, so a single offline
+upstream host won't trigger a restart:
+
+```ini
+[Interface]
+# Healthcheck-Reachability = 10.0.0.1, 10.0.0.2, vpn.hub.example.com
+Address = 10.0.0.2/24
+```
+
+Hostnames are resolved by the box's normal resolver, so prefer at least one
+in-tunnel **IP** in the list — that way reachability still works if DNS itself
+is the thing that's down.
+
+Each target is validated before use. A malformed entry (e.g. a typo'd
+`10.0.0.999`) is logged and ignored rather than silently treated as
+"unreachable" — so a stray character can't quietly turn into a restart loop. If
+*every* target is invalid, reachability is reported as misconfigured: the
+interface is still considered healthy and is **never restarted** on that basis,
+but the run warns you to fix the comment.
+
+For a one-off manual run (or to try it before editing the conf) you can override
+the target with a flag, which takes precedence over the conf line:
+
+```bash
+# Restart the tunnel only after 3 consecutive checks can't reach 10.0.0.1
+sudo ./healthcheck.sh --ping-target 10.0.0.1 --restart
+
+# Ride out longer gaps — require 5 consecutive failures
+sudo ./healthcheck.sh --ping-target 10.0.0.1 --fail-threshold 5 --restart
+```
 
 ## Connection Logging
 
