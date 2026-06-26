@@ -455,7 +455,6 @@ get_server_info() {
 
 prompt_peer_name() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local label=$(get_label "$PEER_TYPE")
 
     if [[ -z "$PEER_NAME" ]]; then
         while true; do
@@ -471,8 +470,8 @@ prompt_peer_name() {
                 continue
             fi
 
-            if grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null; then
-                print_error "${label} '${PEER_NAME}' already exists"
+            if peer_list "$config_file" | grep -qxF "$PEER_NAME"; then
+                print_error "Peer '${PEER_NAME}' already exists (names must be unique across all types)"
                 read -p "Retry? (y/n): " retry
                 [[ "$retry" =~ ^[Yy] ]] || die "Name exists"
                 PEER_NAME=""
@@ -482,7 +481,7 @@ prompt_peer_name() {
         done
     else
         peer_validate_name "$PEER_NAME" || die "Invalid name format"
-        grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null && die "Name already exists"
+        peer_list "$config_file" | grep -qxF "$PEER_NAME" && die "Peer '${PEER_NAME}' already exists"
     fi
 }
 
@@ -823,6 +822,7 @@ generate_keypair() {
 
 add_peer_to_server() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    backup_config "$config_file" >/dev/null   # timestamped .backup before editing
     local peer_ip=$(echo "$PEER_IP" | cut -d'/' -f1)
     local label=$(get_label "$PEER_TYPE")
     local allowed="${peer_ip}/32"
