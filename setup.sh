@@ -103,8 +103,9 @@ LOG_FILE="/var/log/wireguard-setup.log"
 WG_INTERFACE_DIR=""
 WG_KEYS_DIR=""
 
-# Detect primary network interface
-PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+# Detect primary network interface (|| true: no default route must not abort
+# the script under `set -e`/pipefail before we've even checked prerequisites)
+PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1 || true)
 
 ################################################################################
 # HELPER FUNCTIONS - Colors
@@ -1082,8 +1083,10 @@ enable_ip_forwarding() {
     # Enable temporarily
     sysctl -w net.ipv4.ip_forward=1 &>/dev/null || die "Failed to enable IP forwarding"
 
-    # Make permanent
-    local sysctl_conf="/etc/sysctl.d/99-wireguard.conf"
+    # Make permanent. Per-interface file (not a shared 99-wireguard.conf) so
+    # removing one server via reset.sh doesn't delete the persisted forwarding
+    # config for the others — matches the SYSCTL manifest format in utils.sh.
+    local sysctl_conf="/etc/sysctl.d/99-wireguard-${WG_INTERFACE}.conf"
     if [[ ! -f "$sysctl_conf" ]] || ! grep -q "net.ipv4.ip_forward" "$sysctl_conf" 2>/dev/null; then
         cat > "$sysctl_conf" <<EOF
 # WireGuard VPN Configuration
@@ -1445,8 +1448,8 @@ configure_firewalld() {
     print_info "  - Port ${WG_PORT}/udp opened on public zone"
     print_info "  - ${WG_INTERFACE} in trusted zone"
 
-    if [[ -n "$lan_interface" ]]; then
-        print_info "  - ${lan_interface} in public zone (default)"
+    if [[ -n "${LAN_INTERFACE:-}" ]]; then
+        print_info "  - ${LAN_INTERFACE} in public zone (default)"
         print_info "  - Policies: lan-to-vpn (public → trusted)"
         print_info "  - Policies: vpn-to-lan (trusted → public)"
     fi

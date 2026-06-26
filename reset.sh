@@ -188,7 +188,7 @@ get_server_info() {
     if [[ -f "$config_file" ]]; then
         ip_addr=$(grep -E "^Address\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' || echo "Unknown")
         port=$(grep -E "^ListenPort\s*=" "$config_file" 2>/dev/null | head -n1 | awk '{print $3}' || echo "Unknown")
-        client_count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
+        client_count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || true)
         client_count=$(echo "$client_count" | tr -d '[:space:]')
         client_count=${client_count:-0}
     fi
@@ -354,79 +354,6 @@ remove_firewall_rules() {
     fi
 }
 
-cleanup_firewalld_policies() {
-    # Check if firewalld supports policies
-    if ! firewall-cmd --get-policies &>/dev/null; then
-        return 0
-    fi
-
-    local policies_removed=0
-
-    # Get all existing policies
-    local all_policies=$(firewall-cmd --permanent --get-policies 2>/dev/null || echo "")
-
-    if [[ -z "$all_policies" ]]; then
-        print_info "No firewall policies found"
-        return 0
-    fi
-
-    # Remove all WireGuard-related policies
-    for policy in $all_policies; do
-        # Match WireGuard-related policies (all variations):
-        # - Current: site-to-site, wg-peer-to-peer
-        # - Old: siteA-to-siteB, siteB-to-siteA, public-wg-lan, internal-wg-lan
-        # - Old: public-to-vpn, internal-to-vpn, wireguard-peer-to-peer
-        # - Old: zone-to-trusted, trusted-to-zone, *-wireguard-bidirectional
-        if [[ "$policy" == "site-to-site" ]] || \
-           [[ "$policy" == "wg-peer-to-peer" ]] || \
-           [[ "$policy" == "siteA-to-siteB" ]] || \
-           [[ "$policy" == "siteB-to-siteA" ]] || \
-           [[ "$policy" == "public-wg-lan" ]] || \
-           [[ "$policy" == "internal-wg-lan" ]] || \
-           [[ "$policy" == "public-to-vpn" ]] || \
-           [[ "$policy" == "internal-to-vpn" ]] || \
-           [[ "$policy" == "wireguard-peer-to-peer" ]] || \
-           [[ "$policy" =~ -to-trusted$ ]] || \
-           [[ "$policy" =~ ^trusted-to- ]] || \
-           [[ "$policy" =~ -wireguard-bidirectional$ ]] || \
-           [[ "$policy" =~ -wg-lan$ ]]; then
-            print_info "Removing policy: ${policy}"
-            if timeout 10 firewall-cmd --permanent --delete-policy=${policy} 2>/dev/null; then
-                ((policies_removed++)) || true
-                log "Removed firewalld policy: ${policy}"
-            else
-                print_warning "Could not remove policy: ${policy}"
-            fi
-        fi
-    done
-
-    if [[ $policies_removed -gt 0 ]]; then
-        print_success "Removed ${policies_removed} firewall policy/policies"
-
-        # Restart firewalld to apply changes
-        print_info "Restarting firewalld to apply changes..."
-
-        # Stop service
-        if systemctl stop firewalld 2>/dev/null; then
-            print_success "Firewalld stopped"
-        else
-            print_warning "Could not stop firewalld cleanly"
-        fi
-
-        # Wait a moment
-        sleep 1
-
-        # Start service
-        if systemctl start firewalld 2>/dev/null; then
-            print_success "Firewalld started successfully"
-        else
-            print_error "Could not start firewalld (may need manual intervention)"
-        fi
-    else
-        print_info "No WireGuard policies to remove"
-    fi
-}
-
 remove_firewalld_rules() {
     local iface="$1"
 
@@ -501,18 +428,14 @@ remove_firewalld_rules() {
         print_warning "Manual cleanup may be needed for direct rules"
     fi
 
-    # Clean up firewalld policies
-    print_info "Cleaning up firewall policies..."
-    cleanup_firewalld_policies
-
-    # Restart firewall to apply changes
-    print_info "Restarting firewall..."
-    systemctl stop firewalld 2>/dev/null || true
-    sleep 1
-    if systemctl start firewalld 2>/dev/null; then
-        print_success "Firewall restarted successfully"
+    # Apply the --permanent removals without tearing the firewall down: a
+    # stop/start would leave the host unprotected during the gap, and --reload
+    # is all that's needed for permanent rules.
+    print_info "Reloading firewalld..."
+    if firewall-cmd --reload 2>/dev/null; then
+        print_success "Firewalld reloaded"
     else
-        print_warning "Firewall restart failed (rules still applied, reboot may be needed)"
+        print_warning "firewall-cmd --reload failed (reboot may be needed)"
     fi
 
     print_success "Firewalld rules cleaned up"
@@ -565,8 +488,8 @@ remove_server_config() {
 
     # Count clients from server config
     if [[ -f "$config_file" ]]; then
-        local client_only=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
-        local site_count=$(grep -c "^# Site:" "$config_file" 2>/dev/null || echo "0")
+        local client_only=$(grep -c "^# Client:" "$config_file" 2>/dev/null || true)
+        local site_count=$(grep -c "^# Site:" "$config_file" 2>/dev/null || true)
         # Strip any whitespace and ensure numeric
         client_only=$(echo "$client_only" | tr -d '[:space:]')
         site_count=$(echo "$site_count" | tr -d '[:space:]')
@@ -832,8 +755,8 @@ remove_all_servers() {
         for iface in "${all_servers[@]}"; do
             local config_file="${WG_CONFIG_DIR}/${iface}.conf"
             if [[ -f "$config_file" ]]; then
-                local count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || echo "0")
-                local sites=$(grep -c "^# Site:" "$config_file" 2>/dev/null || echo "0")
+                local count=$(grep -c "^# Client:" "$config_file" 2>/dev/null || true)
+                local sites=$(grep -c "^# Site:" "$config_file" 2>/dev/null || true)
                 # Strip whitespace
                 count=$(echo "$count" | tr -d '[:space:]')
                 sites=$(echo "$sites" | tr -d '[:space:]')

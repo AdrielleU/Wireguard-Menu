@@ -42,28 +42,7 @@ EOF
     done
 }
 
-select_server() {
-    local -a servers
-    mapfile -t servers < <(detect_servers)
-    [[ ${#servers[@]} -gt 0 ]] || die "No WireGuard servers found"
-
-    if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "Server '${WG_INTERFACE}' not found"
-        return
-    fi
-
-    if [[ ${#servers[@]} -eq 1 ]]; then
-        WG_INTERFACE="${servers[0]}"
-        return
-    fi
-
-    print_info "Multiple servers detected (use -i to skip menu)"
-    local i=1
-    for s in "${servers[@]}"; do printf "  %d) %s\n" "$i" "$s"; ((i++)) || true; done
-    read -p "Select server (1-${#servers[@]}): " sel
-    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#servers[@]} )) || die "Invalid selection"
-    WG_INTERFACE="${servers[$((sel-1))]}"
-}
+# select_server() and detect_servers() come from utils.sh
 
 # Disable marker — distinct from intrinsic `# ` comments so we can round-trip
 # without eating the descriptive `# Client: name` line.
@@ -135,10 +114,7 @@ toggle_block() {
     mv -f "$tmp" "$cf"
     chmod "$perms" "$cf"
     chown "$owner" "$cf" 2>/dev/null || true
-    if command -v restorecon &>/dev/null && command -v sestatus &>/dev/null \
-       && sestatus 2>/dev/null | grep -q enabled; then
-        restorecon "$cf" 2>/dev/null || true
-    fi
+    restore_context "$cf"
     trap - RETURN
 }
 

@@ -147,42 +147,8 @@ get_transfer() {
 # SERVER SELECTION
 ################################################################################
 
-# detect_servers comes from utils.sh
-
-select_server() {
-    local servers
-    mapfile -t servers < <(detect_servers)
-
-    if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "Server '${WG_INTERFACE}' not found"
-        return
-    fi
-
-    if [[ ${#servers[@]} -eq 1 ]]; then
-        WG_INTERFACE="${servers[0]}"
-        return
-    fi
-
-    echo "" >&2
-    print_info "Multiple servers detected" >&2
-    print_warning "TIP: Use -i wg0 to skip this menu" >&2
-    echo "" >&2
-
-    local i=1
-    for iface in "${servers[@]}"; do
-        local ip=$(grep -oP '^Address\s*=\s*\K\S+' "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -1)
-        local count=$(grep -c '^# BEGIN_PEER ' "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null || echo "0")
-        local status=""
-        systemctl is-active --quiet "wg-quick@${iface}" 2>/dev/null && status="${GREEN}●${NC}" || status="${YELLOW}○${NC}"
-        printf "  ${BLUE}%d)${NC} %s %b - %s (%d peers)\n" "$i" "$iface" "$status" "$ip" "$count" >&2
-        ((i++)) || true
-    done
-
-    echo "" >&2
-    read -p "Select server (1-${#servers[@]}): " selection >&2
-    [[ "$selection" =~ ^[0-9]+$ ]] && [[ $selection -ge 1 ]] && [[ $selection -le ${#servers[@]} ]] || die "Invalid selection"
-    WG_INTERFACE="${servers[$((selection-1))]}"
-}
+# detect_servers() and select_server() come from utils.sh (its menu prints to
+# stderr, so list-peers' stdout stays clean for data output).
 
 ################################################################################
 # VIEW SINGLE PEER

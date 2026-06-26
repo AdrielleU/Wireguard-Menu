@@ -5,9 +5,10 @@
 #
 # Provides:
 #   - Color helpers + print_success/error/warning/info
-#   - die, check_root, log
+#   - die, check_root, log, confirm, check_deps
 #   - peer_* namespace: peer_validate_name, peer_list, peer_pubkey, peer_remove
 #   - validate_interface_name, detect_servers
+#   - restore_context (SELinux), backup_config (timestamped 600 backup)
 #   - peer-block markers (PEER_BEGIN_PREFIX, PEER_END_PREFIX)
 #   - log_audit (structured systemd journal entry)
 #   - manifest_* namespace: manifest_add, manifest_path, manifest_entries
@@ -60,6 +61,47 @@ die() {
 
 check_root() {
     [[ $EUID -eq 0 ]] || die "This script must be run as root (use sudo)"
+}
+
+# Ensure required commands are on PATH; die listing any that are missing.
+# Usage: check_deps wg wg-quick ip
+check_deps() {
+    local missing=() c
+    for c in "$@"; do
+        command -v "$c" &>/dev/null || missing+=("$c")
+    done
+    (( ${#missing[@]} == 0 )) || die "Missing required command(s): ${missing[*]}"
+}
+
+# Standard yes/no confirmation. `confirm "Delete foo?"` defaults to no;
+# `confirm "Proceed?" y` defaults to yes. Returns 0 on yes, 1 on no.
+confirm() {
+    local prompt="$1" default="${2:-n}" reply hint
+    hint="[y/N]"; [[ "$default" == "y" ]] && hint="[Y/n]"
+    read -r -p "$(echo -e "${YELLOW}${prompt}${NC} ${hint} ")" reply
+    reply="${reply:-$default}"
+    [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+# Restore the SELinux file context on a path when SELinux is enabled; a no-op
+# on systems without SELinux. Used after rewriting a config in place.
+restore_context() {
+    local path="$1"
+    command -v restorecon &>/dev/null || return 0
+    command -v sestatus &>/dev/null && sestatus 2>/dev/null | grep -q enabled || return 0
+    restorecon "$path" 2>/dev/null || true
+}
+
+# Make a timestamped, mode-600 backup of a config before an in-place edit.
+# Echoes the backup path (nothing if the source doesn't exist).
+backup_config() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0
+    local bak
+    bak="${f}.backup.$(date +%Y%m%d_%H%M%S)"
+    cp -p "$f" "$bak" || die "Failed to back up $f"
+    chmod 600 "$bak"
+    echo "$bak"
 }
 
 # ---------- audit logging (HIPAA / systemd journal) ----------
@@ -138,6 +180,43 @@ detect_servers() {
     (( ${#found[@]} > 0 )) && printf '%s\n' "${found[@]}"
 }
 
+# Resolve the global $WG_INTERFACE: if already set (e.g. via -i) just validate
+# it; if exactly one server exists, pick it silently; otherwise show a numbered
+# menu. The menu and prompt go to stderr so callers that emit data on stdout
+# (e.g. list-peers.sh) stay clean. Dies if none are found or the choice is bad.
+select_server() {
+    local -a servers
+    mapfile -t servers < <(detect_servers)
+    (( ${#servers[@]} > 0 )) || die "No WireGuard servers found. Run setup.sh first."
+
+    if [[ -n "${WG_INTERFACE:-}" ]]; then
+        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] \
+            || die "WireGuard interface '${WG_INTERFACE}' not found"
+        return 0
+    fi
+    if (( ${#servers[@]} == 1 )); then
+        WG_INTERFACE="${servers[0]}"
+        return 0
+    fi
+
+    print_info "Multiple WireGuard interfaces detected (use -i <iface> to skip this menu)"
+    local i iface status
+    for i in "${!servers[@]}"; do
+        iface="${servers[$i]}"
+        if systemctl is-active --quiet "wg-quick@${iface}" 2>/dev/null; then
+            status="${GREEN}●${NC}"
+        else
+            status="${YELLOW}○${NC}"
+        fi
+        printf '  %b%d)%b %s %b\n' "$BLUE" "$((i + 1))" "$NC" "$iface" "$status" >&2
+    done
+    local sel
+    read -r -p "Select interface (1-${#servers[@]}): " sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#servers[@]} )) \
+        || die "Invalid selection"
+    WG_INTERFACE="${servers[$((sel - 1))]}"
+}
+
 # ---------- peer-block marker helpers ----------
 # Format written by add-peer.sh:
 #
@@ -153,10 +232,11 @@ detect_servers() {
 # list-peers.sh reads to render the type column.
 
 # List peer names declared in <iface>.conf, one per line, in file order.
+# grep -oP (not gawk's 3-arg match) so this also works on Debian/Ubuntu's mawk.
 peer_list() {
     local config_file="$1"
     [[ -f "$config_file" ]] || return 0
-    awk 'match($0, /^# BEGIN_PEER ([^ ]+)/, m) { print m[1] }' "$config_file"
+    grep -oP '^# BEGIN_PEER \K\S+' "$config_file" 2>/dev/null || true
 }
 
 # Echo the public key recorded for the given peer in <iface>.conf (or empty).
@@ -202,10 +282,7 @@ peer_remove() {
     mv -f "$tmp" "$config_file"
     chmod "$perms" "$config_file"
     chown "$owner" "$config_file" 2>/dev/null || true
-    if command -v restorecon &>/dev/null && command -v sestatus &>/dev/null \
-       && sestatus 2>/dev/null | grep -q enabled; then
-        restorecon "$config_file" 2>/dev/null || true
-    fi
+    restore_context "$config_file"
     trap - RETURN
 }
 

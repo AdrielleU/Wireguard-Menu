@@ -144,60 +144,7 @@ cidr_to_dotted() {
     esac
 }
 
-detect_servers() {
-    local servers=()
-    if [[ -d "$WG_CONFIG_DIR" ]]; then
-        shopt -s nullglob
-        local conf_files=("$WG_CONFIG_DIR"/*.conf)
-        shopt -u nullglob
-        for conf in "${conf_files[@]}"; do
-            [[ ! -f "$conf" ]] && continue
-            servers+=("$(basename "$conf" .conf)")
-        done
-    fi
-    [[ ${#servers[@]} -gt 0 ]] || die "No WireGuard servers found. Run setup.sh first."
-    echo "${servers[@]}"
-}
-
-select_server() {
-    local servers=($(detect_servers))
-    local server_count=${#servers[@]}
-
-    if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "WireGuard server '${WG_INTERFACE}' not found."
-        print_success "Using server: ${WG_INTERFACE}"
-        return
-    fi
-
-    if [[ $server_count -eq 1 ]]; then
-        WG_INTERFACE="${servers[0]}"
-        return
-    fi
-
-    print_info "Multiple WireGuard servers detected"
-    print_warning "TIP: Use --interface wg0 to skip this menu"
-    echo ""
-    echo "Available servers:"
-    echo ""
-
-    local i=1
-    for iface in "${servers[@]}"; do
-        local conf_ip=$(grep -E "^Address\s*=" "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -n1 | awk '{print $3}' || echo "N/A")
-        local conf_port=$(grep -E "^ListenPort\s*=" "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -n1 | awk '{print $3}' || echo "N/A")
-        printf "  ${BLUE}%d)${NC} %s - %s, Port %s\n" "$i" "$iface" "$conf_ip" "$conf_port"
-        ((i++)) || true
-    done
-
-    echo ""
-    read -p "Select server (1-${server_count}): " selection
-
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "$server_count" ]; then
-        die "Invalid selection"
-    fi
-
-    WG_INTERFACE="${servers[$((selection-1))]}"
-    print_success "Selected server: ${WG_INTERFACE}"
-}
+# detect_servers() and select_server() come from utils.sh
 
 get_local_network() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
@@ -455,7 +402,6 @@ get_server_info() {
 
 prompt_peer_name() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local label=$(get_label "$PEER_TYPE")
 
     if [[ -z "$PEER_NAME" ]]; then
         while true; do
@@ -471,8 +417,8 @@ prompt_peer_name() {
                 continue
             fi
 
-            if grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null; then
-                print_error "${label} '${PEER_NAME}' already exists"
+            if peer_list "$config_file" | grep -qxF "$PEER_NAME"; then
+                print_error "Peer '${PEER_NAME}' already exists (names must be unique across all types)"
                 read -p "Retry? (y/n): " retry
                 [[ "$retry" =~ ^[Yy] ]] || die "Name exists"
                 PEER_NAME=""
@@ -482,7 +428,7 @@ prompt_peer_name() {
         done
     else
         peer_validate_name "$PEER_NAME" || die "Invalid name format"
-        grep -q "^# ${label}: ${PEER_NAME}$" "$config_file" 2>/dev/null && die "Name already exists"
+        peer_list "$config_file" | grep -qxF "$PEER_NAME" && die "Peer '${PEER_NAME}' already exists"
     fi
 }
 
@@ -823,6 +769,7 @@ generate_keypair() {
 
 add_peer_to_server() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
+    backup_config "$config_file" >/dev/null   # timestamped .backup before editing
     local peer_ip=$(echo "$PEER_IP" | cut -d'/' -f1)
     local label=$(get_label "$PEER_TYPE")
     local allowed="${peer_ip}/32"
