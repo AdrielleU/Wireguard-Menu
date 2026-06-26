@@ -19,49 +19,7 @@ WG_INTERFACE=""
 # INTERACTIVE SELECTION
 ################################################################################
 
-select_server() {
-    local -a servers
-    mapfile -t servers < <(detect_servers)
-    local server_count=${#servers[@]}
-    [[ $server_count -gt 0 ]] || die "No WireGuard servers found. Run setup.sh first."
-
-    if [[ -n "$WG_INTERFACE" ]]; then
-        [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] || die "WireGuard server '${WG_INTERFACE}' not found."
-        print_success "Using server: ${WG_INTERFACE}"
-        return
-    fi
-
-    if [[ $server_count -eq 1 ]]; then
-        WG_INTERFACE="${servers[0]}"
-        return
-    fi
-
-    print_info "Multiple WireGuard servers detected"
-    print_warning "TIP: Use --interface wg0 to skip this menu"
-    echo ""
-    echo "Available servers:"
-    echo ""
-    local i=1
-    for iface in "${servers[@]}"; do
-        local conf_ip conf_port is_running
-        conf_ip=$(grep -E "^Address\s*=" "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -n1 | awk '{print $3}')
-        conf_port=$(grep -E "^ListenPort\s*=" "${WG_CONFIG_DIR}/${iface}.conf" 2>/dev/null | head -n1 | awk '{print $3}')
-        if systemctl is-active --quiet "wg-quick@${iface}"; then
-            is_running="${GREEN}[RUNNING]${NC}"
-        else
-            is_running="${YELLOW}[STOPPED]${NC}"
-        fi
-        printf "  ${BLUE}%d)${NC} %s %b - %s, Port %s\n" "$i" "$iface" "$is_running" "${conf_ip:-?}" "${conf_port:-?}"
-        ((i++)) || true
-    done
-    echo ""
-    read -p "Select server (1-${server_count}): " selection
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > server_count )); then
-        die "Invalid selection"
-    fi
-    WG_INTERFACE="${servers[$((selection-1))]}"
-    print_success "Selected server: ${WG_INTERFACE}"
-}
+# select_server() and detect_servers() come from utils.sh
 
 select_peer() {
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
@@ -206,13 +164,7 @@ main() {
     echo ""
     print_warning "This will PERMANENTLY remove peer '${PEER_NAME}' from ${WG_INTERFACE}"
     print_info "Only this peer will be disconnected; others stay online"
-    echo ""
-    print_info "To backup before removal, run:"
-    echo "  sudo cp ${WG_CONFIG_DIR}/${WG_INTERFACE}.conf ${WG_CONFIG_DIR}/${WG_INTERFACE}.conf.backup.$(date +%Y%m%d_%H%M%S)"
-    echo ""
-    read -p "Are you sure? (y/N): " -n 1 -r
-    echo
-    [[ $REPLY =~ ^[Yy]$ ]] || die "Peer removal cancelled"
+    confirm "Remove peer '${PEER_NAME}'?" || die "Peer removal cancelled"
 
     local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
     local pubkey
@@ -222,6 +174,7 @@ main() {
         pubkey=$(cat "${WG_CONFIG_DIR}/${WG_INTERFACE}/${PEER_NAME}-publickey")
     fi
 
+    backup_config "$config_file" >/dev/null   # timestamped .backup before rewrite
     print_info "Removing peer block from ${config_file}..."
     peer_remove "$config_file" "$PEER_NAME"
     print_success "Config rewritten"
