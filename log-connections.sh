@@ -13,6 +13,9 @@
 #   journalctl -t wireguard-connections --since "1 week ago"   # recent
 #   journalctl -t wireguard-connections | grep peer=alice      # one peer
 #
+# Options:
+#   -i <iface>   log only this interface (default: all detected interfaces)
+#
 # Retention (HIPAA): edit /etc/systemd/journald.conf, then
 # `systemctl restart systemd-journald`:
 #   SystemMaxUse=2G
@@ -23,9 +26,21 @@ set -uo pipefail   # not -e — keep going if one interface dump fails
 
 source "$(dirname "$0")/utils.sh"
 
-STATE_DIR="/var/lib/wireguard-connections"
+# STATE_DIR / ACTIVE_WITHIN are env-overridable so the integration test
+# (test-monitoring.sh) can drive this script against an isolated state dir
+# with a short activity window, without disturbing the production logger.
+STATE_DIR="${WIREGUARD_CONN_STATE_DIR:-/var/lib/wireguard-connections}"
 TAG="wireguard-connections"
-ACTIVE_WITHIN=180   # seconds since last handshake to count as connected
+ACTIVE_WITHIN="${WIREGUARD_CONN_ACTIVE_WITHIN:-180}"   # secs since last handshake = connected
+
+WG_INTERFACE=""   # -i limits logging to one interface (default: all detected)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--interface) WG_INTERFACE="$2"; shift 2 ;;
+        -h|--help)      sed -n '3,20p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)              die "Unknown option: $1" ;;
+    esac
+done
 
 check_root
 mkdir -p "$STATE_DIR"
@@ -46,25 +61,36 @@ peer_name() {
     ' "$config"
 }
 
-mapfile -t interfaces < <(detect_servers)
+if [[ -n "$WG_INTERFACE" ]]; then
+    interfaces=("$WG_INTERFACE")
+else
+    mapfile -t interfaces < <(detect_servers)
+fi
 
 for iface in "${interfaces[@]}"; do
     [[ -z "$iface" ]] && continue
     state_file="${STATE_DIR}/${iface}.state"
     touch "$state_file"
 
+    # State lines are "<pubkey>\t<status>|<endpoint>|<allowed_ips>". The
+    # separator must be a tab, not '=': base64 public keys end in '=' padding,
+    # so an '='-split would truncate the key and the diff would never match.
     declare -A previous=()
-    while IFS='=' read -r pk val; do
+    while IFS=$'\t' read -r pk val; do
         [[ -n "$pk" ]] && previous[$pk]="$val"
     done < "$state_file"
 
     declare -A current=()
     if dump=$(wg show "$iface" dump 2>/dev/null); then
+        now=$(date +%s)
         while IFS=$'\t' read -r pubkey _ endpoint allowed_ips handshake _; do
             [[ -z "$pubkey" ]] && continue
             # Strip any whitespace inside allowed_ips (it's comma-separated)
             allowed_ips="${allowed_ips// /}"
-            if [[ "$handshake" != "0" && "$handshake" -lt "$ACTIVE_WITHIN" ]]; then
+            # `handshake` is the absolute unix time of the last handshake (0 if
+            # never), so a peer counts as connected when that was within the
+            # last ACTIVE_WITHIN seconds — not when the timestamp itself is < it.
+            if [[ "$handshake" != "0" ]] && (( now - handshake < ACTIVE_WITHIN )); then
                 current[$pubkey]="connected|${endpoint:-none}|${allowed_ips:-none}"
             else
                 current[$pubkey]="idle|${endpoint:-none}|${allowed_ips:-none}"
@@ -98,7 +124,7 @@ for iface in "${interfaces[@]}"; do
 
     : > "$state_file"
     for pk in "${!current[@]}"; do
-        printf '%s=%s\n' "$pk" "${current[$pk]}" >> "$state_file"
+        printf '%s\t%s\n' "$pk" "${current[$pk]}" >> "$state_file"
     done
 
     unset current previous

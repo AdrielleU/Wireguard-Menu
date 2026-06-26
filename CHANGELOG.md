@@ -10,6 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial public release preparation
 - Standard open source project files (LICENSE, CONTRIBUTING, SECURITY, etc.)
+- `healthcheck.sh`: optional **upstream reachability check** for site/client
+  boxes. After the interface and firewall are confirmed healthy, it pings the
+  upstream server's in-tunnel IP *through* the tunnel and restarts `wg-quick`
+  once the target is unreachable for `--fail-threshold` consecutive checks
+  (default 3; streak persisted per interface, cleared by any good check, and
+  reset after a non-recovering restart so it backs off instead of looping).
+  Enabled **per interface** by a `# Healthcheck-Reachability = <target>` comment
+  in that interface's `<iface>.conf`, so the main hub (no such line) is never
+  pinged or restarted on reachability. The target may be several IPs and/or
+  hostnames (comma/space separated, or multiple lines); the tunnel counts as
+  alive if any one answers. Targets are validated (IPv4/IPv6/hostname): a
+  malformed entry is logged and ignored instead of being treated as
+  unreachable, and an all-invalid comment is flagged as misconfigured without
+  ever restarting the tunnel. `--ping-target` overrides for manual runs.
+- **`test-monitoring.sh`**: live, on-box integration test for `healthcheck.sh`
+  and `log-connections.sh`. Stands up isolated throwaway interfaces (the logger
+  peer runs in its own network namespace so a real handshake can occur),
+  exercises every code path against real kernel/systemd/wg/journald state, and
+  tears everything down via an `EXIT` trap. Never touches production interfaces.
+- `log-connections.sh`: `-i <iface>` to log a single interface, plus
+  `WIREGUARD_CONN_STATE_DIR` / `WIREGUARD_CONN_ACTIVE_WITHIN` env overrides
+  (used by the integration test; defaults unchanged).
+
+### Fixed
+- `log-connections.sh`: peers were never recorded as connected — the code
+  compared the absolute `latest handshake` unix timestamp against the
+  180-second activity window instead of `now - handshake`, so no `CONNECT`
+  event was ever emitted. Now compares elapsed time correctly.
+- `log-connections.sh`: connect/disconnect diff never matched across runs
+  because the state file used `=` as its key/value separator, but base64
+  public keys end in `=` padding — keys were truncated on read, producing
+  duplicate `CONNECT`s and suppressing `DISCONNECT`s. Switched to a tab
+  separator.
 
 ### Changed
 - **Code Consolidation**: Merged `rotate-keys-client.sh` and `rotate-keys-server.sh` into unified `rotate-keys.sh`
