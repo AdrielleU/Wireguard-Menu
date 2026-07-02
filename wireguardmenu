@@ -1,0 +1,172 @@
+#!/bin/bash
+################################################################################
+# wireguardmenu — CLI dispatcher for the WireGuard management scripts
+#
+# Usage:
+#   wireguardmenu                  # launch the interactive menu (menu.sh)
+#   wireguardmenu <command> [args] # run a single action, e.g:
+#       wireguardmenu reset
+#       wireguardmenu rotate-keys
+#       wireguardmenu add-peer -i wg0
+#   wireguardmenu help             # list commands
+#   wireguardmenu install          # symlink this into /usr/local/bin
+#   wireguardmenu uninstall        # remove that symlink
+#
+# All arguments after the command are passed straight through to the target
+# script, so every flag the underlying script accepts still works.
+################################################################################
+
+set -euo pipefail
+
+# Resolve the real location of this file, following any symlinks, so the
+# command works whether it's run in place or via a symlink on $PATH. The
+# scripts source utils.sh relative to their own path, so we must invoke them
+# by their real absolute path (never the symlink).
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+    dir="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" != /* ]] && SOURCE="$dir/$SOURCE"
+done
+REPO_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+# Absolute path to this real file — used for the install symlink so the link
+# target never depends on the caller's working directory.
+SELF="${REPO_DIR}/$(basename "$SOURCE")"
+
+PROG="$(basename "$0")"
+LINK_TARGET="/usr/local/bin/wireguardmenu"
+
+# command  ->  "script.sh|one-line description"
+# Ordered for the help output. Interactive-only actions (restart/reload) live
+# inside menu.sh and are reached via the bare `wireguardmenu` menu.
+declare -A COMMANDS=(
+    [setup]="setup.sh|Set up a new WireGuard server"
+    [add-peer]="add-peer.sh|Add a peer (client or site)"
+    [remove-peer]="remove-peer.sh|Remove a peer"
+    [list-peers]="list-peers.sh|List / view peers"
+    [toggle-peer]="toggle-peer.sh|Enable or disable a peer"
+    [show-qr]="show-qr.sh|Show a client QR code"
+    [rotate-keys]="rotate-keys.sh|Rotate server or peer keys"
+    [reset]="reset.sh|Reset / clean up WireGuard"
+    [healthcheck]="healthcheck.sh|Run health checks"
+    [log-connections]="log-connections.sh|Connection logging / audit"
+    [menu]="menu.sh|Launch the interactive menu"
+)
+
+# Display order for help (assoc arrays are unordered in bash).
+ORDER=(setup add-peer remove-peer list-peers toggle-peer show-qr \
+       rotate-keys reset healthcheck log-connections menu)
+
+# Convenience aliases
+declare -A ALIASES=(
+    [rotate]="rotate-keys"
+    [ls]="list-peers"
+    [add]="add-peer"
+    [rm]="remove-peer"
+    [remove]="remove-peer"
+    [toggle]="toggle-peer"
+    [qr]="show-qr"
+    [health]="healthcheck"
+    [logs]="log-connections"
+)
+
+usage() {
+    cat <<EOF
+${PROG} — WireGuard management CLI
+
+Usage:
+  ${PROG}                 Launch the interactive menu
+  ${PROG} <command> [...]  Run one action; extra args pass through to the script
+  ${PROG} help             Show this help
+  ${PROG} install          Symlink into ${LINK_TARGET%/*}
+  ${PROG} uninstall        Remove that symlink
+
+Commands:
+EOF
+    local cmd script desc
+    for cmd in "${ORDER[@]}"; do
+        IFS='|' read -r script desc <<<"${COMMANDS[$cmd]}"
+        printf "  %-16s %s\n" "$cmd" "$desc"
+    done
+    echo ""
+    echo "Aliases: rotate=rotate-keys, add=add-peer, rm=remove-peer, ls=list-peers,"
+    echo "         qr=show-qr, health=healthcheck, logs=log-connections"
+    echo ""
+    echo "Scripts location: ${REPO_DIR}"
+}
+
+install_link() {
+    local dest="$LINK_TARGET"
+    if [[ $EUID -ne 0 ]]; then
+        echo "install requires root — re-run with sudo" >&2
+        exit 1
+    fi
+    ln -sf "$SELF" "$dest"
+    chmod +x "$SELF"
+    echo "Linked: $dest -> $SELF"
+    echo "You can now run: $(basename "$dest") <command>"
+}
+
+uninstall_link() {
+    local dest="$LINK_TARGET"
+    if [[ $EUID -ne 0 ]]; then
+        echo "uninstall requires root — re-run with sudo" >&2
+        exit 1
+    fi
+    if [[ -L "$dest" ]]; then
+        rm -f "$dest"
+        echo "Removed: $dest"
+    else
+        echo "Nothing to remove at $dest"
+    fi
+}
+
+# Run a target script by its real absolute path so it can source utils.sh.
+run_script() {
+    local script="$1"; shift
+    local path="${REPO_DIR}/${script}"
+    [[ -f "$path" ]] || { echo "Script not found: $path" >&2; exit 1; }
+    [[ -x "$path" ]] || chmod +x "$path" 2>/dev/null || true
+    exec "$path" "$@"
+}
+
+main() {
+    # No arguments → interactive menu.
+    if [[ $# -eq 0 ]]; then
+        run_script "menu.sh"
+    fi
+
+    local cmd="$1"; shift
+
+    case "$cmd" in
+        help|-h|--help)
+            usage
+            exit 0
+            ;;
+        install)
+            install_link
+            exit 0
+            ;;
+        uninstall)
+            uninstall_link
+            exit 0
+            ;;
+    esac
+
+    # Resolve aliases.
+    if [[ -n "${ALIASES[$cmd]:-}" ]]; then
+        cmd="${ALIASES[$cmd]}"
+    fi
+
+    if [[ -n "${COMMANDS[$cmd]:-}" ]]; then
+        local script desc
+        IFS='|' read -r script desc <<<"${COMMANDS[$cmd]}"
+        run_script "$script" "$@"
+    fi
+
+    echo "Unknown command: $cmd" >&2
+    echo "Run '${PROG} help' for the list of commands." >&2
+    exit 2
+}
+
+main "$@"
