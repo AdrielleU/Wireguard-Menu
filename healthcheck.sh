@@ -45,11 +45,13 @@
 #     so we always act strictly later than WireGuard's own recovery), the
 #     crypto session is demonstrably alive and
 #     the failed ping just means the *target* is down. We leave the tunnel alone.
-#   * WAN gate — when the tunnel really is dead we ping the server's public
-#     endpoint OFF the tunnel (its host route goes via the physical uplink). If
-#     the internet itself is unreachable, a restart cannot help, so we LOG and
-#     HOLD (never restart-loop) and recover on our own when the internet returns.
-#     Override the anchor with a "# Healthcheck-WAN = <host>" conf comment.
+#   * WAN gate — when the tunnel really is dead we ping OFF the tunnel to ask
+#     "is the internet even up?": the server's public endpoint (host-routed via
+#     the physical uplink) plus public resolvers (1.1.1.1, 8.8.8.8) since many
+#     servers drop ICMP on their public IP. WAN is up if ANY answers. If the
+#     internet itself is unreachable, a restart cannot help, so we LOG and HOLD
+#     (never restart-loop) and recover on our own when the internet returns.
+#     Override the anchor list with a "# Healthcheck-WAN = <host>,..." comment.
 #   * Only when ping fails AND the handshake is stale AND the WAN is up, across
 #     PING_FAIL_THRESHOLD *consecutive* checks (streak persisted between runs),
 #     do we recover: first a cheap endpoint re-resolve (fixes a changed server
@@ -112,6 +114,14 @@ PING_TARGET=""             # set only by --ping-target, for one-off manual runs
 PING_COUNT=3               # echo requests per check (success = any one replies)
 PING_TIMEOUT=2             # seconds to wait per request
 
+# Public anchors for the off-tunnel "is the internet up?" (WAN) check, in
+# addition to the peer's own Endpoint. The endpoint answers the precise "can I
+# reach the server?" question but many servers drop ICMP on their public IP, so
+# we also try these globally-pingable resolvers: if any answers, the internet is
+# up even when the server won't reply to ping. Overridable per interface with a
+# "# Healthcheck-WAN = ..." conf comment (which then replaces this default list).
+WAN_PUBLIC_ANCHORS="1.1.1.1 8.8.8.8"
+
 # WireGuard's own dead-session time: after ~180s with no successful handshake the
 # protocol itself has given up on the session (REJECT_AFTER_TIME). We never want
 # to pre-empt WireGuard's own recovery — with keepalive it re-handshakes on its
@@ -148,7 +158,7 @@ parse_arguments() {
             --fail-threshold) PING_FAIL_THRESHOLD="$2"; shift 2 ;;
             -v|--verbose)     VERBOSE=true; shift ;;
             -h|--help)
-                sed -n '3,82p' "$0" | sed 's/^# \?//'
+                sed -n '3,84p' "$0" | sed 's/^# \?//'
                 exit 0
                 ;;
             *) die "Unknown option: $1" ;;
@@ -364,41 +374,67 @@ tunnel_handshake_age() {
     echo "$min"
 }
 
-# The off-tunnel "is the internet even up?" anchor for an interface: a
-# "# Healthcheck-WAN = <host>" override in the conf if present, otherwise the
-# host of the first peer Endpoint (i.e. the WireGuard server's public address).
-# wg-quick installs a host route for the endpoint via the *physical* uplink, so
-# pinging it does NOT traverse the tunnel — which is exactly how we tell "our
-# internet is down" apart from "the tunnel is down". Echoes the host, or "".
-wan_anchor() {
+# The off-tunnel "is the internet even up?" anchors for an interface, one per
+# line. If a "# Healthcheck-WAN = ..." override is present in the conf we use
+# exactly those (comma/space separated). Otherwise we use the peer Endpoint host
+# (the server's public address; wg-quick host-routes it via the physical uplink,
+# so pinging it does NOT traverse the tunnel) PLUS the public resolvers — the
+# endpoint gives the precise "can I reach the server?" signal, the resolvers
+# cover the common case where the server drops ICMP on its public IP. WAN counts
+# as up if ANY of them answers.
+wan_anchors() {
     local iface="$1"
-    local conf="${WG_CONFIG_DIR}/${iface}.conf" host=""
-    [[ -f "$conf" ]] || { echo ""; return; }
-    host=$(awk '
+    local conf="${WG_CONFIG_DIR}/${iface}.conf" override="" ep="" t a
+    [[ -f "$conf" ]] && override=$(awk '
         /^[[:space:]]*#[[:space:]]*Healthcheck-WAN[[:space:]]*=/ {
-            sub(/^[^=]*=/, "", $0); gsub(/[[:space:]]/,"",$0); print; exit }' "$conf")
-    if [[ -z "$host" ]]; then
-        host=$(awk -F'=' '
-            /^[[:space:]]*Endpoint[[:space:]]*=/ { gsub(/[[:space:]]/,"",$2); print $2; exit }' "$conf")
-        host="${host%:*}"                       # strip trailing :port
-        host="${host#[}"; host="${host%]}"      # strip IPv6 [brackets]
+            sub(/^[^=]*=/, "", $0); print }' "$conf")
+    if [[ -n "$override" ]]; then
+        for t in ${override//,/ }; do echo "$t"; done
+        return
     fi
-    echo "$host"
+    if [[ -f "$conf" ]]; then
+        ep=$(awk -F'=' '
+            /^[[:space:]]*Endpoint[[:space:]]*=/ { gsub(/[[:space:]]/,"",$2); print $2; exit }' "$conf")
+        ep="${ep%:*}"                       # strip trailing :port
+        ep="${ep#[}"; ep="${ep%]}"          # strip IPv6 [brackets]
+        [[ -n "$ep" ]] && echo "$ep"
+    fi
+    for a in $WAN_PUBLIC_ANCHORS; do echo "$a"; done
 }
 
-# Off-tunnel internet status for an interface, via the WAN anchor. Echoes
-# "up:<host>", "down:<host>", or "unknown" (no anchor / no ping). A "down"
-# result means restarting wg-quick cannot help — the problem is upstream of the
-# tunnel — so the caller logs and holds instead of looping restarts.
+# The physical uplink interface (not a wg tunnel), from the default route that
+# doesn't go via a wg* device. Lets us ping WAN anchors OFF the tunnel even in a
+# full-tunnel (AllowedIPs=0.0.0.0/0) config. Echoes the iface name, or "".
+phys_uplink() {
+    ip route show default 2>/dev/null | awk '
+        { dev=""; for (i=1;i<=NF;i++) if ($i=="dev") dev=$(i+1) }
+        dev != "" && dev !~ /^wg/ { print dev; exit }'
+}
+
+# Off-tunnel internet status for an interface. Echoes "up:<host>" (the first
+# anchor that answered), "down:<list>", or "unknown" (no anchors / no ping). A
+# "down" result means restarting wg-quick cannot help — the problem is upstream
+# of the tunnel — so the caller logs and holds instead of looping restarts.
+# Each anchor is tried bound to the physical uplink (correct for a full-tunnel
+# box) and, if that fails, unbound (correct for split-tunnel); we only run this
+# when the tunnel is already dead, so an unbound probe can't succeed through it.
 wan_status() {
-    local iface="$1" host; host=$(wan_anchor "$iface")
-    [[ -z "$host" ]] && { echo "unknown"; return; }
+    local iface="$1"
+    local -a anchors=(); mapfile -t anchors < <(wan_anchors "$iface")
+    [[ ${#anchors[@]} -eq 0 ]] && { echo "unknown"; return; }
     command -v ping &>/dev/null || { echo "unknown"; return; }
-    if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$host" &>/dev/null; then
-        echo "up:${host}"
-    else
-        echo "down:${host}"
-    fi
+    local phys; phys=$(phys_uplink)
+    local a
+    for a in "${anchors[@]}"; do
+        if [[ -n "$phys" ]] && ping -I "$phys" -c 1 -W "$PING_TIMEOUT" "$a" &>/dev/null; then
+            echo "up:${a}"; return
+        fi
+        if ping -c 1 -W "$PING_TIMEOUT" "$a" &>/dev/null; then
+            echo "up:${a}"; return
+        fi
+    done
+    local joined; joined=$(IFS=,; echo "${anchors[*]}")
+    echo "down:${joined}"
 }
 
 # Recovery step short of a full restart: re-resolve every peer Endpoint and push
