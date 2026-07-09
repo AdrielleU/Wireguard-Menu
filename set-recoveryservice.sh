@@ -1,8 +1,9 @@
 #!/bin/bash
 ################################################################################
-# WireGuard timer installer
-# Description: Install (or refresh) the healthcheck + connection-log systemd
-#              units, pointed at wherever THIS repo actually lives. The unit
+# WireGuard recovery-service installer
+# Description: Install (or refresh) the WireGuard monitoring services — the
+#              healthcheck/auto-recovery timer AND the connection-audit-log
+#              timer — pointed at wherever THIS repo actually lives. The unit
 #              ExecStart/Documentation paths are rewritten at install time from
 #              the script's own location, so you are NOT locked to any hardcoded
 #              path — move the repo anywhere and re-run this to update.
@@ -12,8 +13,8 @@
 # run after moving the repo or pulling changes.
 #
 # Usage:
-#   sudo ./install-timers.sh              # install/refresh + enable + start
-#   sudo ./install-timers.sh --uninstall  # stop, disable, and remove the units
+#   sudo ./set-recoveryservice.sh              # install/refresh + enable + start
+#   sudo ./set-recoveryservice.sh --uninstall  # stop, disable, and remove units
 ################################################################################
 
 set -uo pipefail
