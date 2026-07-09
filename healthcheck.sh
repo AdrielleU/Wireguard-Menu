@@ -202,7 +202,14 @@ check_interface() {
 # doesn't apply, so we check that the specific FORWARD rule we wrote at setup
 # time is still present in the running kernel — a flush or reboot without
 # persistence would silently lose it.
-# Returns "ok" or a short failure reason.
+#
+# Before any of that we check the recorded backend's *tooling* still exists. The
+# manifest is a snapshot from setup time; if the recorded backend's command is
+# gone entirely (e.g. someone switched the box from ufw to firewalld without
+# re-running setup), the manifest is stale and we can no longer meaningfully
+# verify the firewall. That's reported distinctly as "firewall-stale:<backend>"
+# so it reads as "refresh the manifest", not "the firewall is down".
+# Returns "ok", "firewall-stale:<backend>", or a short failure reason.
 check_firewall() {
     local iface="$1"
     local manifest; manifest=$(manifest_path "$iface")
@@ -216,18 +223,23 @@ check_firewall() {
         [[ -z "$b" ]] && continue
         case "$b" in
             FW_FIREWALLD)
+                command -v firewall-cmd &>/dev/null \
+                    || { echo "firewall-stale:firewalld"; return; }
                 systemctl is-active --quiet firewalld 2>/dev/null \
                     || { echo "firewall-down:firewalld"; return; }
                 ;;
             FW_UFW)
-                if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qi "Status: active"; then :
+                command -v ufw &>/dev/null \
+                    || { echo "firewall-stale:ufw"; return; }
+                if ufw status 2>/dev/null | grep -qi "Status: active"; then :
                 elif systemctl is-active --quiet ufw 2>/dev/null; then :
                 else echo "firewall-down:ufw"; return
                 fi
                 ;;
             FW_NFT)
-                if ! command -v nft &>/dev/null \
-                   || ! nft list table inet wireguard 2>/dev/null | grep -q "iifname \"${iface}\""; then
+                command -v nft &>/dev/null \
+                    || { echo "firewall-stale:nftables"; return; }
+                if ! nft list table inet wireguard 2>/dev/null | grep -q "iifname \"${iface}\""; then
                     echo "firewall-rules-missing:nftables"; return
                 fi
                 ;;
@@ -513,7 +525,17 @@ process_interface() {
     # A stopped firewalld/ufw silently closes the UDP port; flushed nftables
     # drops FORWARD traffic. Neither shows up in `wg-quick` status.
     local fw_result; fw_result=$(check_firewall "$iface")
-    if [[ "$fw_result" != "ok" ]]; then
+    if [[ "$fw_result" == firewall-stale:* ]]; then
+        # The recorded backend's tooling is gone, so the manifest predates a
+        # firewall change on this box and we can't verify the real firewall.
+        # Warn so the operator refreshes the manifest, but don't fail the tunnel
+        # health or attempt a restart — the tunnel itself may be perfectly fine,
+        # and there is no backend of the recorded type left to act on.
+        local stale_be="${fw_result#firewall-stale:}"
+        print_warning "${iface}: recorded firewall backend '${stale_be}' is no longer installed — manifest is stale; rerun setup.sh firewall config to refresh it"
+        log_audit "HEALTHCHECK_CONFIG" "interface=${iface} reason=firewall-backend-stale backend=${stale_be} note=tooling-not-installed-rerun-setup"
+        # fall through past the firewall block; do not restart or return unhealthy
+    elif [[ "$fw_result" != "ok" ]]; then
         print_warning "${iface}: ${fw_result}"
         log_audit "HEALTHCHECK_FAIL" "interface=${iface} reason=${fw_result}"
 
