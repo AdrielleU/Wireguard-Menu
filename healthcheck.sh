@@ -496,11 +496,12 @@ process_interface() {
                     # fall through to firewall check
                 else
                     print_error "${iface}: still ${recheck} after restart"
-                    log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} reason=${recheck}"
+                    log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=interface reason=${recheck}"
                     return 1
                 fi
             else
                 print_error "${iface}: systemctl restart failed"
+                log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=interface reason=systemctl-restart-command-failed"
                 return 1
             fi
         else
@@ -524,23 +525,27 @@ process_interface() {
             esac
             if [[ -n "$fw_svc" ]]; then
                 print_info "${iface}: starting ${fw_svc} ..."
+                log_audit "HEALTHCHECK_RESTART" "interface=${iface} component=firewall service=${fw_svc} reason=${fw_result}"
                 if systemctl start "$fw_svc" 2>/dev/null; then
                     sleep 2
                     local refw; refw=$(check_firewall "$iface")
                     if [[ "$refw" == "ok" ]]; then
                         print_success "${iface}: ${fw_svc} started"
-                        log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=firewall"
+                        log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=firewall service=${fw_svc}"
                     else
                         print_error "${iface}: ${fw_svc} still failing after start (${refw})"
+                        log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=firewall service=${fw_svc} reason=${refw}"
                         return 1
                     fi
                 else
                     print_error "${iface}: failed to start ${fw_svc}"
+                    log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=firewall service=${fw_svc} reason=systemctl-start-command-failed"
                     return 1
                 fi
             else
                 # nftables rules vanished — no safe auto-recovery from cron
                 print_warning "${iface}: cannot auto-recover ${fw_result}; rerun setup.sh firewall config"
+                log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=firewall reason=${fw_result} note=no-auto-recovery-manual-fix-required"
                 return 1
             fi
         else
@@ -622,11 +627,12 @@ process_interface() {
                                 # restart instead of looping every tick.
                                 reach_fail_set "$iface" 0
                                 print_error "${iface}: still ${rereach} after restart"
-                                log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} reason=${rereach}"
+                                log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=reachability reason=${rereach}"
                                 return 1
                             fi
                         else
                             print_error "${iface}: systemctl restart failed"
+                            log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=reachability reason=systemctl-restart-command-failed"
                             return 1
                         fi
                     fi
