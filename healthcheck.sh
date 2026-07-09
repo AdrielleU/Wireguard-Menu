@@ -24,10 +24,37 @@
 # target may be one or more IPs and/or hostnames (comma/space separated, or on
 # several lines); the tunnel is alive if ANY of them answers. When set, the
 # interface is pinged through the tunnel after it and the firewall are confirmed
-# healthy. To ride out transient internet gaps it only restarts after
-# PING_FAIL_THRESHOLD *consecutive* unreachable checks (streak persisted between
-# runs), then re-pings to confirm recovery. The main hub's conf has no such line,
-# so a many-peer server is never restarted on an unreachable host.
+# healthy. The main hub's conf has no such line, so a many-peer server is never
+# restarted on an unreachable host.
+#
+# Hub protection (strict): mark the main VPN server's conf with
+#     # Healthcheck-Role = hub
+# in its [Interface] section. A hub is monitored and alerted on but its tunnel is
+# NEVER auto-restarted — not on a structural failure, not on reachability, not
+# even with --restart — because bouncing it would drop every connected peer, and
+# a false positive must never do that. (Non-disruptive recovery that does not
+# drop peers, i.e. starting a stopped firewall service, is still performed.)
+# Client/site boxes omit the line (or set "= client") to keep normal --restart
+# behavior. When a hub is unhealthy the run logs HEALTHCHECK_NORESTART and exits
+# non-zero so you're alerted; restart it by hand once you've confirmed it's real.
+#
+# A failed ping is corroborated before any restart, so we don't churn the tunnel
+# on a blip or on a restart that can't help:
+#   * Handshake age — if the newest WireGuard handshake is younger than
+#     HANDSHAKE_DEAD_SECS (240s = WireGuard's own 180s dead time + a 60s buffer,
+#     so we always act strictly later than WireGuard's own recovery), the
+#     crypto session is demonstrably alive and
+#     the failed ping just means the *target* is down. We leave the tunnel alone.
+#   * WAN gate — when the tunnel really is dead we ping the server's public
+#     endpoint OFF the tunnel (its host route goes via the physical uplink). If
+#     the internet itself is unreachable, a restart cannot help, so we LOG and
+#     HOLD (never restart-loop) and recover on our own when the internet returns.
+#     Override the anchor with a "# Healthcheck-WAN = <host>" conf comment.
+#   * Only when ping fails AND the handshake is stale AND the WAN is up, across
+#     PING_FAIL_THRESHOLD *consecutive* checks (streak persisted between runs),
+#     do we recover: first a cheap endpoint re-resolve (fixes a changed server
+#     DNS/IP with no peer drop), then a full wg-quick restart if that's not
+#     enough. A restart that doesn't recover resets the streak so we back off.
 #
 # Exit codes:
 #   0 = all checked interfaces healthy
@@ -47,10 +74,12 @@
 #                                             # restart only after 5 consecutive
 #                                             # unreachable checks (ride out gaps)
 #
-# Cron example (every 5 min, auto-recover, quiet on success):
-#   */5 * * * * /home/wireguard-scripts/healthcheck.sh --restart
+# Cron example (every minute, auto-recover, quiet on success):
+#   * * * * * /home/wireguard-scripts/healthcheck.sh --restart
 #
-# systemd timer: pair this with a oneshot service that runs the script.
+# systemd timer: pair this with a oneshot service that runs the script. Probe
+# every 60s (OnUnitActiveSec=60s, see systemd/*.timer); a disruptive restart
+# only fires ~4 min into a real outage (WireGuard's 180s dead time + 60s buffer).
 ################################################################################
 
 set -uo pipefail   # not -e — we want the script to keep going across interfaces
@@ -83,13 +112,32 @@ PING_TARGET=""             # set only by --ping-target, for one-off manual runs
 PING_COUNT=3               # echo requests per check (success = any one replies)
 PING_TIMEOUT=2             # seconds to wait per request
 
-# Tolerate transient internet gaps: only restart after the target has been
-# unreachable on this many *consecutive* checks (across timer runs), not on a
-# single bad run. At a 5-min timer, 3 ≈ 15 min of sustained loss. The streak is
-# persisted per interface so it survives between runs; a single good check
-# clears it. After a restart that doesn't recover, the streak resets so we
-# back off and re-accumulate before trying again (no restart looping).
-PING_FAIL_THRESHOLD=3
+# WireGuard's own dead-session time: after ~180s with no successful handshake the
+# protocol itself has given up on the session (REJECT_AFTER_TIME). We never want
+# to pre-empt WireGuard's own recovery — with keepalive it re-handshakes on its
+# own well before this — so our disruptive restart must fire STRICTLY LATER than
+# this, never sooner.
+WG_REJECT_AFTER_SECS=180
+
+# Safety buffer added on top of WireGuard's dead-session time before we step in
+# with a restart. 180 + 60 = 240s (4 min): comfortably longer than WireGuard's
+# own checks so we only act once it has definitively failed to self-heal, not
+# while it might still recover.
+RESTART_BUFFER_SECS=60
+
+# A failed ping only counts as "tunnel down" once the newest handshake on the
+# interface is older than this. Younger than this ⇒ the crypto session is alive
+# and a failed ping just means the *target* is down (don't restart). This gate
+# (240s of continuous dead session) is itself the anti-flap smoothing, so a
+# large consecutive-failure streak on top would only push recovery past 4 min.
+HANDSHAKE_DEAD_SECS=$(( WG_REJECT_AFTER_SECS + RESTART_BUFFER_SECS ))   # 240s / 4 min
+
+# Consecutive confirmed-down checks required before a restart. Kept at 1 because
+# the 240s handshake gate above already guarantees a sustained, corroborated
+# failure (ping fail AND WAN up AND 4 min of dead session); requiring more ticks
+# would only delay recovery past the intended 4-minute mark. Raise via
+# --fail-threshold if you want an even more conservative box.
+PING_FAIL_THRESHOLD=1
 
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
@@ -100,7 +148,7 @@ parse_arguments() {
             --fail-threshold) PING_FAIL_THRESHOLD="$2"; shift 2 ;;
             -v|--verbose)     VERBOSE=true; shift ;;
             -h|--help)
-                sed -n '3,49p' "$0" | sed 's/^# \?//'
+                sed -n '3,82p' "$0" | sed 's/^# \?//'
                 exit 0
                 ;;
             *) die "Unknown option: $1" ;;
@@ -286,6 +334,86 @@ check_reachability() {
     echo "unreachable:${joined}"
 }
 
+# Age in seconds of the newest handshake across all peers on the interface. A
+# fresh handshake anywhere means the crypto session is alive, so we take the
+# minimum age. Echoes the age, or a large sentinel if no peer has ever
+# handshaked (tunnel effectively dead). Used to corroborate a failed ping so we
+# don't restart a tunnel that's actually up (the target just happens to be down).
+tunnel_handshake_age() {
+    local iface="$1" now ts age min=999999
+    command -v wg &>/dev/null || { echo 999999; return; }
+    now=$(date +%s)
+    while read -r _ ts; do
+        [[ "$ts" =~ ^[0-9]+$ ]] || continue
+        (( ts == 0 )) && continue
+        age=$(( now - ts ))
+        (( age < min )) && min=$age
+    done < <(wg show "$iface" latest-handshakes 2>/dev/null)
+    echo "$min"
+}
+
+# The off-tunnel "is the internet even up?" anchor for an interface: a
+# "# Healthcheck-WAN = <host>" override in the conf if present, otherwise the
+# host of the first peer Endpoint (i.e. the WireGuard server's public address).
+# wg-quick installs a host route for the endpoint via the *physical* uplink, so
+# pinging it does NOT traverse the tunnel — which is exactly how we tell "our
+# internet is down" apart from "the tunnel is down". Echoes the host, or "".
+wan_anchor() {
+    local iface="$1"
+    local conf="${WG_CONFIG_DIR}/${iface}.conf" host=""
+    [[ -f "$conf" ]] || { echo ""; return; }
+    host=$(awk '
+        /^[[:space:]]*#[[:space:]]*Healthcheck-WAN[[:space:]]*=/ {
+            sub(/^[^=]*=/, "", $0); gsub(/[[:space:]]/,"",$0); print; exit }' "$conf")
+    if [[ -z "$host" ]]; then
+        host=$(awk -F'=' '
+            /^[[:space:]]*Endpoint[[:space:]]*=/ { gsub(/[[:space:]]/,"",$2); print $2; exit }' "$conf")
+        host="${host%:*}"                       # strip trailing :port
+        host="${host#[}"; host="${host%]}"      # strip IPv6 [brackets]
+    fi
+    echo "$host"
+}
+
+# Off-tunnel internet status for an interface, via the WAN anchor. Echoes
+# "up:<host>", "down:<host>", or "unknown" (no anchor / no ping). A "down"
+# result means restarting wg-quick cannot help — the problem is upstream of the
+# tunnel — so the caller logs and holds instead of looping restarts.
+wan_status() {
+    local iface="$1" host; host=$(wan_anchor "$iface")
+    [[ -z "$host" ]] && { echo "unknown"; return; }
+    command -v ping &>/dev/null || { echo "unknown"; return; }
+    if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$host" &>/dev/null; then
+        echo "up:${host}"
+    else
+        echo "down:${host}"
+    fi
+}
+
+# Recovery step short of a full restart: re-resolve every peer Endpoint and push
+# it back into the running interface with `wg set`. This fixes the common
+# "server's DNS/IP changed but WireGuard cached the old address" case with no
+# route flap and without dropping other peers. Returns 0 if it re-set at least
+# one endpoint, 1 otherwise.
+reresolve_endpoints() {
+    local iface="$1"
+    local conf="${WG_CONFIG_DIR}/${iface}.conf" did=1 line pub="" ep=""
+    [[ -f "$conf" ]] || return 1
+    command -v wg &>/dev/null || return 1
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^\[Peer\] ]]; then
+            pub=""; ep=""
+        elif [[ "$line" =~ ^[[:space:]]*PublicKey[[:space:]]*=[[:space:]]*(.+) ]]; then
+            pub="${BASH_REMATCH[1]// /}"
+        elif [[ "$line" =~ ^[[:space:]]*Endpoint[[:space:]]*=[[:space:]]*(.+) ]]; then
+            ep="${BASH_REMATCH[1]// /}"
+            if [[ -n "$pub" && -n "$ep" ]]; then
+                wg set "$iface" peer "$pub" endpoint "$ep" 2>/dev/null && did=0
+            fi
+        fi
+    done < "$conf"
+    return $did
+}
+
 # Print the peer reachability summary for one interface (informational).
 report_peers() {
     local iface="$1"
@@ -313,17 +441,52 @@ report_peers() {
     fi
 }
 
+# An interface's role, from a "# Healthcheck-Role = <role>" comment in its conf.
+#   hub    -> the main server that many peers dial into. NEVER restart its
+#             tunnel: a false positive here would drop every connected peer, and
+#             a hub has no single upstream to test anyway. Monitor + alert only.
+#   client -> (default, and any unrecognized/absent value) normal behavior:
+#             restart is allowed when --restart is passed.
+# This is the strict, explicit opt-out — independent of the --restart flag and
+# of whether a Healthcheck-Reachability line exists.
+iface_role() {
+    local iface="$1"
+    local conf="${WG_CONFIG_DIR}/${iface}.conf" role=""
+    [[ -f "$conf" ]] || { echo "client"; return; }
+    role=$(awk '
+        /^[[:space:]]*#[[:space:]]*Healthcheck-Role[[:space:]]*=/ {
+            sub(/^[^=]*=/, "", $0); gsub(/[[:space:]]/,"",$0); print tolower($0); exit }' "$conf")
+    [[ "$role" == "hub" ]] && echo "hub" || echo "client"
+}
+
 # Check + optionally restart one interface. Returns 0 healthy, 1 unhealthy.
 process_interface() {
     local iface="$1"
+
+    # Is a *tunnel* restart permitted on this interface? Requires --restart AND a
+    # non-hub role. A hub is monitored and alerted on but its tunnel is never
+    # bounced (dropping all peers). Non-disruptive recovery that does NOT drop
+    # peers — starting a stopped firewall service — is still allowed on a hub,
+    # since it only restores peer connectivity.
+    local may_restart=false
+    local role; role=$(iface_role "$iface")
+    if $DO_RESTART && [[ "$role" != "hub" ]]; then may_restart=true; fi
+
     local result; result=$(check_interface "$iface")
 
     if [[ "$result" != "ok" ]]; then
         print_warning "${iface}: ${result}"
         log_audit "HEALTHCHECK_FAIL" "interface=${iface} reason=${result}"
 
-        if $DO_RESTART; then
+        if [[ "$role" == "hub" ]] && $DO_RESTART; then
+            # Hub: alert but never bounce the tunnel — a manual restart is a
+            # deliberate human decision, not something a timer should do.
+            print_error "${iface}: hub is unhealthy (${result}) — NOT auto-restarting (Healthcheck-Role = hub); restart manually if intended"
+            log_audit "HEALTHCHECK_NORESTART" "interface=${iface} role=hub reason=${result}"
+            return 1
+        elif $may_restart; then
             print_info "${iface}: restarting wg-quick@${iface} ..."
+            log_audit "HEALTHCHECK_RESTART" "interface=${iface} component=interface reason=${result}"
             if systemctl restart "wg-quick@${iface}"; then
                 sleep 2
                 local recheck; recheck=$(check_interface "$iface")
@@ -386,11 +549,15 @@ process_interface() {
     fi
 
     # Interface + firewall are healthy. If an upstream target is configured,
-    # confirm the tunnel actually carries traffic. A single failed check is NOT
-    # enough to restart — internet gaps happen — so we only act once the target
-    # has been unreachable on PING_FAIL_THRESHOLD consecutive checks.
+    # confirm the tunnel actually carries traffic. A failed ping alone is NOT
+    # enough to restart: we corroborate it with the handshake age (is the crypto
+    # session really dead?) and the off-tunnel WAN status (is a restart even
+    # capable of helping?), and only then across PING_FAIL_THRESHOLD consecutive
+    # checks.
     local reach; reach=$(check_reachability "$iface")
-    if [[ "$reach" == "ok" ]]; then
+    if [[ "$reach" == "skipped" ]]; then
+        :   # reachability not enabled for this interface — structural checks only
+    elif [[ "$reach" == "ok" ]]; then
         # Good check clears any failure streak.
         [[ "$(reach_fail_count "$iface")" -ne 0 ]] && reach_fail_set "$iface" 0
     elif [[ "$reach" == "misconfigured" ]]; then
@@ -398,41 +565,77 @@ process_interface() {
         # detail already went to the log) but don't restart or touch the streak —
         # the interface itself is healthy; a bad comment shouldn't take it down.
         print_warning "${iface}: reachability configured but no valid target — fix the '# Healthcheck-Reachability' comment in ${iface}.conf"
-    elif [[ "$reach" != "skipped" ]]; then
-        local target="${reach#unreachable:}"
-        local fails; fails=$(( $(reach_fail_count "$iface") + 1 ))
-        reach_fail_set "$iface" "$fails"
-        print_warning "${iface}: ${reach} (${fails}/${PING_FAIL_THRESHOLD} consecutive)"
-        log_audit "HEALTHCHECK_FAIL" "interface=${iface} reason=${reach} streak=${fails}/${PING_FAIL_THRESHOLD}"
-
-        if (( fails >= PING_FAIL_THRESHOLD )); then
-            if $DO_RESTART; then
-                print_info "${iface}: ${target} unreachable for ${fails} checks — restarting wg-quick@${iface} ..."
-                if systemctl restart "wg-quick@${iface}"; then
-                    sleep 3
-                    local rereach; rereach=$(check_reachability "$iface")
-                    if [[ "$rereach" == "ok" ]]; then
-                        reach_fail_set "$iface" 0
-                        print_success "${iface}: reachability recovered after restart"
-                        log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=reachability target=${target}"
-                    else
-                        # Restart didn't help (server likely down). Reset the
-                        # streak so we back off and re-accumulate before the
-                        # next restart instead of looping every tick.
-                        reach_fail_set "$iface" 0
-                        print_error "${iface}: still ${rereach} after restart"
-                        log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} reason=${rereach}"
-                        return 1
-                    fi
-                else
-                    print_error "${iface}: systemctl restart failed"
-                    return 1
-                fi
-            else
+    else
+        # Ping through the tunnel failed. Corroborate before treating it as a
+        # tunnel failure: a fresh handshake means the tunnel is alive and it's
+        # the target that's down — leave it alone.
+        local hs; hs=$(tunnel_handshake_age "$iface")
+        if (( hs < HANDSHAKE_DEAD_SECS )); then
+            print_warning "${iface}: ${reach}, but handshake is ${hs}s old (< ${HANDSHAKE_DEAD_SECS}s) — tunnel alive, target likely down; not restarting"
+            log_audit "HEALTHCHECK_TARGET_DOWN" "interface=${iface} reason=${reach} handshake_age=${hs}"
+            [[ "$(reach_fail_count "$iface")" -ne 0 ]] && reach_fail_set "$iface" 0
+        else
+            # Tunnel is genuinely dead (no traffic AND no recent handshake). Can
+            # a restart even help? Check the internet off-tunnel first.
+            local wan; wan=$(wan_status "$iface")
+            if [[ "$wan" == down:* ]]; then
+                # Internet/upstream itself is unreachable off-tunnel. Restarting
+                # wg-quick cannot fix that and would just loop, so we hold and
+                # log. Recovery happens on its own when the internet returns.
+                print_warning "${iface}: tunnel down (${reach}, handshake ${hs}s) AND internet unreachable off-tunnel (${wan#down:}) — NOT restarting; will recover when the internet returns"
+                log_audit "HEALTHCHECK_WAN_DOWN" "interface=${iface} reason=${reach} handshake_age=${hs} anchor=${wan#down:}"
                 return 1
             fi
+
+            # WAN is up (or unverifiable) but the tunnel is dead → a restart can
+            # plausibly help. Accumulate the consecutive-failure streak.
+            local fails; fails=$(( $(reach_fail_count "$iface") + 1 ))
+            reach_fail_set "$iface" "$fails"
+            print_warning "${iface}: tunnel down (${reach}, handshake ${hs}s, WAN ${wan}) — ${fails}/${PING_FAIL_THRESHOLD} consecutive"
+            log_audit "HEALTHCHECK_FAIL" "interface=${iface} reason=${reach} handshake_age=${hs} wan=${wan} streak=${fails}/${PING_FAIL_THRESHOLD}"
+
+            if (( fails >= PING_FAIL_THRESHOLD )); then
+                if $may_restart; then
+                    # Recovery ladder: cheap endpoint re-resolve first (fixes a
+                    # changed server DNS/IP with no route flap), full restart
+                    # only if that doesn't bring the tunnel back.
+                    print_info "${iface}: re-resolving peer endpoint(s) before restart ..."
+                    reresolve_endpoints "$iface"; sleep 2
+                    local rr; rr=$(check_reachability "$iface")
+                    if [[ "$rr" == "ok" ]]; then
+                        reach_fail_set "$iface" 0
+                        print_success "${iface}: recovered by re-resolving endpoint (no restart)"
+                        log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=reachability method=reresolve"
+                    else
+                        print_info "${iface}: re-resolve didn't help — restarting wg-quick@${iface} ..."
+                        log_audit "HEALTHCHECK_RESTART" "interface=${iface} component=reachability reason=${reach} handshake_age=${hs} wan=${wan}"
+                        if systemctl restart "wg-quick@${iface}"; then
+                            sleep 3
+                            local rereach; rereach=$(check_reachability "$iface")
+                            if [[ "$rereach" == "ok" ]]; then
+                                reach_fail_set "$iface" 0
+                                print_success "${iface}: reachability recovered after restart"
+                                log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=reachability method=restart"
+                            else
+                                # Restart didn't help. Reset the streak so we
+                                # back off and re-accumulate before the next
+                                # restart instead of looping every tick.
+                                reach_fail_set "$iface" 0
+                                print_error "${iface}: still ${rereach} after restart"
+                                log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} reason=${rereach}"
+                                return 1
+                            fi
+                        else
+                            print_error "${iface}: systemctl restart failed"
+                            return 1
+                        fi
+                    fi
+                else
+                    return 1
+                fi
+            fi
+            # Below threshold: tolerate this gap and stay healthy for now.
         fi
-        # Below threshold: tolerate this gap and stay healthy for now.
     fi
 
     if $VERBOSE; then

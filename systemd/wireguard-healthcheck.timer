@@ -1,10 +1,10 @@
 [Unit]
-Description=Run WireGuard healthcheck every 5 minutes
+Description=Run WireGuard healthcheck every minute (restart ~4 min into an outage)
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-RandomizedDelaySec=30
+OnBootSec=1min
+OnUnitActiveSec=60s
+RandomizedDelaySec=10
 Persistent=true
 
 [Install]
