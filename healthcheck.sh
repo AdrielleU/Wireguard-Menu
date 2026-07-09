@@ -77,7 +77,7 @@
 #                                             # unreachable checks (ride out gaps)
 #
 # Cron example (every minute, auto-recover, quiet on success):
-#   * * * * * /home/wireguard-scripts/healthcheck.sh --restart
+#   * * * * * /etc/wireguard/scripts/wireguard-scripts/healthcheck.sh --restart
 #
 # systemd timer: pair this with a oneshot service that runs the script. Probe
 # every 60s (OnUnitActiveSec=60s, see systemd/*.timer); a disruptive restart

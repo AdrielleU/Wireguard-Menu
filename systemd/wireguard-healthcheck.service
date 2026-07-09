@@ -1,11 +1,11 @@
 [Unit]
 Description=WireGuard healthcheck (service + interface + addresses + firewall)
-Documentation=file:///home/wireguard-scripts/healthcheck.sh
+Documentation=file:///etc/wireguard/scripts/wireguard-scripts/healthcheck.sh
 After=wg-quick.target
 
 [Service]
 Type=oneshot
-ExecStart=/home/wireguard-scripts/healthcheck.sh --restart
+ExecStart=/etc/wireguard/scripts/wireguard-scripts/healthcheck.sh --restart
 
 # Minimal hardening. Less restrictive than the connection-log unit because
 # this script may need to `systemctl restart wg-quick@<iface>` and inspect
