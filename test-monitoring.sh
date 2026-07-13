@@ -89,6 +89,7 @@ STATE="${TMPROOT}/state"
 mkdir -p "$STATE"
 HC_CONF="/etc/wireguard/${HC}.conf"
 HC_REACH="/etc/wireguard/.healthcheck-${HC}.reachfail"
+HC_MANIFEST="/etc/wireguard/.manifest-${HC}"
 CONF_A="${TMPROOT}/${LCA}.conf"
 B_KEY="${TMPROOT}/${LCB}.key"
 
@@ -101,7 +102,7 @@ teardown() {
     fi
     systemctl stop "wg-quick@${HC}" &>/dev/null || true
     ip link del "$HC" &>/dev/null || true
-    rm -f "$HC_CONF" "$HC_REACH"
+    rm -f "$HC_CONF" "$HC_REACH" "$HC_MANIFEST"
     [[ -f "$CONF_A" ]] && wg-quick down "$CONF_A" &>/dev/null
     ip link del "$LCA" &>/dev/null || true
     ip netns del "$NS" &>/dev/null || true        # also removes LCB + the veth pair
@@ -126,6 +127,10 @@ cat > "$HC_CONF" <<EOF
 Address = 10.255.251.1/32
 ListenPort = ${HCP}
 PrivateKey = ${HC_PRIV}
+# Pin the off-tunnel WAN anchor to a locally-reachable address so the
+# reachability tests below are hermetic: the new WAN gate must read "internet
+# up" without this box actually reaching its default anchors (1.1.1.1/8.8.8.8).
+# Healthcheck-WAN = 127.0.0.1
 EOF
 chmod 600 "$HC_CONF"
 systemctl start "wg-quick@${HC}" || die "could not start wg-quick@${HC} (is wireguard-tools' wg-quick@ template installed?)"
@@ -225,6 +230,64 @@ hc -i "$HC" --fail-threshold 1 --restart
 assert_rc 0 "$RC" "all-invalid targets: interface stays healthy, no restart"
 assert_contains "$OUT" "no valid target" "all-invalid reachability reported misconfigured"
 assert_eq "MISSING" "$(reachfail)" "no failure streak written for misconfigured reachability"
+
+# 15. WAN gate: tunnel dead (no handshake) AND the off-tunnel WAN anchor
+#     unreachable => a restart cannot help, so the run HOLDS (logs WAN_DOWN,
+#     exit 1) and must NOT restart or write a failure streak. Point the WAN
+#     anchor at TEST-NET-3 (198.51.100.0/24, guaranteed unrouted) to force it.
+rm -f "$HC_REACH"
+sed -i '/Healthcheck-Reachability/d' "$HC_CONF"
+sed -i 's/^# Healthcheck-WAN =.*/# Healthcheck-WAN = 198.51.100.254/' "$HC_CONF"
+hc -i "$HC" --ping-target 10.255.251.99 --restart
+assert_rc 1 "$RC" "WAN down + tunnel dead: exits 1"
+assert_contains "$OUT" "internet unreachable" "WAN-down hold reported"
+assert_contains "$OUT" "NOT restarting" "WAN down => did not restart"
+assert_eq "MISSING" "$(reachfail)" "WAN-down hold writes no failure streak"
+sed -i 's/^# Healthcheck-WAN =.*/# Healthcheck-WAN = 127.0.0.1/' "$HC_CONF"   # restore
+
+# 16. Firewall backend staleness: a manifest recording a backend whose tooling
+#     is no longer installed is reported as stale (rerun setup) — a warning that
+#     does NOT fail interface health (exit 0) or trigger a restart. Pick a
+#     backend whose command is genuinely absent on this box.
+STALE_BE=""
+if   ! command -v ufw          &>/dev/null; then STALE_BE=ufw
+elif ! command -v firewall-cmd &>/dev/null; then STALE_BE=firewalld
+fi
+if [[ -n "$STALE_BE" ]]; then
+    rm -f "$HC_REACH"; sed -i '/Healthcheck-Reachability/d' "$HC_CONF"
+    if [[ "$STALE_BE" == ufw ]]; then echo 'FW_UFW|added' > "$HC_MANIFEST"
+    else echo 'FW_FIREWALLD|added' > "$HC_MANIFEST"; fi
+    hc -i "$HC" -v
+    assert_rc 0 "$RC" "stale firewall backend: interface stays healthy (exit 0)"
+    assert_contains "$OUT" "manifest is stale" "stale firewall backend warned (rerun setup)"
+    rm -f "$HC_MANIFEST"
+else
+    pass "SKIP firewall-staleness test (both ufw and firewalld tooling present)"
+fi
+
+# 17. Hub protection: an interface marked "# Healthcheck-Role = hub" is NEVER
+#     auto-restarted, even with --restart on a real structural failure — it must
+#     alert (NORESTART, exit 1) and leave the tunnel down for a human. (Runs last
+#     in this section: it stops the service and does not bring it back.)
+printf '# Healthcheck-Role = hub\n' >> "$HC_CONF"
+systemctl stop "wg-quick@${HC}"
+hc -i "$HC" --restart
+assert_rc 1 "$RC" "hub structural failure exits 1"
+assert_contains "$OUT" "NOT auto-restarting" "hub is alerted, not auto-restarted"
+if systemctl is-active --quiet "wg-quick@${HC}"; then
+    fail "hub tunnel was restarted despite Role=hub"
+else
+    pass "hub tunnel left down (Role=hub blocked the restart)"
+fi
+
+# NOTE: two healthcheck paths are not yet covered here because they need a
+# systemd-managed interface carrying a *fresh* handshake, which this harness
+# doesn't stand up (the handshaking pair below is driven via `wg-quick up`, not
+# the wg-quick@ unit healthcheck.sh inspects):
+#   - the handshake-age gate's "fresh handshake => TARGET_DOWN, don't restart"
+#     branch (its "stale handshake => proceed" branch IS exercised above, since
+#     the HC interface has no peer and so no handshake);
+#   - endpoint re-resolve recovery (needs a resolvable peer Endpoint to re-push).
 
 ################################################################################
 section "log-connections.sh  ($LCA in main ns <-> $LCB in netns $NS)"
