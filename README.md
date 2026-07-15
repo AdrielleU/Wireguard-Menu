@@ -713,7 +713,7 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ## Project Structure
 
 ```
-/etc/wireguard/scripts/wireguard-scripts/
+/etc/wireguard/scripts/
 ├── menu.sh                # Interactive menu (start here!)
 ├── setup.sh               # Initial server setup
 ├── add-peer.sh                      # Add a new peer (client/site/p2p)
@@ -947,7 +947,7 @@ journalctl -t wireguard-audit -n 20                      # HEALTHCHECK_* events
 ### Or cron (if you prefer)
 
 ```
-* * * * * /etc/wireguard/scripts/wireguard-scripts/healthcheck.sh --restart
+* * * * * /etc/wireguard/scripts/healthcheck.sh --restart
 ```
 
 Peer reachability is reported for context only (with `-v`) but does NOT
@@ -1039,16 +1039,16 @@ sudo systemctl enable --now wireguard-log-connections.timer
 ```
 
 The timer fires every 2 minutes (matching WireGuard's handshake interval).
-The units expect the repo at `/etc/wireguard/scripts/wireguard-scripts/` and run
+The units expect the repo at `/etc/wireguard/scripts/` and run
 the script in place from there — no copy to `/usr/local/bin/` needed. (systemd
 still loads the unit files themselves only from `/etc/systemd/system/`, so those
 must be copied/symlinked there regardless of where the scripts live.)
 
-> **If your repo lives somewhere other than `/etc/wireguard/scripts/wireguard-scripts/`**,
+> **If your repo lives somewhere other than `/etc/wireguard/scripts/`**,
 > rewrite the `ExecStart=` path before copying:
 >
 > ```bash
-> sudo sed "s|/etc/wireguard/scripts/wireguard-scripts|$(pwd)|g" systemd/wireguard-log-connections.service \
+> sudo sed "s|/etc/wireguard/scripts|$(pwd)|g" systemd/wireguard-log-connections.service \
 >   > /etc/systemd/system/wireguard-log-connections.service
 > sudo cp systemd/wireguard-log-connections.timer /etc/systemd/system/
 > sudo systemctl daemon-reload
