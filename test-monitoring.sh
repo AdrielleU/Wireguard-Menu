@@ -89,6 +89,7 @@ STATE="${TMPROOT}/state"
 mkdir -p "$STATE"
 HC_CONF="/etc/wireguard/${HC}.conf"
 HC_REACH="/etc/wireguard/.healthcheck-${HC}.reachfail"
+HC_LASTRESTART="/etc/wireguard/.healthcheck-${HC}.lastrestart"
 HC_MANIFEST="/etc/wireguard/.manifest-${HC}"
 CONF_A="${TMPROOT}/${LCA}.conf"
 B_KEY="${TMPROOT}/${LCB}.key"
@@ -102,7 +103,7 @@ teardown() {
     fi
     systemctl stop "wg-quick@${HC}" &>/dev/null || true
     ip link del "$HC" &>/dev/null || true
-    rm -f "$HC_CONF" "$HC_REACH" "$HC_MANIFEST"
+    rm -f "$HC_CONF" "$HC_REACH" "$HC_MANIFEST" "$HC_LASTRESTART"
     [[ -f "$CONF_A" ]] && wg-quick down "$CONF_A" &>/dev/null
     ip link del "$LCA" &>/dev/null || true
     ip netns del "$NS" &>/dev/null || true        # also removes LCB + the veth pair
@@ -117,6 +118,13 @@ lc() { OUT="$(env WG_CONFIG_DIR="$TMPROOT" WIREGUARD_CONN_STATE_DIR="$STATE" \
                   WIREGUARD_CONN_ACTIVE_WITHIN="$1" \
                   "${SCRIPT_DIR}/log-connections.sh" -i "$LCA" 2>&1)"; RC=$?; }
 reachfail() { cat "$HC_REACH" 2>/dev/null || echo MISSING; }
+# Same as hc() but with the timing gates overridden, so the tier-1 window and the
+# restart cooldown can be exercised without waiting minutes of wall-clock time.
+# shellcheck disable=SC2086  # $e is a deliberately word-split list of VAR=VAL
+hc_env() { local e="$1"; shift; OUT="$(env $e "${SCRIPT_DIR}/healthcheck.sh" "$@" 2>&1)"; RC=$?; }
+# Monotonic timestamp of the interface's last activation — used to prove a run
+# did (or did not) actually restart wg-quick.
+activated_at() { systemctl show -p ActiveEnterTimestampMonotonic --value "wg-quick@${HC}"; }
 
 ################################################################################
 section "healthcheck.sh  (interface: $HC, port $HCP)"
@@ -190,6 +198,43 @@ assert_eq "0" "$(reachfail)" "streak reset to 0 after failed-recovery restart"
 hc -i "$HC" --ping-target 10.255.251.1
 assert_rc 0 "$RC" "recovered reachability exits 0"
 assert_eq "0" "$(reachfail)" "streak stays cleared on good check"
+
+# 10b. TIER 1 — handshake older than SOFT_RECOVERY_SECS but younger than
+#      HANDSHAKE_DEAD_SECS. Only the non-disruptive rung may run: endpoint
+#      re-resolve is attempted, the restart is explicitly deferred, and
+#      wg-quick must NOT be bounced even though --restart was passed. The gates
+#      are overridden so this doesn't need minutes of wall-clock time.
+rm -f "$HC_REACH" "$HC_LASTRESTART"
+T_BEFORE="$(activated_at)"
+hc_env "SOFT_RECOVERY_SECS=1 HANDSHAKE_DEAD_SECS=9999999" \
+       -i "$HC" --ping-target 10.255.251.99 --fail-threshold 1 --restart
+assert_rc 1 "$RC" "tier 1: unreachable inside the soft window exits 1"
+assert_contains "$OUT" "re-resolving" "tier 1: non-disruptive re-resolve attempted"
+assert_contains "$OUT" "before any restart" "tier 1: restart explicitly deferred"
+assert_eq "$T_BEFORE" "$(activated_at)" "tier 1: wg-quick was NOT restarted"
+assert_eq "MISSING" "$([[ -f "$HC_LASTRESTART" ]] && echo PRESENT || echo MISSING)" \
+          "tier 1: no restart timestamp written"
+
+# 10c. RESTART COOLDOWN — the first tier-2 restart runs and records a timestamp;
+#      a second attempt inside RESTART_COOLDOWN_SECS is suppressed instead of
+#      bouncing the tunnel again on the very next tick.
+rm -f "$HC_REACH" "$HC_LASTRESTART"
+hc -i "$HC" --ping-target 10.255.251.99 --fail-threshold 1 --restart
+assert_rc 1 "$RC" "cooldown: first restart runs"
+assert_eq "PRESENT" "$([[ -f "$HC_LASTRESTART" ]] && echo PRESENT || echo MISSING)" \
+          "cooldown: restart timestamp recorded"
+T_BEFORE="$(activated_at)"
+hc -i "$HC" --ping-target 10.255.251.99 --fail-threshold 1 --restart
+assert_rc 1 "$RC" "cooldown: second attempt exits 1"
+assert_contains "$OUT" "holding" "cooldown: second restart suppressed"
+assert_eq "$T_BEFORE" "$(activated_at)" "cooldown: wg-quick was NOT restarted again"
+
+# 10d. Once the cooldown window has elapsed, a restart is permitted again.
+rm -f "$HC_REACH"
+hc_env "RESTART_COOLDOWN_SECS=0" \
+       -i "$HC" --ping-target 10.255.251.99 --fail-threshold 1 --restart
+assert_rc 1 "$RC" "cooldown expired: restart allowed again"
+assert_contains "$OUT" "after restart" "cooldown expired: restart actually ran"
 
 # 11. Reachability target read from the conf comment, with NO --ping-target:
 #     an unreachable target at threshold 1 must drive the interface unhealthy,

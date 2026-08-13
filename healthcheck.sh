@@ -39,24 +39,40 @@
 # non-zero so you're alerted; restart it by hand once you've confirmed it's real.
 #
 # A failed ping is corroborated before any restart, so we don't churn the tunnel
-# on a blip or on a restart that can't help:
-#   * Handshake age — if the newest WireGuard handshake is younger than
-#     HANDSHAKE_DEAD_SECS (240s = WireGuard's own 180s dead time + a 60s buffer,
-#     so we always act strictly later than WireGuard's own recovery), the
-#     crypto session is demonstrably alive and
-#     the failed ping just means the *target* is down. We leave the tunnel alone.
-#   * WAN gate — when the tunnel really is dead we ping OFF the tunnel to ask
-#     "is the internet even up?": the server's public endpoint (host-routed via
-#     the physical uplink) plus public resolvers (1.1.1.1, 8.8.8.8) since many
+# on a blip or on a restart that can't help. Recovery is a two-tier ladder keyed
+# on handshake age, because the cheap rung and the destructive rung have very
+# different false-positive costs:
+#
+#   < 120s  HANDS OFF. WireGuard retries a handshake every 5s for ~90s of its
+#           own accord (MAX_TIMER_HANDSHAKES), and with PersistentKeepalive it
+#           keeps retrying every 25s after that. Never pre-empt it.
+#
+#   120s+   TIER 1, non-disruptive: re-resolve peer Endpoints (`wg set`). This
+#           fixes the one failure WireGuard provably CANNOT fix itself — the
+#           kernel caches the address wg-quick resolved at start time and never
+#           re-resolves it, so a server that moved retries forever in vain.
+#           Safe this early because `wg set ... endpoint` never touches the
+#           crypto session and drops nobody: a false positive costs nothing.
+#
+#   180s+   TIER 2, disruptive: full `wg-quick` restart, only if tier 1 didn't
+#           recover it. 180s is REJECT_AFTER_TIME — the moment WireGuard itself
+#           declares the session key dead. We wait for WireGuard's own 3 minutes
+#           and not a second longer. It is also the floor: handshake ages up to
+#           ~165s are NORMAL on a healthy responder session, so restarting below
+#           180s would drop live peers on a false positive. Rate-limited to one
+#           restart per RESTART_COOLDOWN_SECS (15 min) per interface so a failure
+#           a restart can't fix never becomes a restart storm.
+#
+#   * WAN gate — before either tier we ping OFF the tunnel to ask "is the
+#     internet even up?": the server's public endpoint (host-routed via the
+#     physical uplink) plus public resolvers (1.1.1.1, 8.8.8.8) since many
 #     servers drop ICMP on their public IP. WAN is up if ANY answers. If the
-#     internet itself is unreachable, a restart cannot help, so we LOG and HOLD
-#     (never restart-loop) and recover on our own when the internet returns.
+#     internet itself is unreachable, no local action can help, so we LOG and
+#     HOLD (never restart-loop) and recover on our own when it returns.
 #     Override the anchor list with a "# Healthcheck-WAN = <host>,..." comment.
-#   * Only when ping fails AND the handshake is stale AND the WAN is up, across
-#     PING_FAIL_THRESHOLD *consecutive* checks (streak persisted between runs),
-#     do we recover: first a cheap endpoint re-resolve (fixes a changed server
-#     DNS/IP with no peer drop), then a full wg-quick restart if that's not
-#     enough. A restart that doesn't recover resets the streak so we back off.
+#   * The streak (PING_FAIL_THRESHOLD, persisted between runs) gates tier 2 on
+#     consecutive confirmed-down checks. A restart that doesn't recover resets
+#     the streak so we back off.
 #
 # Exit codes:
 #   0 = all checked interfaces healthy
@@ -80,8 +96,16 @@
 #   * * * * * /etc/wireguard/scripts/healthcheck.sh --restart
 #
 # systemd timer: pair this with a oneshot service that runs the script. Probe
-# every 60s (OnUnitActiveSec=60s, see systemd/*.timer); a disruptive restart
-# only fires ~4 min into a real outage (WireGuard's 180s dead time + 60s buffer).
+# every 60s (OnUnitActiveSec=60s, see systemd/*.timer). The probe is read-only
+# and costs ~80ms, so polling frequency is decoupled from safety: the 120s/180s
+# gates above are what keep us out of WireGuard's way, not the timer interval.
+# A slower timer buys no safety, it only widens the outage — at 5min a tick
+# landing just under a gate waits a full extra period (restart at up to ~8.8min
+# instead of 3-4min).
+#
+# NOTE: PersistentKeepalive is load-bearing for self-healing. Without it the
+# kernel purges staged packets and stops retrying entirely after ~90s, so the
+# tunnel stays dead until userspace acts. setup.sh/add-peer.sh set 25s.
 ################################################################################
 
 set -uo pipefail   # not -e — we want the script to keep going across interfaces
@@ -122,30 +146,90 @@ PING_TIMEOUT=2             # seconds to wait per request
 # "# Healthcheck-WAN = ..." conf comment (which then replaces this default list).
 WAN_PUBLIC_ANCHORS="1.1.1.1 8.8.8.8"
 
-# WireGuard's own dead-session time: after ~180s with no successful handshake the
-# protocol itself has given up on the session (REJECT_AFTER_TIME). We never want
-# to pre-empt WireGuard's own recovery — with keepalive it re-handshakes on its
-# own well before this — so our disruptive restart must fire STRICTLY LATER than
-# this, never sooner.
-WG_REJECT_AFTER_SECS=180
+# ---------------------------------------------------------------------------
+# Timing gates, derived from the kernel's own WireGuard constants
+# (drivers/net/wireguard/{messages.h,timers.c,send.c,receive.c}):
+#
+#   REKEY_TIMEOUT        = 5s    retransmit interval for a handshake initiation
+#   MAX_TIMER_HANDSHAKES = 90/5  = 18 retries, i.e. WireGuard stops retrying
+#                                aggressively after ~90s and logs "giving up"
+#   REKEY_AFTER_TIME     = 120s  initiator renews the session at this age
+#   REJECT_AFTER_TIME    = 180s  session key is hard-dead at this age
+#
+# Two facts drive the two gates below, and both are easy to get wrong:
+#
+#  1. WireGuard's aggressive self-healing ends at 90s, NOT 180s. After
+#     MAX_TIMER_HANDSHAKES the kernel purges staged packets and gives up. It
+#     only keeps trying at all because PersistentKeepalive re-triggers a
+#     handshake every 25s (timers.c -> send.c:out_nokey). A peer conf WITHOUT
+#     PersistentKeepalive goes permanently dead after ~90s until userspace acts.
+#
+#  2. Handshake age from 0 to ~165s is NORMAL on a healthy tunnel. Both rekey
+#     triggers are gated on `keypair->i_am_the_initiator` (send.c:133,
+#     receive.c:231) — a RESPONDER never renews the session itself, it waits for
+#     the initiator, which holds off until REJECT_AFTER_TIME - KEEPALIVE_TIMEOUT
+#     - REKEY_TIMEOUT = 165s. So a perfectly healthy responder session routinely
+#     sits at 130-170s of handshake age.
+#
+# => Any DISRUPTIVE action must stay at or above 180s or it will fire on healthy
+#    tunnels. Non-disruptive action may safely happen earlier.
+WG_REKEY_ATTEMPT_SECS=90    # WireGuard gives up its own fast retry here
+WG_REJECT_AFTER_SECS=180    # session key hard-dead here
 
-# Safety buffer added on top of WireGuard's dead-session time before we step in
-# with a restart. 180 + 60 = 240s (4 min): comfortably longer than WireGuard's
-# own checks so we only act once it has definitively failed to self-heal, not
-# while it might still recover.
-RESTART_BUFFER_SECS=60
+# --- Tier 1: non-disruptive recovery ---------------------------------------
+# Once the handshake is older than this we re-resolve peer endpoints, and do
+# NOTHING else. 120s is deliberately just past WireGuard's own 90s give-up: we
+# let the protocol finish its retry ladder untouched, then fix the one failure
+# it provably CANNOT fix on its own — a changed Endpoint IP/DNS. The kernel
+# caches the address wg-quick resolved at start time and never re-resolves it
+# (timers.c only clears the *source* addr via wg_socket_clear_peer_endpoint_src),
+# so a moved server retries forever and never connects.
+#
+# Safe to run this early even though 120s is inside the normal rekey band,
+# because `wg set <iface> peer <pub> endpoint <ep>` does not touch the crypto
+# session, does not drop any peer, and is a no-op when the address is unchanged.
+# A false positive here costs nothing.
+SOFT_RECOVERY_SECS="${SOFT_RECOVERY_SECS:-120}"
 
-# A failed ping only counts as "tunnel down" once the newest handshake on the
-# interface is older than this. Younger than this ⇒ the crypto session is alive
-# and a failed ping just means the *target* is down (don't restart). This gate
-# (240s of continuous dead session) is itself the anti-flap smoothing, so a
-# large consecutive-failure streak on top would only push recovery past 4 min.
-HANDSHAKE_DEAD_SECS=$(( WG_REJECT_AFTER_SECS + RESTART_BUFFER_SECS ))   # 240s / 4 min
+# --- Tier 2: disruptive restart --------------------------------------------
+# Buffer added on top of the hard-dead time before we bounce the interface.
+# Set to 0: we act at exactly WG_REJECT_AFTER_SECS (180s / 3 min), the point at
+# which WireGuard itself declares the session key dead and starts dropping data
+# packets encrypted with it. Waiting for WireGuard's own 3 minutes and no longer
+# is the deliberate policy here.
+#
+# This is the tightest defensible value. The margin over a healthy tunnel is the
+# 15s between the initiator's last-minute rekey (165s, receive.c:231) and 180s,
+# so a rekey still in flight at 180s — e.g. one retransmitting through packet
+# loss — can in principle be caught mid-recovery. Three things keep that from
+# being harmful: the tier-1 re-resolve has already run and failed, the WAN gate
+# has confirmed the internet is up, and RESTART_COOLDOWN_SECS caps the blast
+# radius of any false positive at one restart per 15 min instead of one per tick.
+#
+# Do NOT lower this further. Below 180s you are inside the band where a healthy
+# RESPONDER session legitimately sits (see fact (2) above) and restarts stop
+# being corroborated by anything.
+RESTART_BUFFER_SECS=0
+
+# A failed ping only counts as "tunnel down" once the newest handshake is older
+# than this. Younger ⇒ the crypto session is alive and a failed ping just means
+# the *target* is down (don't restart). This gate is itself the anti-flap
+# smoothing, so a large consecutive-failure streak on top would only push
+# recovery past 3 min.
+HANDSHAKE_DEAD_SECS="${HANDSHAKE_DEAD_SECS:-$(( WG_REJECT_AFTER_SECS + RESTART_BUFFER_SECS ))}"   # 180s / 3 min
+
+# Minimum seconds between two disruptive restarts of the same interface. Without
+# this, a failure that a restart cannot fix restarts the interface on EVERY tick
+# (the post-restart streak reset re-arms immediately at PING_FAIL_THRESHOLD=1),
+# which on a 60s timer is a restart storm that drops peers every minute. The
+# cooldown makes the destructive step "once, and only if sure" while still
+# retrying occasionally so the box self-heals when the real cause clears.
+RESTART_COOLDOWN_SECS="${RESTART_COOLDOWN_SECS:-900}"   # 15 min
 
 # Consecutive confirmed-down checks required before a restart. Kept at 1 because
-# the 240s handshake gate above already guarantees a sustained, corroborated
-# failure (ping fail AND WAN up AND 4 min of dead session); requiring more ticks
-# would only delay recovery past the intended 4-minute mark. Raise via
+# the 180s handshake gate above already guarantees a sustained, corroborated
+# failure (ping fail AND WAN up AND 3 min of dead session); requiring more ticks
+# would only delay recovery past the intended 3-minute mark. Raise via
 # --fail-threshold if you want an even more conservative box.
 PING_FAIL_THRESHOLD=1
 
@@ -272,6 +356,35 @@ reach_fail_set() {
     local f; f=$(reach_state_file "$1")
     mkdir -p "$(dirname "$f")"
     if echo "$2" > "$f" 2>/dev/null; then chmod 600 "$f" 2>/dev/null || true; fi
+}
+
+# Timestamp of the last DISRUPTIVE restart of this interface, persisted the same
+# way. Used to rate-limit restarts to one per RESTART_COOLDOWN_SECS so a failure
+# a restart cannot fix doesn't bounce the tunnel on every tick.
+restart_state_file() { echo "${WG_CONFIG_DIR}/.healthcheck-${1}.lastrestart"; }
+
+restart_last_ts() {
+    local n; n=$(cat "$(restart_state_file "$1")" 2>/dev/null)
+    [[ "$n" =~ ^[0-9]+$ ]] && echo "$n" || echo 0
+}
+
+restart_mark() {
+    local f; f=$(restart_state_file "$1")
+    mkdir -p "$(dirname "$f")"
+    if date +%s > "$f" 2>/dev/null; then chmod 600 "$f" 2>/dev/null || true; fi
+}
+
+# Seconds remaining before this interface may be restarted again (0 = allowed).
+restart_cooldown_left() {
+    local last; last=$(restart_last_ts "$1")
+    [[ "$last" -eq 0 ]] && { echo 0; return; }
+    local elapsed=$(( $(date +%s) - last ))
+    (( elapsed < 0 )) && { echo 0; return; }          # clock went backwards
+    if (( elapsed >= RESTART_COOLDOWN_SECS )); then
+        echo 0
+    else
+        echo $(( RESTART_COOLDOWN_SECS - elapsed ))
+    fi
 }
 
 # Resolve this interface's reachability targets, one per line: the --ping-target
@@ -633,10 +746,38 @@ process_interface() {
         # tunnel failure: a fresh handshake means the tunnel is alive and it's
         # the target that's down — leave it alone.
         local hs; hs=$(tunnel_handshake_age "$iface")
-        if (( hs < HANDSHAKE_DEAD_SECS )); then
-            print_warning "${iface}: ${reach}, but handshake is ${hs}s old (< ${HANDSHAKE_DEAD_SECS}s) — tunnel alive, target likely down; not restarting"
+        if (( hs < SOFT_RECOVERY_SECS )); then
+            # Inside WireGuard's own retry window (it retries hard for ~90s and
+            # keeps trying every 25s via PersistentKeepalive). Hands off.
+            print_warning "${iface}: ${reach}, but handshake is ${hs}s old (< ${SOFT_RECOVERY_SECS}s) — tunnel alive, target likely down; not restarting"
             log_audit "HEALTHCHECK_TARGET_DOWN" "interface=${iface} reason=${reach} handshake_age=${hs}"
             [[ "$(reach_fail_count "$iface")" -ne 0 ]] && reach_fail_set "$iface" 0
+        elif (( hs < HANDSHAKE_DEAD_SECS )); then
+            # Tier 1 — past WireGuard's 90s give-up but still inside the band
+            # where a healthy RESPONDER session legitimately sits (up to ~165s).
+            # Only the non-disruptive rung of the ladder is allowed here: fix a
+            # moved Endpoint, which WireGuard can never do for itself. No
+            # restart, so a false positive in this window costs nothing.
+            local wan1; wan1=$(wan_status "$iface")
+            if [[ "$wan1" == down:* ]]; then
+                print_warning "${iface}: ${reach}, handshake ${hs}s, but internet unreachable off-tunnel (${wan1#down:}) — holding"
+                log_audit "HEALTHCHECK_WAN_DOWN" "interface=${iface} reason=${reach} handshake_age=${hs} anchor=${wan1#down:} tier=soft"
+                return 1
+            fi
+            print_info "${iface}: ${reach}, handshake ${hs}s — re-resolving peer endpoint(s) (non-disruptive; no restart before ${HANDSHAKE_DEAD_SECS}s) ..."
+            if reresolve_endpoints "$iface"; then
+                sleep 2
+                local rr1; rr1=$(check_reachability "$iface")
+                if [[ "$rr1" == "ok" ]]; then
+                    reach_fail_set "$iface" 0
+                    print_success "${iface}: recovered by re-resolving endpoint (no restart)"
+                    log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=reachability method=reresolve tier=soft handshake_age=${hs}"
+                    return 0
+                fi
+            fi
+            print_warning "${iface}: re-resolve did not recover it — waiting for the ${HANDSHAKE_DEAD_SECS}s gate before any restart"
+            log_audit "HEALTHCHECK_SOFT_RECOVERY_FAILED" "interface=${iface} reason=${reach} handshake_age=${hs}"
+            return 1
         else
             # Tunnel is genuinely dead (no traffic AND no recent handshake). Can
             # a restart even help? Check the internet off-tunnel first.
@@ -670,8 +811,17 @@ process_interface() {
                         print_success "${iface}: recovered by re-resolving endpoint (no restart)"
                         log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=reachability method=reresolve"
                     else
+                        # Rate-limit the destructive rung. Without this, a failure
+                        # a restart can't fix bounces the tunnel on every tick.
+                        local cd; cd=$(restart_cooldown_left "$iface")
+                        if (( cd > 0 )); then
+                            print_warning "${iface}: re-resolve didn't help, but last restart was < ${RESTART_COOLDOWN_SECS}s ago — holding ${cd}s before restarting again"
+                            log_audit "HEALTHCHECK_RESTART_SUPPRESSED" "interface=${iface} component=reachability reason=${reach} handshake_age=${hs} cooldown_left=${cd}"
+                            return 1
+                        fi
                         print_info "${iface}: re-resolve didn't help — restarting wg-quick@${iface} ..."
                         log_audit "HEALTHCHECK_RESTART" "interface=${iface} component=reachability reason=${reach} handshake_age=${hs} wan=${wan}"
+                        restart_mark "$iface"
                         if systemctl restart "wg-quick@${iface}"; then
                             sleep 3
                             local rereach; rereach=$(check_reachability "$iface")

@@ -928,21 +928,63 @@ stack to get — control over a WireGuard instance with minimal ongoing effort.
 
 ### Install as a systemd timer (recommended)
 
-From the repo root, copy the unit files, reload, and enable the timer:
+Use the installer — it rewrites each unit's `ExecStart`/`Documentation` to
+wherever this repo actually lives, so you are not locked to a hardcoded path.
+It's idempotent, so re-run it after moving the repo or pulling changes:
 
 ```bash
-sudo cp systemd/wireguard-healthcheck.{service,timer} /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now wireguard-healthcheck.timer
+sudo ./set-recoveryservice.sh              # install/refresh + enable + start
+sudo ./set-recoveryservice.sh --uninstall  # stop, disable, remove units
 ```
 
-Verify:
+> Don't `cp` the units by hand — the copies in `systemd/` carry a placeholder
+> path (`/etc/wireguard/scripts/…`). Installing them verbatim gives you a timer
+> that fires forever against a script that isn't there.
+
+The healthcheck runs **every 60s**; the connection logger every 2 min.
+
+### Verifying it's actually working
+
+Four layers, each answering a different question. All four matter — the first
+two can read perfectly green while the thing is doing nothing useful:
 
 ```bash
-systemctl list-timers wireguard-healthcheck.timer        # next/last fire
-systemctl status wireguard-healthcheck.service           # last run + output
-journalctl -t wireguard-audit -n 20                      # HEALTHCHECK_* events
+# 1. Armed, and will it survive a reboot?  ("enabled" is the one that matters)
+systemctl is-enabled wireguard-healthcheck.timer
+systemctl is-active  wireguard-healthcheck.timer
+systemctl list-timers 'wireguard-*' --all
+
+# 2. Is the service succeeding, not just firing?
+systemctl status wireguard-healthcheck.service
+journalctl -u wireguard-healthcheck.service --since -1h
+
+# 3. Is it actually DECIDING anything? (the layer people skip)
+journalctl -t wireguard-audit --since -24h
+journalctl -t wireguard-audit -f          # live, during an incident
+
+# 4. End-to-end proof on demand
+sudo ./healthcheck.sh -v
+sudo ./test-monitoring.sh                 # full harness
 ```
+
+Two things that look like problems but aren't, and one that looks fine but isn't:
+
+* The service is `Type=oneshot`, so its healthy steady state is
+  **`inactive (dead)` with `status=0/SUCCESS`**. That is correct, not a failure.
+* **Silence under `wireguard-audit` is healthy** — it only logs failures and
+  actions, never routine success.
+* **Unit drift is the failure mode that hides best.** If the installed units
+  fall out of sync with the repo, every layer above still reports green while
+  the live cadence and paths are whatever you installed months ago:
+
+```bash
+for u in wireguard-healthcheck.{timer,service} wireguard-log-connections.{timer,service}; do
+  diff -q "systemd/$u" "/etc/systemd/system/$u" >/dev/null || echo "DRIFT: $u"
+done
+```
+
+(The `.service` files legitimately differ in their rewritten paths — re-running
+`set-recoveryservice.sh` is the fix either way.)
 
 ### Or cron (if you prefer)
 
@@ -961,12 +1003,33 @@ a **ping target** — usually the server's in-tunnel IP — and it will, after t
 interface and firewall are confirmed healthy, ping that target *through* the
 tunnel and restart `wg-quick` if it can't reach it.
 
-To ride out transient internet gaps it does **not** react to a single bad run:
-each check sends a few pings (success = any one replies), and it only restarts
-after `--fail-threshold` *consecutive* failed checks (default `3`, ≈15 min at
-the 5-min timer). The streak is persisted per interface and cleared by any good
-check; after a restart that doesn't recover, the streak resets so it backs off
-rather than restarting every tick.
+To ride out transient gaps it does **not** react to a single bad run. Each check
+sends a few pings (success = any one replies), and recovery is a **two-tier
+ladder keyed on handshake age**, so the cheap fix and the destructive one are
+held to very different standards of proof:
+
+| Handshake age | What happens | Why |
+|---|---|---|
+| **< 120s** | nothing — logged as `TARGET_DOWN` | WireGuard is still retrying on its own (every 5s for ~90s, then every 25s via `PersistentKeepalive`). Never pre-empt it. |
+| **120s – 180s** | **re-resolve endpoints only** (`wg set`), no restart | Past WireGuard's own give-up, and fixes the one failure it *cannot* fix itself — a moved server IP. Drops no peers, so a false positive here is free. |
+| **≥ 180s** | re-resolve, then **restart `wg-quick`** | 180s is `REJECT_AFTER_TIME`: WireGuard itself has declared the session dead. This is the floor — handshake ages up to ~165s are normal on a healthy *responder* session. |
+
+Disruptive restarts are additionally **rate-limited to one per 15 minutes per
+interface** (`RESTART_COOLDOWN_SECS`). Without that, a failure a restart can't
+fix would bounce the tunnel on every single tick. Suppressed attempts are logged
+as `HEALTHCHECK_RESTART_SUPPRESSED`.
+
+The failure streak (`--fail-threshold`, default `1`) is persisted per interface
+and cleared by any good check; after a restart that doesn't recover, the streak
+resets so it backs off. All three gates can be overridden by environment
+variable (`SOFT_RECOVERY_SECS`, `HANDSHAKE_DEAD_SECS`, `RESTART_COOLDOWN_SECS`)
+for testing or for an unusually conservative box.
+
+> **`PersistentKeepalive` is load-bearing.** After ~90s of failed handshakes the
+> kernel purges staged packets and stops retrying (`MAX_TIMER_HANDSHAKES`). It
+> only keeps trying at all because the keepalive re-triggers a handshake every
+> 25s. A peer conf without it goes permanently dead until something in userspace
+> intervenes. `setup.sh` and `add-peer.sh` set `25` by default — don't remove it.
 
 You enable it **per interface**, by adding a comment line to the `[Interface]`
 section of that box's `/etc/wireguard/<iface>.conf` (the `.1` is your server's

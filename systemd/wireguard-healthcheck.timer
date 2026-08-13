@@ -1,5 +1,5 @@
 [Unit]
-Description=Run WireGuard healthcheck every minute (restart ~4 min into an outage)
+Description=Run WireGuard healthcheck every minute (re-resolve ~2 min, restart ~3 min into an outage)
 
 [Timer]
 OnBootSec=1min
