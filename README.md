@@ -1044,10 +1044,11 @@ PrivateKey = ...
 
 `wg`/`wg-quick` ignore `#` comments, so the line is inert config — but
 `healthcheck.sh` reads it and, on the timer, pings that target through the
-tunnel. Because it lives in each tunnel's own conf, **the main hub is never
+tunnel. Because it lives in each tunnel's own conf, **the main server is never
 pinged or restarted on reachability**: its conf simply has no such line. That's
-the safeguard — there's no single upstream to ping on a many-peer server, and
-one offline host must not bounce the tunnel for everyone. Never point it at a
+one safeguard — there's no single upstream to ping on a many-peer server, and
+one offline host must not bounce the tunnel for everyone. (The other, and the
+one that actually protects it, is `# Healthcheck-Role = server` — see below.) Never point it at a
 roaming peer's IP for the same reason.
 
 **Multiple targets and hostnames.** You can list several targets — IPs and/or
@@ -1082,6 +1083,51 @@ sudo ./healthcheck.sh --ping-target 10.0.0.1 --restart
 # Ride out longer gaps — require 5 consecutive failures
 sudo ./healthcheck.sh --ping-target 10.0.0.1 --fail-threshold 5 --restart
 ```
+
+### Never auto-restart the server
+
+Add one line to the `[Interface]` section of the **server's** conf:
+
+```ini
+[Interface]
+# Healthcheck-Role = server
+Address = 10.0.0.1/24
+ListenPort = 51820
+PrivateKey = ...
+```
+
+Or as a one-liner (run it **once** — running it twice adds the line twice):
+
+```bash
+sudo sed -i '/^\[Interface\]/a # Healthcheck-Role = server' /etc/wireguard/wg0.conf
+grep Healthcheck-Role /etc/wireguard/wg0.conf      # verify
+```
+
+`wg` ignores `#` lines, so this is inert config — no restart needed, it takes
+effect on the next healthcheck run. `# Healthcheck-Role = hub` is accepted as a
+synonym for older configs.
+
+With it set, the server is **monitored and alerted on but its tunnel is never
+bounced** — not on a structural failure, not on reachability, not even with
+`--restart`. A false positive there would drop every connected peer, so that
+decision stays with a human. Failures log `HEALTHCHECK_NORESTART` and exit
+non-zero; watch with `journalctl -t wireguard-audit -f`.
+
+**This line is what protects the server.** Reachability being unset only stops
+the *ping-based* restart path — the structural checks (service dead, interface
+missing, address missing) run on every interface regardless and will restart an
+unmarked server. Set the role explicitly.
+
+| | Server (`Role = server`) | Client / site |
+|---|---|---|
+| Detects + alerts | ✅ | ✅ |
+| Restarts the tunnel | ❌ never | ✅ at 180s |
+| Re-resolves endpoints | ❌ | ✅ at 120s |
+| Starts a stopped firewalld/ufw | ✅ | ✅ |
+
+The last row is deliberate: starting a stopped firewall drops nobody, it
+*restores* peer connectivity. A server with its firewall down looks healthy
+while the UDP port is closed and no peer can connect.
 
 ## Connection Logging
 

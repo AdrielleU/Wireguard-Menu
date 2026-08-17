@@ -310,19 +310,33 @@ else
     pass "SKIP firewall-staleness test (both ufw and firewalld tooling present)"
 fi
 
-# 17. Hub protection: an interface marked "# Healthcheck-Role = hub" is NEVER
-#     auto-restarted, even with --restart on a real structural failure — it must
-#     alert (NORESTART, exit 1) and leave the tunnel down for a human. (Runs last
-#     in this section: it stops the service and does not bring it back.)
+# 17a. Legacy "# Healthcheck-Role = hub" must still protect the interface, so
+#      confs written before the rename don't silently lose protection.
 printf '# Healthcheck-Role = hub\n' >> "$HC_CONF"
 systemctl stop "wg-quick@${HC}"
 hc -i "$HC" --restart
-assert_rc 1 "$RC" "hub structural failure exits 1"
-assert_contains "$OUT" "NOT auto-restarting" "hub is alerted, not auto-restarted"
+assert_rc 1 "$RC" "legacy Role=hub: structural failure exits 1"
+assert_contains "$OUT" "NOT auto-restarting" "legacy Role=hub still blocks the restart"
 if systemctl is-active --quiet "wg-quick@${HC}"; then
-    fail "hub tunnel was restarted despite Role=hub"
+    fail "legacy Role=hub: tunnel was restarted anyway"
 else
-    pass "hub tunnel left down (Role=hub blocked the restart)"
+    pass "legacy Role=hub: tunnel left down"
+fi
+sed -i '/^# Healthcheck-Role = hub$/d' "$HC_CONF"
+
+# 17. Server protection: an interface marked "# Healthcheck-Role = server" is
+#     NEVER auto-restarted, even with --restart on a real structural failure — it
+#     must alert (NORESTART, exit 1) and leave the tunnel down for a human. (Runs
+#     last in this section: it stops the service and does not bring it back.)
+printf '# Healthcheck-Role = server\n' >> "$HC_CONF"
+systemctl stop "wg-quick@${HC}"
+hc -i "$HC" --restart
+assert_rc 1 "$RC" "server structural failure exits 1"
+assert_contains "$OUT" "NOT auto-restarting" "server is alerted, not auto-restarted"
+if systemctl is-active --quiet "wg-quick@${HC}"; then
+    fail "server tunnel was restarted despite Role=server"
+else
+    pass "server tunnel left down (Role=server blocked the restart)"
 fi
 
 # NOTE: two healthcheck paths are not yet covered here because they need a

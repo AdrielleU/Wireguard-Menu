@@ -24,19 +24,20 @@
 # target may be one or more IPs and/or hostnames (comma/space separated, or on
 # several lines); the tunnel is alive if ANY of them answers. When set, the
 # interface is pinged through the tunnel after it and the firewall are confirmed
-# healthy. The main hub's conf has no such line, so a many-peer server is never
+# healthy. The main server's conf has no such line, so a many-peer server is never
 # restarted on an unreachable host.
 #
-# Hub protection (strict): mark the main VPN server's conf with
-#     # Healthcheck-Role = hub
-# in its [Interface] section. A hub is monitored and alerted on but its tunnel is
-# NEVER auto-restarted — not on a structural failure, not on reachability, not
+# Server protection (strict): mark the main VPN server's conf with
+#     # Healthcheck-Role = server
+# in its [Interface] section. A server is monitored and alerted on but its tunnel
+# is NEVER auto-restarted — not on a structural failure, not on reachability, not
 # even with --restart — because bouncing it would drop every connected peer, and
 # a false positive must never do that. (Non-disruptive recovery that does not
 # drop peers, i.e. starting a stopped firewall service, is still performed.)
 # Client/site boxes omit the line (or set "= client") to keep normal --restart
-# behavior. When a hub is unhealthy the run logs HEALTHCHECK_NORESTART and exits
-# non-zero so you're alerted; restart it by hand once you've confirmed it's real.
+# behavior. When a server is unhealthy the run logs HEALTHCHECK_NORESTART and
+# exits non-zero so you're alerted; restart it by hand once you've confirmed it's
+# real. ("= hub" is still accepted as a synonym for "= server".)
 #
 # A failed ping is corroborated before any restart, so we don't churn the tunnel
 # on a blip or on a restart that can't help. Recovery is a two-tier ladder keyed
@@ -130,8 +131,8 @@ STALE_HANDSHAKE_SECS=300   # report a peer as "stale" if no handshake in this lo
 #
 # The tunnel counts as alive if ANY listed target answers, so one offline
 # upstream host won't trigger a restart. This script pings the target(s) through
-# the tunnel and restarts wg-quick only when none are reachable. The main hub's
-# conf carries no such line, so the hub is never pinged or restarted on
+# the tunnel and restarts wg-quick only when none are reachable. The main server's
+# conf carries no such line, so the server is never pinged or restarted on
 # reachability — there's no single upstream to ping and one offline host must
 # not bounce the tunnel for every peer.
 PING_TARGET=""             # set only by --ping-target, for one-off manual runs
@@ -392,7 +393,7 @@ restart_cooldown_left() {
 # comment in its <iface>.conf. A value may list several targets separated by
 # commas or spaces, and each may be an IP or a hostname. Multiple comment lines
 # are all collected. Empty result = reachability disabled for this interface —
-# the default, and always the case on the main hub.
+# the default, and always the case on the main server.
 reach_targets() {
     local iface="$1"
     local raw
@@ -432,7 +433,7 @@ looks_like_host() {
 # Verify the tunnel can actually carry traffic by pinging this interface's
 # reachability target(s) (the upstream server's in-tunnel IP, and/or hostnames)
 # through it. Only runs when a target is configured for the interface; otherwise
-# we keep the original structural-only behavior so a many-peer hub never restarts
+# we keep the original structural-only behavior so a many-peer server never restarts
 # on a dead host. The tunnel counts as alive if ANY one target answers — one
 # offline upstream host shouldn't bounce a tunnel that's still carrying traffic.
 # Invalid targets are warned about and ignored; if none are valid the result is
@@ -603,9 +604,10 @@ report_peers() {
 }
 
 # An interface's role, from a "# Healthcheck-Role = <role>" comment in its conf.
-#   hub    -> the main server that many peers dial into. NEVER restart its
+#   server -> the main VPN server that many peers dial into. NEVER restart its
 #             tunnel: a false positive here would drop every connected peer, and
-#             a hub has no single upstream to test anyway. Monitor + alert only.
+#             a server has no single upstream to test anyway. Monitor + alert only.
+#             "hub" is accepted as a synonym so older confs keep working.
 #   client -> (default, and any unrecognized/absent value) normal behavior:
 #             restart is allowed when --restart is passed.
 # This is the strict, explicit opt-out — independent of the --restart flag and
@@ -617,7 +619,10 @@ iface_role() {
     role=$(awk '
         /^[[:space:]]*#[[:space:]]*Healthcheck-Role[[:space:]]*=/ {
             sub(/^[^=]*=/, "", $0); gsub(/[[:space:]]/,"",$0); print tolower($0); exit }' "$conf")
-    [[ "$role" == "hub" ]] && echo "hub" || echo "client"
+    case "$role" in
+        server|hub) echo "server" ;;
+        *)          echo "client" ;;
+    esac
 }
 
 # Check + optionally restart one interface. Returns 0 healthy, 1 unhealthy.
@@ -625,13 +630,13 @@ process_interface() {
     local iface="$1"
 
     # Is a *tunnel* restart permitted on this interface? Requires --restart AND a
-    # non-hub role. A hub is monitored and alerted on but its tunnel is never
+    # non-server role. A server is monitored and alerted on but its tunnel is never
     # bounced (dropping all peers). Non-disruptive recovery that does NOT drop
-    # peers — starting a stopped firewall service — is still allowed on a hub,
+    # peers — starting a stopped firewall service — is still allowed on a server,
     # since it only restores peer connectivity.
     local may_restart=false
     local role; role=$(iface_role "$iface")
-    if $DO_RESTART && [[ "$role" != "hub" ]]; then may_restart=true; fi
+    if $DO_RESTART && [[ "$role" != "server" ]]; then may_restart=true; fi
 
     local result; result=$(check_interface "$iface")
 
@@ -639,11 +644,11 @@ process_interface() {
         print_warning "${iface}: ${result}"
         log_audit "HEALTHCHECK_FAIL" "interface=${iface} reason=${result}"
 
-        if [[ "$role" == "hub" ]] && $DO_RESTART; then
-            # Hub: alert but never bounce the tunnel — a manual restart is a
+        if [[ "$role" == "server" ]] && $DO_RESTART; then
+            # Server: alert but never bounce the tunnel — a manual restart is a
             # deliberate human decision, not something a timer should do.
-            print_error "${iface}: hub is unhealthy (${result}) — NOT auto-restarting (Healthcheck-Role = hub); restart manually if intended"
-            log_audit "HEALTHCHECK_NORESTART" "interface=${iface} role=hub reason=${result}"
+            print_error "${iface}: server is unhealthy (${result}) — NOT auto-restarting (Healthcheck-Role = server); restart manually if intended"
+            log_audit "HEALTHCHECK_NORESTART" "interface=${iface} role=server reason=${result}"
             return 1
         elif $may_restart; then
             print_info "${iface}: restarting wg-quick@${iface} ..."
