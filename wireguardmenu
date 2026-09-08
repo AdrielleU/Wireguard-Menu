@@ -83,6 +83,7 @@ Usage:
   ${PROG} help             Show this help
   ${PROG} install          Symlink into ${LINK_TARGET%/*}
   ${PROG} uninstall        Remove that symlink
+  ${PROG} test [--all]     Run the test suites (see: ${PROG} test --help)
 
 Commands:
 EOF
@@ -124,6 +125,71 @@ uninstall_link() {
     fi
 }
 
+# Test suites, ordered fast-and-safe first. The split is by SYSTEM IMPACT, which
+# is what you want to know before running one:
+#   fast  — fixtures in a temp dir only; touches no interfaces, units or config
+#   full  — additionally stands up real WireGuard interfaces, a netns and veth
+#           pairs, and drives real systemd units (~2 min)
+FAST_SUITES=(test-verify-config.sh test-installers.sh)
+FULL_SUITES=(test-monitoring.sh)
+
+run_tests() {
+    local -a suites=("${FAST_SUITES[@]}")
+    local mode="fast"
+
+    case "${1:-}" in
+        --all|--full)  suites+=("${FULL_SUITES[@]}"); mode="all" ;;
+        --fast|"")     ;;
+        -h|--help)
+            cat <<EOF
+${PROG} test [--fast|--all]
+
+  --fast   (default) fixture-only suites: $(IFS=' '; echo "${FAST_SUITES[*]}")
+           A few seconds. Creates no interfaces, writes no units, reads no
+           production config — safe to run on a live server at any time.
+
+  --all    the above plus: $(IFS=' '; echo "${FULL_SUITES[*]}")
+           ~2 minutes. Stands up throwaway WireGuard interfaces, a network
+           namespace and veth pairs, and drives real systemd units. Safe (it
+           tears everything down via an EXIT trap and never touches production
+           interfaces) but it does act on the system — run it deliberately.
+
+Requires root. Exits non-zero if any suite fails.
+EOF
+            exit 0
+            ;;
+        *) echo "Unknown test option: $1 (use --fast or --all)" >&2; exit 2 ;;
+    esac
+
+    if [[ $EUID -ne 0 ]]; then
+        echo "test requires root — re-run with sudo" >&2
+        exit 1
+    fi
+
+    local failed=0 suite path
+    for suite in "${suites[@]}"; do
+        path="${REPO_DIR}/${suite}"
+        if [[ ! -x "$path" ]]; then
+            echo "Missing or non-executable suite: $path" >&2
+            failed=$((failed + 1))
+            continue
+        fi
+        echo
+        echo "################  ${suite}  ################"
+        "$path" || failed=$((failed + 1))
+    done
+
+    echo
+    echo "################  ${mode} run complete  ################"
+    if (( failed == 0 )); then
+        echo "All suites passed (${#suites[@]} run)."
+        [[ "$mode" == "fast" ]] && echo "Run '${PROG} test --all' to include the live integration suite."
+        exit 0
+    fi
+    echo "${failed} of ${#suites[@]} suite(s) failed." >&2
+    exit 1
+}
+
 # Run a target script by its real absolute path so it can source utils.sh.
 run_script() {
     local script="$1"; shift
@@ -153,6 +219,9 @@ main() {
         uninstall)
             uninstall_link
             exit 0
+            ;;
+        test)
+            run_tests "$@"
             ;;
     esac
 

@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`wireguardmenu test [--fast|--all]`** — one entry point for the suites,
+  which previously had none. `--fast` (default) runs the fixture-only suites in
+  a few seconds; `--all` adds the live integration suite. The split is by system
+  impact rather than by subject, since "does this create interfaces and drive
+  systemd" is the thing worth knowing before running one. Exits non-zero if any
+  suite fails, so it can gate a commit.
+- `test-lib.sh` — the assertion harness (`section`, `pass`, `fail`, `assert_rc`,
+  `assert_eq`, `assert_ge`, `assert_contains`, `assert_not_contains`,
+  `test_summary`), previously copy-pasted byte-for-byte into all three test
+  scripts along with three near-identical summary blocks. Kept out of `utils.sh`
+  on purpose: every production script sources that, including two that run from
+  systemd timers every 60s and 2min, and none of them should be carrying
+  assertion helpers. It would also have shadowed `verify-config.sh`'s own
+  `section()` — the same silent-override pattern just removed from `setup.sh`
+  and `reset.sh`.
+
 - **Split `set-recoveryservice.sh` into `install-healthcheck.sh` and
   `install-logging.sh`.** The old script installed both timers *and* the
   journal retention drop-in under a name that described none of it. These are

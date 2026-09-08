@@ -726,6 +726,8 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── healthcheck.sh                   # One-shot runtime health check (cron / systemd timer)
 ├── verify-config.sh                 # Config conformance check (does it match our format?)
 ├── test-verify-config.sh            # Fault-injection tests for verify-config.sh
+├── test-installers.sh               # Tests for the installers + retention projection
+├── test-lib.sh                      # Shared test harness (sourced by the test-*.sh suites)
 ├── log-connections.sh                # Connection logger for systemd journal
 ├── install-healthcheck.sh           # Install/enable the healthcheck timer (availability)
 ├── install-logging.sh               # Install/enable the audit-log timer + retention (compliance)
@@ -739,6 +741,36 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── LICENSE                          # MIT License
 └── .gitignore                       # Git ignore patterns
 ```
+
+## Running the tests
+
+```bash
+sudo ./wireguardmenu test          # fast suites only (~7s)
+sudo ./wireguardmenu test --all    # everything, including live integration (~2min)
+sudo ./wireguardmenu test --help   # what each mode actually does
+```
+
+The suites are split by **system impact**, which is what you want to know
+before running one:
+
+| Suite | Checks | Time | Touches |
+| ----- | -----: | ---: | ------- |
+| `test-verify-config.sh` | 62 | ~5s | Temp fixtures only |
+| `test-installers.sh` | 37 | ~2s | Temp fixtures only |
+| `test-monitoring.sh` | 67 | ~2min | Real throwaway interfaces, a netns, veth pairs, real systemd units |
+
+`--fast` (the default) runs the first two: they create no interfaces, write no
+units and read no production config, so they are safe on a live server at any
+time. `--all` adds `test-monitoring.sh`, which does act on the system — it
+stands everything up under PID-derived throwaway names, never touches your
+production interfaces, and tears down via an `EXIT` trap, but run it
+deliberately rather than casually.
+
+Each suite is still runnable on its own (`sudo ./test-installers.sh`), which is
+what you want when iterating on one script. The shared assertion harness lives
+in `test-lib.sh`; it is deliberately not in `utils.sh`, since the production
+scripts — `healthcheck.sh` and `log-connections.sh` run from timers every 60s
+and 2min — have no reason to carry assertion helpers.
 
 ## Manual Setup (no scripts)
 
@@ -923,6 +955,8 @@ key material that is not mode 600, and a missing setup manifest.
 sudo ./test-verify-config.sh         # 62 checks
 sudo ./test-verify-config.sh -k      # keep the fixture dir for inspection
 ```
+
+Or run every suite at once — see [Running the tests](#running-the-tests).
 
 It is purely filesystem-based — it builds throwaway config trees under a temp
 dir and drives every run with `WG_CONFIG_DIR` pointed at them, so unlike

@@ -28,6 +28,7 @@ set -uo pipefail   # not -e — a failed assertion must not abort the whole run
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/utils.sh"
+source "${SCRIPT_DIR}/test-lib.sh"
 
 KEEP=false
 [[ "${1:-}" == "-k" || "${1:-}" == "--keep" ]] && KEEP=true
@@ -39,21 +40,6 @@ for bin in wg awk grep stat; do
 done
 [[ -x "${SCRIPT_DIR}/verify-config.sh" ]] || die "verify-config.sh not found or not executable"
 
-# ---------- test bookkeeping ----------
-PASS=0
-FAIL=0
-section()         { echo; echo -e "${CYAN}== $1 ==${NC}"; }
-pass()            { PASS=$((PASS+1)); echo -e "  ${GREEN}PASS${NC} $1"; }
-fail()            { FAIL=$((FAIL+1)); echo -e "  ${RED}FAIL${NC} $1"; }
-assert_rc()       { if [[ "$1" == "$2" ]]; then pass "$3 (rc=$2)"; else fail "$3 (expected rc=$1, got rc=$2)"; fi; }
-assert_contains() {
-    if [[ "$1" == *"$2"* ]]; then pass "$3"
-    else fail "$3 (output did not contain '$2')"; echo "      ---"; echo "      ${1//$'\n'/$'\n      '}"; echo "      ---"; fi
-}
-assert_not_contains() {
-    if [[ "$1" != *"$2"* ]]; then pass "$3"
-    else fail "$3 (output unexpectedly contained '$2')"; fi
-}
 
 TMPROOT="$(mktemp -d)"
 GOLD="${TMPROOT}/gold"      # pristine conformant fixture, never mutated
@@ -330,13 +316,4 @@ vc -i nosuchiface
 assert_rc 1 "$RC" "an unknown interface fails"
 
 ################################################################################
-echo
-echo "=========================================="
-if (( FAIL == 0 )); then
-    echo -e "${GREEN}All $((PASS)) checks passed.${NC}"
-else
-    echo -e "${RED}${FAIL} of $((PASS + FAIL)) checks failed.${NC}"
-fi
-echo "=========================================="
-(( FAIL == 0 )) || exit 1
-exit 0
+test_summary

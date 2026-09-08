@@ -33,6 +33,7 @@ set -uo pipefail   # not -e — a failed assertion must not abort the whole run
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/utils.sh"
+source "${SCRIPT_DIR}/test-lib.sh"
 
 KEEP=false
 [[ "${1:-}" == "-k" || "${1:-}" == "--keep" ]] && KEEP=true
@@ -44,19 +45,6 @@ for bin in wg wg-quick ip systemctl ping logger journalctl awk; do
     command -v "$bin" &>/dev/null || die "required command not found: $bin"
 done
 
-# ---------- test bookkeeping ----------
-PASS=0
-FAIL=0
-section()         { echo; echo -e "${CYAN}== $1 ==${NC}"; }
-pass()            { PASS=$((PASS+1)); echo -e "  ${GREEN}PASS${NC} $1"; }
-fail()            { FAIL=$((FAIL+1)); echo -e "  ${RED}FAIL${NC} $1"; }
-assert_rc()       { if [[ "$1" == "$2" ]]; then pass "$3 (rc=$2)"; else fail "$3 (expected rc=$1, got rc=$2)"; fi; }
-assert_eq()       { if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected '$1', got '$2')"; fi; }
-assert_ge()       { if (( $1 >= $2 )); then pass "$3"; else fail "$3 (expected >= $2, got $1)"; fi; }
-assert_contains() {
-    if [[ "$1" == *"$2"* ]]; then pass "$3"
-    else fail "$3 (output did not contain '$2')"; echo "      ---"; echo "      ${1//$'\n'/$'\n      '}"; echo "      ---"; fi
-}
 
 # ---------- resource selection ----------
 SFX=$(( $$ % 10000 ))
@@ -476,12 +464,4 @@ assert_eq "$before_state" "$(cat "${STATE}/${LCA}.state" 2>/dev/null)" \
     "a failed dump leaves the existing state file intact"
 
 ################################################################################
-echo
-TOTAL=$((PASS+FAIL))
-if (( FAIL == 0 )); then
-    echo -e "${GREEN}All ${TOTAL} checks passed.${NC}"
-    exit 0
-else
-    echo -e "${RED}${FAIL} of ${TOTAL} checks failed.${NC}"
-    exit 1
-fi
+test_summary
