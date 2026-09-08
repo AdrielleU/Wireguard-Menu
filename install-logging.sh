@@ -1,0 +1,212 @@
+#!/bin/bash
+################################################################################
+# WireGuard connection-audit logger installer
+# Description: Install (or refresh) the connection audit-log timer, pointed at
+#              wherever THIS repo actually lives. The unit's ExecStart/
+#              Documentation paths are rewritten at install time from this
+#              script's own location, so nothing is locked to a hardcoded path.
+#
+# This installs the AUDIT control — the connect/disconnect trail that
+# §164.312(b) asks for. It is deliberately separate from install-healthcheck.sh
+# (the availability control) so a compliance install can be enabled, verified
+# and reported on without dragging in auto-restart behaviour, and vice versa.
+#
+# Retention is the part that actually decides whether the trail survives long
+# enough to be worth anything. journald retention is host-wide and SIZE WINS
+# OVER AGE: once SystemMaxUse is reached the oldest entries are dropped however
+# short of MaxRetentionSec they are. So --check-retention measures this host's
+# real journal growth and projects whether the configured cap can hold the
+# window you are aiming for. Run it after install, and again whenever the
+# host's logging volume changes.
+#
+# Idempotent: systemd identifies units by filename, so re-running overwrites
+# them in place and re-enabling is a no-op.
+#
+# Usage:
+#   sudo ./install-logging.sh                   # install/refresh + enable
+#   sudo ./install-logging.sh --with-retention  # ... and widen journal retention
+#   sudo ./install-logging.sh --check-retention # project the achievable window
+#   sudo ./install-logging.sh --status          # timer state + retention check
+#   sudo ./install-logging.sh --uninstall       # stop, disable, remove units
+################################################################################
+
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+source "${REPO_DIR}/utils.sh"
+
+BASE="wireguard-log-connections"
+JOURNALD_DROPIN="journald-wireguard-audit.conf"
+JOURNALD_DST="/etc/systemd/journald.conf.d"
+
+# The window the audit trail is expected to cover. HIPAA §164.316(b)(2)(i) is
+# 6 years; override for a different regime.
+RETENTION_TARGET_DAYS="${RETENTION_TARGET_DAYS:-2192}"
+
+################################################################################
+# RETENTION
+################################################################################
+
+# Opt-in: this widens retention for the WHOLE journal (it is not per-tag) and
+# restarts systemd-journald, so it is never applied by a bare install.
+install_retention() {
+    [[ -f "${REPO_DIR}/systemd/${JOURNALD_DROPIN}" ]] || die "Missing ${REPO_DIR}/systemd/${JOURNALD_DROPIN}"
+    mkdir -p "$JOURNALD_DST"
+    install -m 0644 "${REPO_DIR}/systemd/${JOURNALD_DROPIN}" "${JOURNALD_DST}/${JOURNALD_DROPIN}" \
+        || die "Failed to install ${JOURNALD_DROPIN}"
+    print_success "installed ${JOURNALD_DST}/${JOURNALD_DROPIN}"
+    if systemctl restart systemd-journald; then
+        print_success "journald restarted"
+    else
+        print_warning "journald restart failed — the drop-in applies at next boot"
+    fi
+}
+
+# Echo the effective SystemMaxUse in bytes, or nothing if it cannot be read.
+# JOURNALD_CONF_ROOT is env-overridable so the test suite can point this at a
+# fixture instead of the host's real journald config.
+effective_max_use() {
+    local root="${JOURNALD_CONF_ROOT:-}"
+    local v=""
+    # Later drop-ins win; read them in the order systemd would.
+    local f
+    for f in "${root}/etc/systemd/journald.conf" "${root}"/etc/systemd/journald.conf.d/*.conf \
+             "${root}"/run/systemd/journald.conf.d/*.conf; do
+        [[ -f "$f" ]] || continue
+        local hit
+        hit=$(grep -iE '^[[:space:]]*SystemMaxUse[[:space:]]*=' "$f" | tail -n1 | cut -d= -f2- | tr -d '[:space:]')
+        [[ -n "$hit" ]] && v="$hit"
+    done
+    [[ -n "$v" ]] || return 0
+
+    # systemd suffixes: K M G T (powers of 1024), bare = bytes.
+    local num unit
+    num="${v%[KMGTkmgt]}"; unit="${v#"$num"}"
+    [[ "$num" =~ ^[0-9]+$ ]] || return 0
+    case "${unit^^}" in
+        K) echo $(( num * 1024 )) ;;
+        M) echo $(( num * 1024 * 1024 )) ;;
+        G) echo $(( num * 1024 * 1024 * 1024 )) ;;
+        T) echo $(( num * 1024 * 1024 * 1024 * 1024 )) ;;
+        *) echo "$num" ;;
+    esac
+}
+
+human() {   # bytes -> human, one decimal
+    awk -v b="$1" 'BEGIN{
+        split("B KB MB GB TB", u, " "); i=1
+        while (b >= 1024 && i < 5) { b /= 1024; i++ }
+        printf "%.1f%s", b, u[i]
+    }'
+}
+
+# Measure real journal growth and project the achievable retention window.
+# This is the check that catches the common failure: a 6-year MaxRetentionSec
+# sitting behind a SystemMaxUse that evicts after a few months.
+check_retention() {
+    echo
+    echo -e "${CYAN}== journal retention ==${NC}"
+
+    command -v journalctl &>/dev/null || { print_warning "journalctl not found"; return 1; }
+
+    local usage_raw usage_bytes
+    usage_raw=$(journalctl --disk-usage 2>/dev/null)
+    usage_bytes=$(grep -oE '[0-9.]+[KMGT]?B?' <<<"$usage_raw" | tail -n1)
+    # Reuse the suffix parser by normalising "1.8G" style output.
+    usage_bytes=$(awk -v s="$usage_raw" 'BEGIN{
+        if (match(s, /[0-9.]+[KMGT]/)) {
+            v = substr(s, RSTART, RLENGTH)
+            n = v + 0; u = substr(v, length(v), 1)
+            m = (u=="K")?1024:(u=="M")?1048576:(u=="G")?1073741824:(u=="T")?1099511627776:1
+            printf "%d", n * m
+        }
+    }')
+    [[ -n "$usage_bytes" && "$usage_bytes" -gt 0 ]] || { print_warning "could not read journal disk usage"; return 1; }
+
+    # journalctl streams oldest-first, so head -1 stops early on a big journal.
+    local oldest_epoch now_epoch span_days
+    oldest_epoch=$(journalctl -o short-unix --no-pager 2>/dev/null | head -n1 | cut -d. -f1)
+    [[ "$oldest_epoch" =~ ^[0-9]+$ ]] || { print_warning "could not read the oldest journal entry"; return 1; }
+    now_epoch=$(date +%s)
+    span_days=$(( (now_epoch - oldest_epoch) / 86400 ))
+    (( span_days > 0 )) || { print_info "journal spans under a day — too little history to project"; return 0; }
+
+    local per_day required max_use
+    per_day=$(( usage_bytes / span_days ))
+    required=$(( per_day * RETENTION_TARGET_DAYS ))
+    max_use=$(effective_max_use)
+
+    printf '  journal on disk    %s over %s days (~%s/day)\n' \
+        "$(human "$usage_bytes")" "$span_days" "$(human "$per_day")"
+    printf '  target window      %s days\n' "$RETENTION_TARGET_DAYS"
+    printf '  needs about        %s to hold that window\n' "$(human "$required")"
+
+    if [[ -z "$max_use" ]]; then
+        printf '  SystemMaxUse       not set — journald defaults to 10%% of the filesystem\n'
+        print_warning "SystemMaxUse is unset, so the achievable window depends on disk size. Set it explicitly to make retention verifiable."
+        return 0
+    fi
+
+    printf '  SystemMaxUse       %s\n' "$(human "$max_use")"
+    local achievable=$(( max_use / per_day ))
+    printf '  achievable window  ~%s days\n' "$achievable"
+
+    if (( max_use >= required )); then
+        print_success "Retention cap is sufficient for the ${RETENTION_TARGET_DAYS}-day window."
+        return 0
+    fi
+    print_error "Retention cap is too small: it holds ~${achievable} days, not ${RETENTION_TARGET_DAYS}."
+    echo "    Size wins over age, so entries are evicted silently well before"
+    echo "    MaxRetentionSec elapses. Raise SystemMaxUse to at least $(human "$required") in"
+    echo "    ${JOURNALD_DST}/${JOURNALD_DROPIN} (and confirm the filesystem has room),"
+    echo "    or ship the audit trail off-box to a log store sized for the window."
+    return 1
+}
+
+################################################################################
+# UNITS
+################################################################################
+
+install_units() {
+    unit_warn_on_cron "log-connections.sh"
+    unit_install_service "$REPO_DIR" "$BASE"
+    unit_install_timer   "$REPO_DIR" "$BASE"
+    unit_enable_timer    "$BASE"
+    print_success "Audit-log timer enabled — unit points at ${REPO_DIR}"
+    echo
+    systemctl list-timers "${BASE}.timer" --all --no-pager
+}
+
+uninstall_units() {
+    unit_remove "$BASE"
+    print_success "Uninstalled. (Scripts in ${REPO_DIR} are left untouched.)"
+    # Deliberately NOT removed: shrinking retention here would discard existing
+    # audit history, which is the opposite of what an uninstall should risk.
+    if [[ -f "${JOURNALD_DST}/${JOURNALD_DROPIN}" ]]; then
+        print_info "Journal retention drop-in left in place: ${JOURNALD_DST}/${JOURNALD_DROPIN}"
+        print_info "Remove it manually (then restart systemd-journald) to revert retention."
+    fi
+}
+
+show_status() {
+    systemctl list-timers "${BASE}.timer" --all --no-pager
+    echo
+    local n
+    n=$(journalctl -t wireguard-connections --no-pager 2>/dev/null | grep -c . || true)
+    print_info "audit records currently in the journal: ${n:-0}"
+    check_retention
+}
+
+main() {
+    check_root
+    case "${1:-}" in
+        --uninstall)       uninstall_units ;;
+        --with-retention)  install_units; echo; install_retention; check_retention ;;
+        --check-retention) check_retention ;;
+        --status)          show_status ;;
+        "")                install_units; check_retention ;;
+        *)                 die "Unknown option: $1 (use --with-retention, --check-retention, --status, --uninstall, or no args)" ;;
+    esac
+}
+
+main "$@"

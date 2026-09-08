@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Split `set-recoveryservice.sh` into `install-healthcheck.sh` and
+  `install-logging.sh`.** The old script installed both timers *and* the
+  journal retention drop-in under a name that described none of it. These are
+  two different controls — availability (is the tunnel up, restart it if not)
+  and audit (the connect/disconnect trail §164.312(b) asks for) — and they are
+  now installable, verifiable and removable independently, so a compliance
+  install does not drag in auto-restart behaviour or vice versa. The unit
+  rewriting they shared lives in `utils.sh` (`unit_install_service`,
+  `unit_install_timer`, `unit_enable_timer`, `unit_remove`), so the split cost
+  no duplication. Unit filenames are unchanged, so existing installs are
+  re-pointed rather than orphaned.
+- **`install-logging.sh --check-retention`** — measures the host's real journal
+  growth and projects the retention window the current `SystemMaxUse` can
+  actually hold, exiting non-zero when it falls short of the target (default
+  2192 days per HIPAA §164.316(b)(2)(i); set `RETENTION_TARGET_DAYS` to
+  change). This exists because journald retention is host-wide and **size wins
+  over age**: a `MaxRetentionSec=6year` sitting behind an undersized
+  `SystemMaxUse` evicts silently, and nothing reported it. Measured on a modest
+  server, the previously shipped 2G cap held ~724 days — under two years, not
+  six.
+- `test-installers.sh` — 37 checks covering unit-path rewriting (including that
+  the healthcheck's `--restart` argument survives it), that each installer
+  touches only its own units, rejection of unsafe repo paths, and the retention
+  projection across suffix parsing, drop-in merge order, undersized/sufficient/
+  unset caps and a configurable target window. Unit writes are redirected via
+  `UNIT_DST` and retention reads a fixture via `JOURNALD_CONF_ROOT`, so the
+  suite never writes to `/etc/systemd/system` or reads the host's journald
+  config.
+
 - **`verify-config.sh` (`wireguardmenu verify`)** — asserts that an interface's
   on-disk state matches the conventions these scripts write and read. It is a
   conformance check, not a health check, and never touches the running tunnel:
@@ -47,8 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pairing lines by hand. A mid-session endpoint change (roaming) reuses the
   same session id, so a roam reads as one session rather than two.
 - `systemd/journald-wireguard-audit.conf` — journal retention drop-in
-  (`Storage=persistent`, `SystemMaxUse=2G`, `MaxRetentionSec=6year`), installed
-  by `set-recoveryservice.sh --with-retention`. Retention was previously a
+  (`Storage=persistent`, `SystemMaxUse=8G`, `MaxRetentionSec=6year`), installed
+  by `install-logging.sh --with-retention`. Retention was previously a
   documented manual step that was easy to skip, leaving the audit trail to age
   out well before the 6-year HIPAA window. Left in place on `--uninstall`,
   since shrinking retention would discard existing history.
@@ -89,6 +118,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous plain tagged line rather than losing the record.
 
 ### Fixed
+- `unit_install_service()` checked the source file's existence before
+  validating the repo path, so a path containing `#` (which breaks the `sed`
+  delimiter used for unit rewriting) reported a misleading "missing file"
+  error instead of the real cause. Caught by `test-installers.sh`.
+- The shipped journal retention drop-in paired `MaxRetentionSec=6year` with
+  `SystemMaxUse=2G`. Since size wins over age, that silently capped the audit
+  trail at roughly two years on a typical host — well short of the six-year
+  window it advertised. Raised to 8G, and `--check-retention` now verifies the
+  figure per host rather than asking anyone to trust it.
 - `log-connections.sh`: a peer deleted from the config while connected left a
   `CONNECT` with no matching `DISCONNECT`, dangling forever — removed peers
   are now swept and closed with `reason=peer-removed`.

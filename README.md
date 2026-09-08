@@ -727,6 +727,8 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── verify-config.sh                 # Config conformance check (does it match our format?)
 ├── test-verify-config.sh            # Fault-injection tests for verify-config.sh
 ├── log-connections.sh                # Connection logger for systemd journal
+├── install-healthcheck.sh           # Install/enable the healthcheck timer (availability)
+├── install-logging.sh               # Install/enable the audit-log timer + retention (compliance)
 ├── systemd/
 │   ├── journald-wireguard-audit.conf       # Journal retention drop-in (opt-in)
 │   ├── wireguard-log-connections.service   # Oneshot service for the connection logger
@@ -989,13 +991,27 @@ stack to get — control over a WireGuard instance with minimal ongoing effort.
 
 ### Install as a systemd timer (recommended)
 
-Use the installer — it rewrites each unit's `ExecStart`/`Documentation` to
-wherever this repo actually lives, so you are not locked to a hardcoded path.
-It's idempotent, so re-run it after moving the repo or pulling changes:
+There are **two installers**, because these are two different controls and you
+should be able to enable, verify and report on them independently:
+
+| Installer | Control | Installs |
+| --------- | ------- | -------- |
+| `install-healthcheck.sh` | Availability — is the tunnel up, restart it if not | `wireguard-healthcheck.{service,timer}` |
+| `install-logging.sh` | Audit — the connect/disconnect trail | `wireguard-log-connections.{service,timer}`, and the journal retention drop-in with `--with-retention` |
+
+Both rewrite the unit's `ExecStart`/`Documentation` to wherever this repo
+actually lives, so you are not locked to a hardcoded path, and both are
+idempotent — re-run after moving the repo or pulling changes:
 
 ```bash
-sudo ./set-recoveryservice.sh              # install/refresh + enable + start
-sudo ./set-recoveryservice.sh --uninstall  # stop, disable, remove units
+sudo ./install-healthcheck.sh              # install/refresh + enable + start
+sudo ./install-healthcheck.sh --status     # timer state
+sudo ./install-healthcheck.sh --uninstall  # stop, disable, remove units
+
+sudo ./install-logging.sh                  # install/refresh + enable + start
+sudo ./install-logging.sh --with-retention # ... and widen journal retention
+sudo ./install-logging.sh --check-retention # project the achievable window
+sudo ./install-logging.sh --status         # timer state + record count + retention
 ```
 
 > Don't `cp` the units by hand — the copies in `systemd/` carry a placeholder
@@ -1045,7 +1061,7 @@ done
 ```
 
 (The `.service` files legitimately differ in their rewritten paths — re-running
-`set-recoveryservice.sh` is the fix either way.)
+`install-healthcheck.sh` is the fix either way.)
 
 ### Or cron (if you prefer)
 
@@ -1317,7 +1333,7 @@ silently ages out long before a 6-year requirement. Install the drop-in shipped
 with this repo:
 
 ```bash
-sudo ./set-recoveryservice.sh --with-retention
+sudo ./install-logging.sh --with-retention
 ```
 
 That installs `systemd/journald-wireguard-audit.conf` to
@@ -1327,7 +1343,7 @@ same thing:
 ```ini
 [Journal]
 Storage=persistent
-SystemMaxUse=2G
+SystemMaxUse=8G
 MaxRetentionSec=6year
 ```
 
@@ -1349,8 +1365,34 @@ Two caveats worth knowing before you rely on the number:
 
 `Storage=persistent` ensures logs survive reboots (`/var/log/journal/` instead
 of `/run/log/journal/`). `SystemMaxUse` caps disk usage; `MaxRetentionSec`
-caps age. Tune to your environment — 2 GB is plenty for a small VPN's worth
-of connection events.
+caps age.
+
+**Do not trust the shipped number — measure.** The two caveats above combine
+into the failure that actually bites: a `MaxRetentionSec=6year` sitting behind
+a `SystemMaxUse` that evicts after a few months, with nothing to tell you. The
+achievable window is `SystemMaxUse ÷ the host's real journal growth rate`, and
+that rate is entirely host-specific. So measure it:
+
+```bash
+sudo ./install-logging.sh --check-retention
+```
+
+```
+  journal on disk    1.8GB over 652 days (~2.8MB/day)
+  target window      2192 days
+  needs about        6.1GB to hold that window
+  SystemMaxUse       2.0GB
+  achievable window  ~724 days
+[✗] Retention cap is too small: it holds ~724 days, not 2192.
+```
+
+That is a real reading from a modest server — a 2 GB cap held under two years,
+not six. It exits non-zero when the cap is short, so it can gate a compliance
+check. Set `RETENTION_TARGET_DAYS` for a window other than HIPAA's 6 years.
+
+A large cap is safe to set: journald also honours `SystemKeepFree` (15% of the
+filesystem by default) and stops before filling the disk, so the effective
+limit is whichever binds first.
 
 ### Config-change audit (separate tag)
 

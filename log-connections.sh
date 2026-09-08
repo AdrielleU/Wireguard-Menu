@@ -24,7 +24,7 @@
 #
 # Retention (HIPAA): the journal keeps ~9 months by default. For a longer
 # window install the drop-in shipped with this repo:
-#   sudo ./set-recoveryservice.sh --with-retention
+#   sudo ./install-logging.sh --with-retention
 ################################################################################
 
 set -uo pipefail   # not -e — keep going if one interface dump fails

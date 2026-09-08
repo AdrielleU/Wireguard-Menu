@@ -449,6 +449,72 @@ peer_remove() {
 #   SELINUX_PORT|wireguard_port_t:udp:51820
 #   FILE|/etc/wireguard/wg0.conf
 #   DIR|/etc/wireguard/wg0
+# ---------- systemd unit installation ----------
+# Shared by install-healthcheck.sh and install-logging.sh so the two installers
+# stay one implementation. Units are identified by filename, so re-installing
+# overwrites in place and can never produce a duplicate.
+
+UNIT_DST="${UNIT_DST:-/etc/systemd/system}"
+
+# Install <base>.service, rewriting ExecStart/Documentation to point at the
+# script inside THIS repo rather than whatever path was baked into the shipped
+# unit — so the repo can live anywhere and a re-run re-points the units.
+unit_install_service() {
+    local repo_dir="$1" base="$2"
+    # Validate the path before looking at the filesystem: '#' is the sed
+    # delimiter used below, so it must be rejected on its own terms rather than
+    # being masked by a "missing file" error.
+    case "$repo_dir" in *'#'*) die "Repo path contains '#', which breaks unit rewriting: ${repo_dir}";; esac
+    local src="${repo_dir}/systemd/${base}.service"
+    [[ -f "$src" ]] || die "Missing ${src}"
+
+    sed -E \
+        -e "s#^ExecStart=[^ ]*/([A-Za-z0-9_.-]+\.sh)#ExecStart=${repo_dir}/\1#" \
+        -e "s#^Documentation=file://[^ ]*/([A-Za-z0-9_.-]+\.sh)#Documentation=file://${repo_dir}/\1#" \
+        "$src" > "${UNIT_DST}/${base}.service" \
+        || die "Failed to write ${UNIT_DST}/${base}.service"
+    print_success "installed ${base}.service"
+}
+
+# Timers carry no paths, so they copy verbatim.
+unit_install_timer() {
+    local repo_dir="$1" base="$2"
+    local src="${repo_dir}/systemd/${base}.timer"
+    [[ -f "$src" ]] || die "Missing ${src}"
+    cp "$src" "${UNIT_DST}/${base}.timer" || die "Failed to copy ${base}.timer"
+    print_success "installed ${base}.timer"
+}
+
+# restart (not just start) so a changed interval takes effect immediately.
+unit_enable_timer() {
+    local base="$1"
+    systemctl daemon-reload
+    systemctl enable "${base}.timer" >/dev/null 2>&1
+    systemctl restart "${base}.timer"
+}
+
+unit_remove() {
+    local base="$1"
+    systemctl disable --now "${base}.timer" 2>/dev/null || true
+    local f
+    for f in "${base}.timer" "${base}.service"; do
+        [[ -e "${UNIT_DST}/${f}" ]] || continue
+        rm -f "${UNIT_DST}/${f}" && print_success "removed ${f}"
+    done
+    systemctl daemon-reload
+}
+
+# A cron entry running the same script would double-execute alongside the
+# timer — the one real double-run trap. Warn, never fail.
+unit_warn_on_cron() {
+    local script="$1"
+    if { crontab -l 2>/dev/null; cat /etc/cron.d/* /etc/crontab 2>/dev/null; } \
+         | grep -Fq "$script"; then
+        print_warning "A cron entry references ${script} — it will double-run alongside the timer. Remove the cron line or the timer, not both."
+    fi
+}
+
+# ---------- setup manifest ----------
 manifest_path() {
     local iface="$1"
     echo "${WG_CONFIG_DIR}/.manifest-${iface}"
