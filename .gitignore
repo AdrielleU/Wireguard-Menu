@@ -45,6 +45,11 @@ build/
 *.key
 *.pem
 *.conf
+# Exception: a shipped unit drop-in, not a WireGuard config. The rule above
+# exists to keep peer configs (which carry private keys) out of the repo; this
+# file has no secrets and set-recoveryservice.sh --with-retention needs it
+# present in a fresh clone.
+!systemd/journald-wireguard-audit.conf
 privatekey*
 publickey*
 *.qr

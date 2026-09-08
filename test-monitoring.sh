@@ -408,8 +408,16 @@ if $handshook; then pass "real handshake established between $LCA and $LCB"
 else fail "could not establish a handshake — CONNECT/DISCONNECT tests will be unreliable"; fi
 
 LC_START="$(date '+%Y-%m-%d %H:%M:%S')"
-connects()    { journalctl -t wireguard-connections --since "$LC_START" 2>/dev/null | grep -c "CONNECT peer=testpeer iface=${LCA}"; }
-disconnects() { journalctl -t wireguard-connections --since "$LC_START" 2>/dev/null | grep -c "DISCONNECT peer=testpeer iface=${LCA}"; }
+# Counted via indexed journald fields rather than grepping MESSAGE. Besides
+# exercising the structured schema, this avoids a trap in the text form:
+# "DISCONNECT peer=..." *contains* "CONNECT peer=...", so a substring match
+# would count every disconnect as a connect too.
+lc_events()   { journalctl WG_ACTION="$1" WG_PEER=testpeer WG_INTERFACE="${LCA}" \
+                    --since "$LC_START" -o cat 2>/dev/null; }
+connects()    { lc_events CONNECT    | grep -c . ; }
+disconnects() { lc_events DISCONNECT | grep -c . ; }
+# Pull one field out of the most recent event of a given action.
+lc_field()    { lc_events "$1" | tail -n1 | grep -oE "(^| )$2=[^ ]+" | tail -n1 | cut -d= -f2-; }
 
 # 1. First poll of a freshly-connected peer logs a CONNECT, resolving the
 #    peer name from the BEGIN_PEER block in the config.
@@ -430,6 +438,42 @@ sleep 2
 lc 1
 sleep 1
 assert_ge "$(disconnects)" 1 "DISCONNECT logged when peer goes idle"
+
+# 4. Standardized schema: the connection logger must emit the same shape as
+#    every other audit record (action=<VERB> + indexed WG_* fields), not the
+#    bare-verb form it used before.
+assert_contains "$(lc_events CONNECT | tail -n1)" "action=CONNECT" \
+    "CONNECT message uses the standard action=<VERB> form"
+assert_contains "$(lc_events CONNECT | tail -n1)" "interface=${LCA}" \
+    "CONNECT uses the standard 'interface=' key (not 'iface=')"
+assert_eq "wireguard-connections" \
+    "$(journalctl WG_ACTION=CONNECT WG_PEER=testpeer --since "$LC_START" \
+        -o json --no-pager 2>/dev/null | tail -n1 \
+        | sed -n 's/.*"SYSLOG_IDENTIFIER"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')" \
+    "events are indexed under the wireguard-connections identifier"
+
+# 5. Trackability: a session id ties the CONNECT to its DISCONNECT, and the
+#    DISCONNECT reports how long the session lasted.
+CONN_SESS="$(lc_field CONNECT session)"
+DISC_SESS="$(lc_field DISCONNECT session)"
+if [[ -n "$CONN_SESS" ]]; then pass "CONNECT carries a session id ($CONN_SESS)"
+else fail "CONNECT carries a session id"; fi
+assert_eq "$CONN_SESS" "$DISC_SESS" "DISCONNECT reports the same session id as its CONNECT"
+
+DISC_DUR="$(lc_field DISCONNECT duration_sec)"
+if [[ "$DISC_DUR" =~ ^[0-9]+$ ]]; then pass "DISCONNECT reports duration_sec ($DISC_DUR)"
+else fail "DISCONNECT reports a numeric duration_sec (got '$DISC_DUR')"; fi
+
+# 6. A failed dump must not be read as "everybody disconnected": the state file
+#    has to survive so open sessions are not closed by a transient error.
+before_state="$(cat "${STATE}/${LCA}.state" 2>/dev/null)"
+lc_missing() { OUT="$(env WG_CONFIG_DIR="$TMPROOT" WIREGUARD_CONN_STATE_DIR="$STATE" \
+                          WIREGUARD_CONN_ACTIVE_WITHIN=5 \
+                          "${SCRIPT_DIR}/log-connections.sh" -i "wgt-nonexistent" 2>&1)"; RC=$?; }
+lc_missing
+assert_rc 0 "$RC" "logger survives an interface whose dump fails"
+assert_eq "$before_state" "$(cat "${STATE}/${LCA}.state" 2>/dev/null)" \
+    "a failed dump leaves the existing state file intact"
 
 ################################################################################
 echo

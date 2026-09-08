@@ -7,7 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Standardized audit log schema across every script.** `log-connections.sh`
+  previously bypassed `log_audit()` and emitted its own shape (bare
+  `CONNECT ...`, key `iface=`, no `user`/`source_ip`) under its own tag, so an
+  auditor had to learn two formats. All records now route through one emitter
+  in `utils.sh` and share the form
+  `action=<VERB> [user= source_ip=] <k=v> ...`, with `WG_SCHEMA=1` marking the
+  version. **Breaking for saved queries:** connection events now read
+  `action=CONNECT` (was `CONNECT`) and `interface=` (was `iface=`).
+- Every audit record now also carries **indexed journald fields** — `WG_ACTION`
+  for the verb and `WG_<KEY>` per `k=v` pair — so auditing is a field query
+  (`journalctl WG_PEER=alice --since -30d`) instead of a grep. Messages stay
+  human-readable, and hosts whose `logger` lacks `--journald` fall back to the
+  previous plain tagged line rather than losing the record.
+
 ### Added
+- **Session tracking in `log-connections.sh`.** Each connected period gets a
+  `session` id shared by its `CONNECT` and `DISCONNECT`, and the `DISCONNECT`
+  reports `duration_sec`, so "how long was this peer on?" no longer requires
+  pairing lines by hand. A mid-session endpoint change (roaming) reuses the
+  same session id, so a roam reads as one session rather than two.
+- `systemd/journald-wireguard-audit.conf` — journal retention drop-in
+  (`Storage=persistent`, `SystemMaxUse=2G`, `MaxRetentionSec=6year`), installed
+  by `set-recoveryservice.sh --with-retention`. Retention was previously a
+  documented manual step that was easy to skip, leaving the audit trail to age
+  out well before the 6-year HIPAA window. Left in place on `--uninstall`,
+  since shrinking retention would discard existing history.
+
+### Fixed
+- `log-connections.sh`: a peer deleted from the config while connected left a
+  `CONNECT` with no matching `DISCONNECT`, dangling forever — removed peers
+  are now swept and closed with `reason=peer-removed`.
+- `log-connections.sh`: a failed `wg show` dump truncated the state file,
+  which discarded every open session and re-logged the whole peer set as fresh
+  `CONNECT`s on the next successful poll. A failed dump now leaves state
+  untouched and logs nothing.
+- `test-monitoring.sh`: the connect counter matched a substring that
+  `DISCONNECT` also contains, so disconnects were counted as connects. It now
+  counts via indexed journald fields.
 - Initial public release preparation
 - Standard open source project files (LICENSE, CONTRIBUTING, SECURITY, etc.)
 - `healthcheck.sh`: optional **upstream reachability check** for site/client

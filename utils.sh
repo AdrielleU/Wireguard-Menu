@@ -105,6 +105,90 @@ backup_config() {
 }
 
 # ---------- audit logging (HIPAA / systemd journal) ----------
+# Every audit record this toolkit emits — admin actions, healthcheck results,
+# and peer connect/disconnect — uses ONE schema, so an auditor learns a single
+# shape instead of one per script:
+#
+#   MESSAGE      action=<ACTION> user=<u> source_ip=<ip> <k=v> ...
+#   WG_SCHEMA    schema version (bump when a field changes meaning)
+#   WG_ACTION    the event verb, also exposed as an indexed journald field
+#   WG_<KEY>     one indexed field per k=v pair in <details>
+#
+# The structured fields are what make the journal trackable without grep:
+#   journalctl WG_ACTION=CONNECT
+#   journalctl WG_PEER=alice --since -30d -o short-iso
+# MESSAGE stays human-readable so plain `journalctl -t <tag>` is still useful.
+WG_LOG_SCHEMA=1
+
+# Emit one audit record. Internal — callers use log_audit / log_conn_event.
+# Usage: _audit_emit <tag> <facility.severity> <action> <details>
+# <priority> is the syslog name pair (e.g. authpriv.notice), because the
+# fallback path below feeds it straight to `logger -p`, which rejects numbers.
+# <details> is a space-separated k=v list; each pair also becomes a WG_<KEY>
+# field. Values containing spaces stay intact in MESSAGE but are split across
+# fields, so keep detail values space-free (the existing callers all do).
+_audit_emit() {
+    local tag="$1" priority="$2" action="$3" details="${4:-}"
+    local message="action=${action} ${details}"
+    command -v logger &>/dev/null || return 0
+
+    # Older util-linux has no --journald; fall back to a plain tagged line so
+    # the audit trail never silently disappears on such a host.
+    if ! _audit_have_journald; then
+        logger -t "$tag" -p "$priority" "$message"
+        return 0
+    fi
+
+    # journald's native protocol wants the numeric pair instead.
+    local facility severity
+    case "${priority%%.*}" in
+        kern) facility=0 ;;  user)     facility=1  ;;  daemon) facility=3  ;;
+        auth) facility=4 ;;  authpriv) facility=10 ;;  *)      facility=1  ;;
+    esac
+    case "${priority##*.}" in
+        emerg) severity=0 ;;  alert)   severity=1 ;;  crit)   severity=2 ;;
+        err)   severity=3 ;;  warning) severity=4 ;;  notice) severity=5 ;;
+        info)  severity=6 ;;  debug)   severity=7 ;;  *)      severity=6 ;;
+    esac
+
+    {
+        # MESSAGE first: journald's native format ends a field at the newline,
+        # and this is the only value that may contain spaces.
+        printf 'MESSAGE=%s\n' "$message"
+        printf 'PRIORITY=%s\n' "$severity"
+        printf 'SYSLOG_FACILITY=%s\n' "$facility"
+        printf 'SYSLOG_IDENTIFIER=%s\n' "$tag"
+        printf 'WG_SCHEMA=%s\n' "$WG_LOG_SCHEMA"
+        printf 'WG_ACTION=%s\n' "$action"
+
+        local pair key val
+        for pair in $details; do
+            [[ "$pair" == *=* ]] || continue
+            key="${pair%%=*}"
+            val="${pair#*=}"
+            # journald field names are [A-Z0-9_] and cannot lead with a digit
+            # or underscore; anything that will not normalize is dropped from
+            # the fields but is still readable in MESSAGE.
+            key="$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
+            [[ -n "$key" && "$key" =~ ^[A-Z] ]] || continue
+            printf 'WG_%s=%s\n' "$key" "$val"
+        done
+    } | logger --journald 2>/dev/null
+}
+
+# Cached capability probe — this runs on every logged event.
+_audit_have_journald() {
+    if [[ -z "${_WG_HAVE_JOURNALD:-}" ]]; then
+        if logger --help 2>&1 | grep -q -- '--journald'; then
+            _WG_HAVE_JOURNALD=yes
+        else
+            _WG_HAVE_JOURNALD=no
+        fi
+    fi
+    [[ "$_WG_HAVE_JOURNALD" == yes ]]
+}
+
+# Admin/operational actions (tag: wireguard-audit, auth.info).
 log_audit() {
     local action="$1"
     local details="$2"
@@ -112,8 +196,17 @@ log_audit() {
     local source_ip
     user=$(whoami)
     source_ip=$(who am i 2>/dev/null | awk '{print $5}' | tr -d '()')
-    logger -t wireguard-audit -p auth.info \
-        "action=$action user=$user source_ip=${source_ip:-local} $details"
+    _audit_emit wireguard-audit auth.info "$action" \
+        "user=$user source_ip=${source_ip:-local} $details"
+}
+
+# Peer connect/disconnect events (tag: wireguard-connections, authpriv.notice).
+# Separate tag because retention and access rules for peer activity usually
+# differ from admin actions, but the schema is identical.
+log_conn_event() {
+    local action="$1"
+    local details="$2"
+    _audit_emit wireguard-connections authpriv.notice "$action" "$details"
 }
 
 # ---------- validation ----------

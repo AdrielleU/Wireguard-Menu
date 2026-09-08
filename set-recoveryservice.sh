@@ -13,8 +13,9 @@
 # run after moving the repo or pulling changes.
 #
 # Usage:
-#   sudo ./set-recoveryservice.sh              # install/refresh + enable + start
-#   sudo ./set-recoveryservice.sh --uninstall  # stop, disable, and remove units
+#   sudo ./set-recoveryservice.sh                   # install/refresh + enable
+#   sudo ./set-recoveryservice.sh --with-retention  # ... and extend journal retention
+#   sudo ./set-recoveryservice.sh --uninstall       # stop, disable, remove units
 ################################################################################
 
 set -uo pipefail
@@ -26,6 +27,25 @@ UNIT_SRC="${REPO_DIR}/systemd"
 UNIT_DST="/etc/systemd/system"
 TIMERS=(wireguard-healthcheck.timer wireguard-log-connections.timer)
 SERVICES=(wireguard-healthcheck.service wireguard-log-connections.service)
+JOURNALD_DROPIN="journald-wireguard-audit.conf"
+JOURNALD_DST="/etc/systemd/journald.conf.d"
+
+# Opt-in: this widens retention for the WHOLE journal (it is not per-tag) and
+# restarts systemd-journald, so it is never applied by a bare install.
+install_retention() {
+    [[ -f "${UNIT_SRC}/${JOURNALD_DROPIN}" ]] || die "Missing ${UNIT_SRC}/${JOURNALD_DROPIN}"
+    mkdir -p "$JOURNALD_DST"
+    install -m 0644 "${UNIT_SRC}/${JOURNALD_DROPIN}" "${JOURNALD_DST}/${JOURNALD_DROPIN}" \
+        || die "Failed to install ${JOURNALD_DROPIN}"
+    print_success "installed ${JOURNALD_DST}/${JOURNALD_DROPIN}"
+    if systemctl restart systemd-journald; then
+        print_success "journald restarted — retention now:"
+        journalctl --no-pager --header 2>/dev/null | grep -iE '^(Disk usage|Max use)' || true
+        journalctl --disk-usage 2>/dev/null || true
+    else
+        print_warning "journald restart failed — the drop-in applies at next boot"
+    fi
+}
 
 uninstall() {
     print_info "Removing WireGuard timers/services from ${UNIT_DST} ..."
@@ -36,6 +56,12 @@ uninstall() {
     done
     systemctl daemon-reload
     print_success "Uninstalled. (Scripts in ${REPO_DIR} are left untouched.)"
+    # Deliberately NOT removed: shrinking retention here would discard existing
+    # audit history, which is the opposite of what an uninstall should risk.
+    if [[ -f "${JOURNALD_DST}/${JOURNALD_DROPIN}" ]]; then
+        print_info "Journal retention drop-in left in place: ${JOURNALD_DST}/${JOURNALD_DROPIN}"
+        print_info "Remove it manually (then restart systemd-journald) to revert retention."
+    fi
 }
 
 install() {
@@ -82,13 +108,12 @@ install() {
 
 main() {
     check_root
-    if [[ "${1:-}" == "--uninstall" ]]; then
-        uninstall
-    elif [[ -z "${1:-}" ]]; then
-        install
-    else
-        die "Unknown option: $1 (use --uninstall, or no args to install)"
-    fi
+    case "${1:-}" in
+        --uninstall)      uninstall ;;
+        --with-retention) install; echo; install_retention ;;
+        "")               install ;;
+        *)                die "Unknown option: $1 (use --with-retention, --uninstall, or no args)" ;;
+    esac
 }
 
 main "$@"

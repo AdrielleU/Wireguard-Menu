@@ -726,6 +726,7 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── healthcheck.sh                   # One-shot health check (cron / systemd timer)
 ├── log-connections.sh                # Connection logger for systemd journal
 ├── systemd/
+│   ├── journald-wireguard-audit.conf       # Journal retention drop-in (opt-in)
 │   ├── wireguard-log-connections.service   # Oneshot service for the connection logger
 │   └── wireguard-log-connections.timer     # Fires the service every 2 min
 ├── utils.sh                         # Shared helpers (sourced by other scripts)
@@ -1193,20 +1194,52 @@ sudo rm -rf /var/lib/wireguard-connections    # optional: drop state
 
 ### View logs
 
+Every audit record this toolkit writes — peer connects, admin actions, and
+healthcheck results — shares one schema, so an audit is a **field query**
+rather than a grep:
+
 ```bash
-journalctl -t wireguard-connections -f                       # follow live
-journalctl -t wireguard-connections -n 50                    # last 50
-journalctl -t wireguard-connections | grep peer=remote-clinic
-journalctl -t wireguard-connections --since "1 week ago"
-journalctl -t wireguard-connections -o json-pretty > vpn-audit.json
+journalctl WG_ACTION=CONNECT -o short-iso             # every connect, with the year
+journalctl WG_PEER=remote-clinic --since -30d         # one peer, last 30 days
+journalctl WG_SESSION=abc12345-1788209278             # one session, both ends
+journalctl WG_INTERFACE=wg0 -o short-iso              # everything on wg0, all tags
+journalctl WG_ACTION=CONNECT -o json > vpn-audit.json # machine-readable export
+```
+
+Use `-o short-iso` for anything an auditor will read: the default format omits
+the year, which is useless across a multi-year retention window.
+
+The human-readable form is still there when you just want to watch:
+
+```bash
+journalctl -t wireguard-connections -f     # follow peer activity live
+journalctl -t wireguard-audit -f           # follow admin/healthcheck activity
 ```
 
 Each line looks like:
 
 ```
-CONNECT peer=remote-clinic iface=wg0 endpoint=203.0.113.45:51820 allowed_ips=10.0.10.1/32,192.168.10.0/24 pubkey=abc...=
-DISCONNECT peer=remote-clinic iface=wg0 endpoint=203.0.113.45:51820 allowed_ips=10.0.10.1/32,192.168.10.0/24 pubkey=abc...=
+action=CONNECT peer=remote-clinic interface=wg0 endpoint=203.0.113.45:51820 allowed_ips=10.0.10.1/32,192.168.10.0/24 session=abc12345-1788209278 pubkey=abc...=
+action=DISCONNECT peer=remote-clinic interface=wg0 endpoint=203.0.113.45:51820 allowed_ips=10.0.10.1/32,192.168.10.0/24 session=abc12345-1788209278 duration_sec=1847 pubkey=abc...=
 ```
+
+Every `k=v` pair in the message is also an indexed journald field named
+`WG_<KEY>` (`WG_PEER`, `WG_INTERFACE`, `WG_ENDPOINT`, `WG_SESSION`, …), plus
+`WG_ACTION` for the verb and `WG_SCHEMA` for the schema version. That is what
+makes the queries above work without parsing text.
+
+- `session` — ties a `CONNECT` to its matching `DISCONNECT`. Sessions are how
+  you answer "how long was this peer on?" without pairing lines by hand. A
+  mid-session endpoint change (roaming) logs a second `CONNECT` reusing the
+  same session id, so a roam reads as one session, not two.
+- `duration_sec` — on `DISCONNECT` only: how long that session lasted.
+  Resolution is bounded by the 2-minute poll and the 180 s activity window, so
+  treat it as accurate to a few minutes, not to the second. A session shorter
+  than one poll interval can be missed entirely — that is inherent to polling,
+  and worth stating plainly in an audit response.
+- `reason=peer-removed` — on `DISCONNECT` when a peer was deleted from the
+  config while still connected, so an open session is closed rather than left
+  dangling.
 
 - `endpoint` — the real public IP:port WireGuard saw (pre-NAT, captured before
   any masquerading on the server side). For site-to-site, that's the remote
@@ -1218,8 +1251,18 @@ DISCONNECT peer=remote-clinic iface=wg0 endpoint=203.0.113.45:51820 allowed_ips=
 
 ### Retention (HIPAA: 6 years)
 
-journald handles rotation, compression, and purging — you just tell it how
-long to keep things. Edit `/etc/systemd/journald.conf`:
+**Retention is not configured by default.** A stock journal keeps only what
+fits its default disk budget — often well under a year — so the audit trail
+silently ages out long before a 6-year requirement. Install the drop-in shipped
+with this repo:
+
+```bash
+sudo ./set-recoveryservice.sh --with-retention
+```
+
+That installs `systemd/journald-wireguard-audit.conf` to
+`/etc/systemd/journald.conf.d/` and restarts journald. Doing it by hand is the
+same thing:
 
 ```ini
 [Journal]
@@ -1228,12 +1271,21 @@ SystemMaxUse=2G
 MaxRetentionSec=6year
 ```
 
-Then:
-
 ```bash
 sudo mkdir -p /var/log/journal
 sudo systemctl restart systemd-journald
 ```
+
+Two caveats worth knowing before you rely on the number:
+
+- **Retention is host-wide, not per-tag.** These limits govern the entire
+  journal, so a chatty neighbour (a container runtime, a web server) competes
+  for the same budget and can evict WireGuard history early. Check what you
+  actually have with `journalctl --disk-usage` and by looking at the oldest
+  retained entry.
+- **Size wins over age.** Once `SystemMaxUse` is reached the oldest entries are
+  dropped even if `MaxRetentionSec` has not elapsed. On a busy host, raise
+  `SystemMaxUse` rather than trusting the time limit alone.
 
 `Storage=persistent` ensures logs survive reboots (`/var/log/journal/` instead
 of `/run/log/journal/`). `SystemMaxUse` caps disk usage; `MaxRetentionSec`
