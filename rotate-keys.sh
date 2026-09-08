@@ -23,8 +23,6 @@ PEER_NAME=""
 # Peer names declared in the server config (BEGIN_PEER markers).
 list_peers() { peer_list "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"; }
 
-peer_exists() { list_peers | grep -qxF "$1"; }
-
 select_rotation_type() {
     [[ -n "$ROTATION_TYPE" ]] && return
     echo ""
@@ -41,26 +39,8 @@ select_rotation_type() {
 }
 
 select_peer() {
-    if [[ -n "$PEER_NAME" ]]; then
-        peer_exists "$PEER_NAME" || die "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
-        return
-    fi
-    local -a peers
-    mapfile -t peers < <(list_peers)
-    (( ${#peers[@]} > 0 )) || die "No peers found in ${WG_INTERFACE}"
-
-    echo ""
-    print_info "Select peer to rotate keys for:"
-    echo ""
-    local i
-    for i in "${!peers[@]}"; do
-        printf "  ${BLUE}%d)${NC} %s\n" "$((i + 1))" "${peers[$i]}"
-    done
-    echo ""
-    read -r -p "Select peer (1-${#peers[@]}): " selection
-    [[ "$selection" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#peers[@]} )) \
-        || die "Invalid selection"
-    PEER_NAME="${peers[$((selection - 1))]}"
+    PEER_NAME=$(peer_select "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" \
+                            "$PEER_NAME" "Select peer to rotate keys for:") || exit 1
 }
 
 ################################################################################

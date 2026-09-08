@@ -7,7 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`verify-config.sh` (`wireguardmenu verify`)** — asserts that an interface's
+  on-disk state matches the conventions these scripts write and read. It is a
+  conformance check, not a health check, and never touches the running tunnel:
+  `healthcheck.sh` answers "is the tunnel working now?", `verify-config.sh`
+  answers "is this config shaped the way our scripts expect?".
+
+  The check that motivated it is **marker coverage**. WireGuard loads a
+  `[Peer]` block with no `# BEGIN_PEER` markers perfectly happily, but
+  list/toggle/remove/rotate all read peers through those markers — so a
+  hand-edited or pre-marker-format peer connects fine while being invisible to,
+  and unmanageable by, every script here. Nothing else in the toolkit reported
+  that. It also catches unterminated marker blocks, duplicate peer names,
+  duplicate `PublicKey`/`AllowedIPs` across peers, a `server-privatekey` that
+  no longer matches the config's `PrivateKey` (a rotation that half-completed),
+  peer public keys on disk that disagree with the server config, orphan peer
+  `.conf` files, non-600 key material, and a missing setup manifest.
+  Errors exit 1; warnings exit 0 unless `--strict`. `--all` sweeps every
+  interface.
+
+  Note that `wg-quick strip` is *not* a validator — it is a filter that exits 0
+  on arbitrary garbage — so the structural check is done here directly rather
+  than delegated to it.
+- `test-verify-config.sh` — 62 fault-injection checks for the above. Each test
+  starts from a conformant fixture built with real `wg genkey` material, injects
+  exactly one defect, and asserts both the message and the exit code, so a check
+  that stops working fails one named test. Verified by mutation: disabling the
+  marker-coverage check, the server-key comparison, the unterminated-block
+  check, the warning/error split, or the exit code each makes the suite fail.
+  Purely filesystem-based (everything runs under `WG_CONFIG_DIR` in a temp dir),
+  so it needs no interfaces or systemd units and is safe on a live server.
+- `menu.sh` grew a **Diagnostics** section exposing both `verify-config.sh` and
+  `healthcheck.sh`; the latter was previously reachable only via
+  `wireguardmenu healthcheck`, never from the interactive menu.
+- **Session tracking in `log-connections.sh`.** Each connected period gets a
+  `session` id shared by its `CONNECT` and `DISCONNECT`, and the `DISCONNECT`
+  reports `duration_sec`, so "how long was this peer on?" no longer requires
+  pairing lines by hand. A mid-session endpoint change (roaming) reuses the
+  same session id, so a roam reads as one session rather than two.
+- `systemd/journald-wireguard-audit.conf` — journal retention drop-in
+  (`Storage=persistent`, `SystemMaxUse=2G`, `MaxRetentionSec=6year`), installed
+  by `set-recoveryservice.sh --with-retention`. Retention was previously a
+  documented manual step that was easy to skip, leaving the audit trail to age
+  out well before the 6-year HIPAA window. Left in place on `--uninstall`,
+  since shrinking retention would discard existing history.
+
 ### Changed
+- **`setup.sh` and `reset.sh` now use the shared helpers they were already
+  sourcing.** Both scripts sourced `utils.sh` and then redefined `print_*`,
+  `log`, `die`, `check_root` and the colour variables, so they silently ran on
+  private copies that had drifted: prints went to stdout instead of stderr,
+  colour escapes were emitted unconditionally (leaking ANSI into redirected
+  output and log files), `log()` had no guard for an unwritable log directory,
+  and hardcoded `WG_CONFIG_DIR` / `LOG_FILE` assignments defeated the
+  environment overrides in `utils.sh` — which is why these two scripts could
+  not be driven against a throwaway config dir the way the rest of the suite
+  can. The duplicates are gone; `reset.sh` keeps its own
+  `/var/log/wireguard-reset.log` default, and `setup.sh` keeps its narrating
+  `check_root()` as a deliberate, documented override.
+- **One `peer_select()` in `utils.sh` replaces three near-identical
+  implementations** in `remove-peer.sh`, `toggle-peer.sh` and `rotate-keys.sh`.
+  It handles both the `-n/--name` preselect path and the numbered menu, emits
+  the chosen name on stdout with all prompts on stderr, and takes an optional
+  annotator function so `toggle-peer.sh` can still show `[enabled]` /
+  `[disabled]` beside each peer. `toggle-peer.sh` also stops re-implementing
+  `peer_list()` with its own `grep`. Peer-not-found and empty-config messages
+  are now identical across the three scripts and mention the marker format.
 - **Standardized audit log schema across every script.** `log-connections.sh`
   previously bypassed `log_audit()` and emitted its own shape (bare
   `CONNECT ...`, key `iface=`, no `user`/`source_ip`) under its own tag, so an
@@ -21,19 +87,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`journalctl WG_PEER=alice --since -30d`) instead of a grep. Messages stay
   human-readable, and hosts whose `logger` lacks `--journald` fall back to the
   previous plain tagged line rather than losing the record.
-
-### Added
-- **Session tracking in `log-connections.sh`.** Each connected period gets a
-  `session` id shared by its `CONNECT` and `DISCONNECT`, and the `DISCONNECT`
-  reports `duration_sec`, so "how long was this peer on?" no longer requires
-  pairing lines by hand. A mid-session endpoint change (roaming) reuses the
-  same session id, so a roam reads as one session rather than two.
-- `systemd/journald-wireguard-audit.conf` — journal retention drop-in
-  (`Storage=persistent`, `SystemMaxUse=2G`, `MaxRetentionSec=6year`), installed
-  by `set-recoveryservice.sh --with-retention`. Retention was previously a
-  documented manual step that was easy to skip, leaving the audit trail to age
-  out well before the 6-year HIPAA window. Left in place on `--uninstall`,
-  since shrinking retention would discard existing history.
 
 ### Fixed
 - `log-connections.sh`: a peer deleted from the config while connected left a

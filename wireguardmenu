@@ -48,14 +48,15 @@ declare -A COMMANDS=(
     [show-qr]="show-qr.sh|Show a client QR code"
     [rotate-keys]="rotate-keys.sh|Rotate server or peer keys"
     [reset]="reset.sh|Reset / clean up WireGuard"
-    [healthcheck]="healthcheck.sh|Run health checks"
+    [healthcheck]="healthcheck.sh|Run health checks (is the tunnel working now?)"
+    [verify]="verify-config.sh|Verify the config matches the expected format"
     [log-connections]="log-connections.sh|Connection logging / audit"
     [menu]="menu.sh|Launch the interactive menu"
 )
 
 # Display order for help (assoc arrays are unordered in bash).
 ORDER=(setup add-peer remove-peer list-peers toggle-peer show-qr \
-       rotate-keys reset healthcheck log-connections menu)
+       rotate-keys reset healthcheck verify log-connections menu)
 
 # Convenience aliases
 declare -A ALIASES=(
@@ -67,6 +68,8 @@ declare -A ALIASES=(
     [toggle]="toggle-peer"
     [qr]="show-qr"
     [health]="healthcheck"
+    [check]="verify"
+    [verify-config]="verify"
     [logs]="log-connections"
 )
 
@@ -90,7 +93,7 @@ EOF
     done
     echo ""
     echo "Aliases: rotate=rotate-keys, add=add-peer, rm=remove-peer, ls=list-peers,"
-    echo "         qr=show-qr, health=healthcheck, logs=log-connections"
+    echo "         qr=show-qr, health=healthcheck, check=verify, logs=log-connections"
     echo ""
     echo "Scripts location: ${REPO_DIR}"
 }

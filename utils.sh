@@ -6,7 +6,8 @@
 # Provides:
 #   - Color helpers + print_success/error/warning/info
 #   - die, check_root, log, confirm, check_deps
-#   - peer_* namespace: peer_validate_name, peer_list, peer_pubkey, peer_remove
+#   - peer_* namespace: peer_validate_name, peer_list, peer_select,
+#                       peer_pubkey, peer_remove
 #   - validate_interface_name, detect_servers
 #   - restore_context (SELinux), backup_config (timestamped 600 backup)
 #   - peer-block markers (PEER_BEGIN_PREFIX, PEER_END_PREFIX)
@@ -330,6 +331,62 @@ peer_list() {
     local config_file="$1"
     [[ -f "$config_file" ]] || return 0
     grep -oP '^# BEGIN_PEER \K\S+' "$config_file" 2>/dev/null || true
+}
+
+# Resolve exactly one peer name from <iface>.conf.
+#
+#   peer_select <config_file> <preselected|""> <prompt> [annotator]
+#
+# The chosen name goes to stdout; the menu, prompt and any errors go to stderr,
+# so callers capture it: PEER_NAME=$(peer_select ...) || exit 1
+#
+# <preselected> (e.g. from -n/--name) is validated against the config and
+# echoed straight back, skipping the menu. <annotator>, if given, names a
+# function invoked as `<annotator> <config_file> <name>`; whatever it echoes is
+# shown in brackets beside each name (toggle-peer.sh uses it for enabled /
+# disabled). Dies on an empty config or an invalid choice.
+#
+# Note for callers: `die` here runs inside the command substitution, so it
+# exits that subshell — keep the `|| exit 1` so the failure propagates.
+peer_select() {
+    local config_file="$1" preselected="$2" prompt="$3" annotator="${4:-}"
+    local iface
+    iface=$(basename "$config_file" .conf)
+
+    local -a peers
+    mapfile -t peers < <(peer_list "$config_file")
+    (( ${#peers[@]} > 0 )) || die "No peers found in ${iface}. (Peers written before the BEGIN_PEER marker format must be re-added with add-peer.sh.)"
+
+    if [[ -n "$preselected" ]]; then
+        local p
+        for p in "${peers[@]}"; do
+            if [[ "$p" == "$preselected" ]]; then
+                echo "$preselected"
+                return 0
+            fi
+        done
+        die "Peer '${preselected}' not found in ${iface} (or predates the BEGIN_PEER marker format)"
+    fi
+
+    echo "" >&2
+    print_info "$prompt"
+    echo "" >&2
+    local i note
+    for i in "${!peers[@]}"; do
+        note=""
+        [[ -n "$annotator" ]] && note=$("$annotator" "$config_file" "${peers[$i]}")
+        if [[ -n "$note" ]]; then
+            printf '  %b%d)%b %-20s [%s]\n' "$BLUE" "$((i + 1))" "$NC" "${peers[$i]}" "$note" >&2
+        else
+            printf '  %b%d)%b %s\n' "$BLUE" "$((i + 1))" "$NC" "${peers[$i]}" >&2
+        fi
+    done
+    echo "" >&2
+    local sel
+    read -r -p "Select peer (1-${#peers[@]}): " sel
+    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#peers[@]} )) \
+        || die "Invalid selection"
+    echo "${peers[$((sel - 1))]}"
 }
 
 # Echo the public key recorded for the given peer in <iface>.conf (or empty).

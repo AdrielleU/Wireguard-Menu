@@ -59,29 +59,17 @@ peer_state() {
     ' "$cf"
 }
 
+# Annotator for peer_select: renders the enabled/disabled state in brackets
+# beside each name. Signature is fixed by peer_select (<config_file> <name>).
+peer_state_note() {
+    local s; s=$(peer_state "$1" "$2")
+    echo "${s:-unknown}"
+}
+
 select_peer() {
-    local cf="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local -a names
-    mapfile -t names < <(grep -oP "^${PEER_BEGIN_PREFIX}\K\S+" "$cf" 2>/dev/null)
-    [[ ${#names[@]} -gt 0 ]] || die "No marker-format peers in ${WG_INTERFACE}. (Legacy peers must be re-added via add-peer.sh.)"
-
-    if [[ -n "$PEER_NAME" ]]; then
-        local match=0
-        for n in "${names[@]}"; do [[ "$n" == "$PEER_NAME" ]] && match=1 && break; done
-        [[ $match -eq 1 ]] || die "Peer '${PEER_NAME}' not found (or in legacy format)"
-        return
-    fi
-
-    echo "Peers on ${WG_INTERFACE}:"
-    local i=1
-    for n in "${names[@]}"; do
-        local s; s=$(peer_state "$cf" "$n")
-        printf "  %d) %-20s [%s]\n" "$i" "$n" "${s:-unknown}"
-        ((i++)) || true
-    done
-    read -p "Select peer to toggle (1-${#names[@]}): " sel
-    [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#names[@]} )) || die "Invalid selection"
-    PEER_NAME="${names[$((sel-1))]}"
+    PEER_NAME=$(peer_select "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" \
+                            "$PEER_NAME" "Peers on ${WG_INTERFACE}:" \
+                            peer_state_note) || exit 1
 }
 
 # Toggle the [Peer] block between BEGIN_PEER/END_PEER markers in place.

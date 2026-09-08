@@ -117,12 +117,17 @@ show_menu() {
     echo "  9) Reset/Cleanup WireGuard           (reset.sh)"
     echo ""
 
+    echo -e "${BLUE}Diagnostics:${NC}"
+    echo " 10) Verify Config Format             (verify-config.sh)"
+    echo " 11) Health Check (runtime)           (healthcheck.sh)"
+    echo ""
+
     echo -e "${BLUE}Auditing:${NC}"
-    echo " 10) Connection Logging                (log-connections.sh)"
+    echo " 12) Connection Logging                (log-connections.sh)"
     echo ""
 
     echo -e "${BLUE}System:${NC}"
-    echo " 11) Exit"
+    echo " 13) Exit"
     echo ""
     echo "=========================================="
     echo ""
@@ -173,7 +178,7 @@ run_script() {
 main() {
     while true; do
         show_menu
-        read -rp "Select an option (1-11): " choice
+        read -rp "Select an option (1-13): " choice
         case $choice in
             1)  run_script "add-peer.sh"        "Add Peer (Client or Site)" ;;
             2)  run_script "remove-peer.sh"     "Remove Peer" ;;
@@ -189,15 +194,17 @@ main() {
                 ;;
             8)  run_script "rotate-keys.sh"     "Rotate Keys (Server or Peer)" ;;
             9)  run_script "reset.sh" "Reset/Cleanup WireGuard" ;;
-            10) run_script "log-connections.sh"  "Connection Logging" ;;
-            11)
+            10) run_script "verify-config.sh"   "Verify Config Format" ;;
+            11) run_script "healthcheck.sh"     "Health Check (runtime)" ;;
+            12) run_script "log-connections.sh"  "Connection Logging" ;;
+            13)
                 echo ""
                 print_info "Exiting WireGuard Management Menu"
                 echo ""
                 exit 0
                 ;;
             *)
-                print_error "Invalid selection. Please choose 1-11."
+                print_error "Invalid selection. Please choose 1-13."
                 echo ""
                 read -rp "Press Enter to continue..."
                 ;;

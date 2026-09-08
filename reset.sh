@@ -19,15 +19,17 @@
 
 set -euo pipefail
 
-# Shared helpers — needed for manifest_path / manifest_entries.
+# Reset keeps its own log; set before sourcing so utils.sh's `${LOG_FILE:-...}`
+# default doesn't win. An env-supplied LOG_FILE still overrides both.
+LOG_FILE="${LOG_FILE:-/var/log/wireguard-reset.log}"
+
+# Shared helpers — colors, print_*, log, die, check_root, WG_CONFIG_DIR,
+# manifest_path / manifest_entries. Nothing below redefines them.
 source "$(dirname "$0")/utils.sh"
 
 ################################################################################
 # CONFIGURATION
 ################################################################################
-
-WG_CONFIG_DIR="/etc/wireguard"
-LOG_FILE="/var/log/wireguard-reset.log"
 
 # Options
 SELECTIVE_MODE=true
@@ -37,53 +39,12 @@ INTERACTIVE=true
 SELECTED_SERVERS=()
 
 ################################################################################
-# COLORS
-################################################################################
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
-
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
-
-print_info() {
-    echo -e "${BLUE}[i]${NC} $1"
-}
-
-################################################################################
 # HELPER FUNCTIONS
 ################################################################################
 
-log() {
-    local message="$1"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$LOG_FILE"
-}
-
-die() {
-    local message="$1"
-    print_error "$message"
-    log "ERROR: $message"
-    exit 1
-}
-
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        die "This script must be run as root (use sudo)"
-    fi
-}
+# Colors, print_success/error/warning/info, log, die and check_root all come
+# from utils.sh. Do not redefine them here — the shared versions gate color on
+# a tty, print to stderr, and tolerate an unwritable log directory.
 
 show_usage() {
     echo "Usage: sudo $0 [OPTIONS]"

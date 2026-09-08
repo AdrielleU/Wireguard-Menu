@@ -60,8 +60,9 @@
 
 set -euo pipefail
 
-# Shared helpers — manifest_add (setup writes; reset.sh reads).
-# Sourced first so local print_*/die/check_root defined below win.
+# Shared helpers — colors, print_*, log, die, check_deps, WG_CONFIG_DIR,
+# LOG_FILE, and manifest_add (setup writes; reset.sh reads). Nothing below
+# redefines them; check_root() is specialised here to log the check.
 source "$(dirname "$0")/utils.sh"
 
 ################################################################################
@@ -96,8 +97,7 @@ PEER_IP=""                 # This peer's IP on VPN network
 LOCAL_NETWORK=""           # Local LAN network to route
 LAN_INTERFACE=""           # Local LAN interface
 
-WG_CONFIG_DIR="/etc/wireguard"
-LOG_FILE="/var/log/wireguard-setup.log"
+# WG_CONFIG_DIR and LOG_FILE come from utils.sh (both env-overridable).
 
 # Interface-specific directories (set after interface name is determined)
 WG_INTERFACE_DIR=""
@@ -108,46 +108,12 @@ WG_KEYS_DIR=""
 PRIMARY_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1 || true)
 
 ################################################################################
-# HELPER FUNCTIONS - Colors
+# HELPER FUNCTIONS
 ################################################################################
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[✗]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
-}
-
-print_info() {
-    echo -e "${BLUE}[i]${NC} $1"
-}
-
-################################################################################
-# HELPER FUNCTIONS - Logging and Error Handling
-################################################################################
-
-log() {
-    local message="$1"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $message" >> "$LOG_FILE"
-}
-
-die() {
-    local message="$1"
-    print_error "$message"
-    log "ERROR: $message"
-    exit 1
-}
+# Colors, print_success/error/warning/info, log and die all come from utils.sh.
+# Do not redefine them here — the shared versions gate color on a tty, print to
+# stderr, and tolerate an unwritable log directory.
 
 check_command() {
     if ! command -v "$1" &> /dev/null; then
@@ -896,6 +862,8 @@ prompt_client_config() {
 # PREREQUISITE CHECKS
 ################################################################################
 
+# Deliberately overrides utils.sh's bare check_root: setup runs this as one of
+# its numbered prerequisite checks, so it narrates and logs the result.
 check_root() {
     print_info "Checking root privileges..."
     if [[ $EUID -ne 0 ]]; then

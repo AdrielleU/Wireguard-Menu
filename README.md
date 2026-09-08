@@ -723,7 +723,9 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ├── rotate-keys.sh                   # Rotate server or peer keys
 ├── show-qr.sh                       # Display peer config as QR code
 ├── reset.sh               # Cleanup / reset WireGuard state
-├── healthcheck.sh                   # One-shot health check (cron / systemd timer)
+├── healthcheck.sh                   # One-shot runtime health check (cron / systemd timer)
+├── verify-config.sh                 # Config conformance check (does it match our format?)
+├── test-verify-config.sh            # Fault-injection tests for verify-config.sh
 ├── log-connections.sh                # Connection logger for systemd journal
 ├── systemd/
 │   ├── journald-wireguard-audit.conf       # Journal retention drop-in (opt-in)
@@ -866,6 +868,64 @@ sudo wg-quick down wg0    # tear down
 | Rotate server or peer keys | `sudo ./rotate-keys.sh` |
 | Import an existing `.conf` file | `sudo ./setup.sh --config <file>` |
 | Tear everything down | `sudo ./reset.sh` |
+| Check the config matches this toolkit's format | `sudo ./verify-config.sh` |
+| Check the tunnel is up and working | `sudo ./healthcheck.sh` |
+
+## Verifying the config
+
+There are two different questions, and two different scripts:
+
+| Question | Script |
+| -------- | ------ |
+| Is the tunnel working *right now*? | `healthcheck.sh` — runtime state |
+| Is the config shaped the way these scripts expect? | `verify-config.sh` — on-disk format |
+
+```bash
+sudo ./verify-config.sh              # verify one interface (prompts if several)
+sudo ./verify-config.sh -i wg0       # verify wg0
+sudo ./verify-config.sh --all        # sweep every interface
+sudo ./verify-config.sh -q --strict  # problems only; warnings fail too (CI / timers)
+```
+
+Errors exit 1, warnings exit 0 unless `--strict`. `verify-config.sh` is
+read-only — it never touches the running tunnel.
+
+The check worth knowing about is **marker coverage**. Every peer block this
+toolkit writes is wrapped in `# BEGIN_PEER <name>` / `# END_PEER <name>`, and
+`list-peers.sh`, `toggle-peer.sh`, `remove-peer.sh` and `rotate-keys.sh` all
+find peers through those markers. WireGuard itself does not care about them —
+so a `[Peer]` block added by hand, or restored from a config written before the
+marker format, will connect perfectly well while being **invisible to every
+management script here**. `verify-config.sh` is the only thing that reports it:
+
+```
+FAIL 2/3 [Peer] blocks carry BEGIN_PEER markers — 1 peer(s) are invisible to list/toggle/remove/rotate
+    unmarked peer, PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
+    fix: re-add these with add-peer.sh, or wrap each block in
+         '# BEGIN_PEER <name>' / '# END_PEER <name>' by hand
+```
+
+It also catches unterminated marker blocks, duplicate peer names, duplicate
+`PublicKey` or `AllowedIPs` across peers, a `server-privatekey` that no longer
+matches the config's `PrivateKey` (a rotation that half-completed), peer public
+keys on disk that disagree with the server config, orphan peer `.conf` files,
+key material that is not mode 600, and a missing setup manifest.
+
+> Note: `wg-quick strip` is sometimes suggested as a config validator. It is
+> not one — it is a filter that prints the config with comments removed, and it
+> exits 0 on arbitrary garbage. `verify-config.sh` parses the structure itself.
+
+`test-verify-config.sh` covers it, one injected defect at a time:
+
+```bash
+sudo ./test-verify-config.sh         # 62 checks
+sudo ./test-verify-config.sh -k      # keep the fixture dir for inspection
+```
+
+It is purely filesystem-based — it builds throwaway config trees under a temp
+dir and drives every run with `WG_CONFIG_DIR` pointed at them, so unlike
+`test-monitoring.sh` it creates no interfaces, touches no systemd units, and
+never reads or writes `/etc/wireguard`. Safe to run on a live server.
 
 ## Health Check
 

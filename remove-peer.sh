@@ -19,36 +19,11 @@ WG_INTERFACE=""
 # INTERACTIVE SELECTION
 ################################################################################
 
-# select_server() and detect_servers() come from utils.sh
+# select_server(), detect_servers() and peer_select() come from utils.sh
 
 select_peer() {
-    local config_file="${WG_CONFIG_DIR}/${WG_INTERFACE}.conf"
-    local -a peers
-    mapfile -t peers < <(peer_list "$config_file")
-    local peer_count=${#peers[@]}
-    [[ $peer_count -gt 0 ]] || die "No peers found in ${WG_INTERFACE}"
-
-    if [[ -n "$PEER_NAME" ]]; then
-        local match=0
-        for p in "${peers[@]}"; do [[ "$p" == "$PEER_NAME" ]] && match=1 && break; done
-        [[ $match -eq 1 ]] || die "Peer '${PEER_NAME}' not found in ${WG_INTERFACE}"
-        print_success "Using peer: ${PEER_NAME}"
-        return
-    fi
-
-    print_info "Select a peer to remove"
-    echo ""
-    local i=1
-    for peer in "${peers[@]}"; do
-        printf "  ${BLUE}%d)${NC} %s\n" "$i" "$peer"
-        ((i++)) || true
-    done
-    echo ""
-    read -p "Select peer to remove (1-${peer_count}): " selection
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > peer_count )); then
-        die "Invalid selection"
-    fi
-    PEER_NAME="${peers[$((selection-1))]}"
+    PEER_NAME=$(peer_select "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" \
+                            "$PEER_NAME" "Select a peer to remove") || exit 1
     print_success "Selected peer: ${PEER_NAME}"
 }
 
