@@ -12,7 +12,7 @@
 #   - restore_context (SELinux), backup_config (timestamped 600 backup)
 #   - peer-block markers (PEER_BEGIN_PREFIX, PEER_END_PREFIX)
 #   - log_audit (structured systemd journal entry)
-#   - manifest_* namespace: manifest_add, manifest_path, manifest_entries
+#   - looks_like_host (is this a pingable IP or hostname?)
 ################################################################################
 
 # ---------- constants ----------
@@ -23,11 +23,19 @@ WG_CONFIG_DIR="${WG_CONFIG_DIR:-/etc/wireguard}"
 LOG_FILE="${LOG_FILE:-/var/log/wireguard-setup.log}"
 
 # Peer-block markers — written around every [Peer] entry in <iface>.conf
-# by add-peer.sh and required by all readers (list/remove/toggle/rotate).
+# by whatever adds peers, and required by every reader of them: the peer
+# actions and verify-config.sh.
 # A separate `# Client: name` / `# Site: name` / `# Peer-to-Peer: name`
-# line inside the block carries the peer type for list-peers.sh.
+# line inside the block records what the peer is.
 PEER_BEGIN_PREFIX="# BEGIN_PEER "
 PEER_END_PREFIX="# END_PEER "
+
+# Pausing a peer keeps its markers and comments out
+# every WireGuard line in its block with PEER_PAUSE_PREFIX, so wg-quick strip
+# leaves it out and it stays out of the tunnel across restarts. Readers that
+# care what a block holds rather than whether it is live read through the
+# prefix (strip_pause_prefixes).
+PEER_PAUSE_PREFIX="#! "
 
 # ---------- colors ----------
 if [[ -t 1 ]]; then
@@ -62,6 +70,13 @@ die() {
 
 check_root() {
     [[ $EUID -eq 0 ]] || die "This script must be run as root (use sudo)"
+}
+
+# Die unless this host was booted with systemd, which the timers, `systemctl`
+# and wg-quick@<iface> services all need. /run/systemd/system exists only then.
+check_systemd() {
+    [[ -d /run/systemd/system ]] && command -v systemctl &>/dev/null \
+        || die "This needs systemd, and this host is not running it (no /run/systemd/system)"
 }
 
 # Ensure required commands are on PATH; die listing any that are missing.
@@ -189,7 +204,10 @@ _audit_have_journald() {
     [[ "$_WG_HAVE_JOURNALD" == yes ]]
 }
 
-# Admin/operational actions (tag: wireguard-audit, auth.info).
+# Admin/operational actions (tag: wireguard-audit, auth.notice).
+# notice, not info: the units set LogLevelMax=notice to keep systemd's per-run
+# "Starting/Finished" lines (info) out of the journal, and an info-level record
+# is dropped by that filter — unreliably, which is worse than never.
 log_audit() {
     local action="$1"
     local details="$2"
@@ -197,7 +215,7 @@ log_audit() {
     local source_ip
     user=$(whoami)
     source_ip=$(who am i 2>/dev/null | awk '{print $5}' | tr -d '()')
-    _audit_emit wireguard-audit auth.info "$action" \
+    _audit_emit wireguard-audit auth.notice "$action" \
         "user=$user source_ip=${source_ip:-local} $details"
 }
 
@@ -235,6 +253,24 @@ peer_validate_name() {
         return 1
     fi
     return 0
+}
+
+# True if <host> is a syntactically valid ping target: an IPv4 address (octets
+# in range), a loose IPv6 address, or a DNS hostname. Guards the
+# "# Healthcheck-Reachability =" comment, so a typo (10.0.0.999) is caught
+# rather than silently treated as "unreachable" — which, with --restart, would
+# turn a config typo into a tunnel-restart loop.
+looks_like_host() {
+    local h="$1"
+    [[ -z "$h" ]] && return 1
+    if [[ "$h" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then   # IPv4 shape
+        local o; IFS=. read -ra o <<<"$h"
+        local n; for n in "${o[@]}"; do (( n <= 255 )) || return 1; done
+        return 0
+    fi
+    [[ "$h" == *:* && "$h" =~ ^[0-9a-fA-F:]+$ ]] && return 0   # IPv6 (loose)
+    # Hostname: dot-separated labels of alnum/hyphen, not starting/ending in '-'.
+    [[ ${#h} -le 253 && "$h" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]
 }
 
 validate_interface_name() {
@@ -277,11 +313,11 @@ detect_servers() {
 # Resolve the global $WG_INTERFACE: if already set (e.g. via -i) just validate
 # it; if exactly one server exists, pick it silently; otherwise show a numbered
 # menu. The menu and prompt go to stderr so callers that emit data on stdout
-# (e.g. list-peers.sh) stay clean. Dies if none are found or the choice is bad.
+# stay clean. Dies if none are found or the choice is bad.
 select_server() {
     local -a servers
     mapfile -t servers < <(detect_servers)
-    (( ${#servers[@]} > 0 )) || die "No WireGuard servers found. Run setup.sh first."
+    (( ${#servers[@]} > 0 )) || die "No WireGuard servers found in ${WG_CONFIG_DIR}"
 
     if [[ -n "${WG_INTERFACE:-}" ]]; then
         [[ -f "${WG_CONFIG_DIR}/${WG_INTERFACE}.conf" ]] \
@@ -312,7 +348,7 @@ select_server() {
 }
 
 # ---------- peer-block marker helpers ----------
-# Format written by add-peer.sh:
+# Format written when a peer is added:
 #
 #   # BEGIN_PEER <name>
 #   # <Client|Site|Peer-to-Peer>: <name>
@@ -323,7 +359,13 @@ select_server() {
 #
 # BEGIN_PEER / END_PEER are the authoritative block delimiters used by every
 # reader below. The Client/Site/Peer-to-Peer line is type metadata that
-# list-peers.sh reads to render the type column.
+# records what the peer is.
+
+# Print <file> (or stdin) with PEER_PAUSE_PREFIX removed, so paused peers read
+# like active ones.
+strip_pause_prefixes() {
+    sed -e "s/^${PEER_PAUSE_PREFIX}//" "$@"
+}
 
 # List peer names declared in <iface>.conf, one per line, in file order.
 # grep -oP (not gawk's 3-arg match) so this also works on Debian/Ubuntu's mawk.
@@ -343,8 +385,8 @@ peer_list() {
 # <preselected> (e.g. from -n/--name) is validated against the config and
 # echoed straight back, skipping the menu. <annotator>, if given, names a
 # function invoked as `<annotator> <config_file> <name>`; whatever it echoes is
-# shown in brackets beside each name (toggle-peer.sh uses it for enabled /
-# disabled). Dies on an empty config or an invalid choice.
+# shown in brackets beside each name (pause/resume uses it to show
+# active / paused). Dies on an empty config or an invalid choice.
 #
 # Note for callers: `die` here runs inside the command substitution, so it
 # exits that subshell — keep the `|| exit 1` so the failure propagates.
@@ -355,7 +397,7 @@ peer_select() {
 
     local -a peers
     mapfile -t peers < <(peer_list "$config_file")
-    (( ${#peers[@]} > 0 )) || die "No peers found in ${iface}. (Peers written before the BEGIN_PEER marker format must be re-added with add-peer.sh.)"
+    (( ${#peers[@]} > 0 )) || die "No peers found in ${iface}. (Peers written before the BEGIN_PEER marker format must be re-added with those markers.)"
 
     if [[ -n "$preselected" ]]; then
         local p
@@ -394,9 +436,13 @@ peer_pubkey() {
     local config_file="$1"
     local name="$2"
     [[ -f "$config_file" ]] || return 0
-    awk -v begin="^# BEGIN_PEER ${name}$" '
-        $0 ~ begin { in_peer=1; next }
+    # Exact match, not a regex: peer names may contain '.', which as a regex
+    # also matches another peer's marker (a.b would match axb).
+    # A paused peer still has its key: read through the prefix.
+    awk -v begin="${PEER_BEGIN_PREFIX}${name}" -v dp="$PEER_PAUSE_PREFIX" '
+        $0 == begin { in_peer=1; next }
         in_peer && /^# END_PEER / { exit }
+        in_peer && index($0, dp) == 1 { $0 = substr($0, length(dp) + 1) }
         in_peer && /^PublicKey[[:space:]]*=/ {
             sub(/^PublicKey[[:space:]]*=[[:space:]]*/, "", $0)
             print $0
@@ -419,9 +465,10 @@ peer_remove() {
     perms=$(stat -c '%a' "$config_file" 2>/dev/null || echo 600)
     owner=$(stat -c '%U:%G' "$config_file" 2>/dev/null || echo root:root)
 
-    awk -v begin_re="^# BEGIN_PEER ${name}$" -v end_re="^# END_PEER ${name}$" '
-        $0 ~ begin_re { skip=1; next }
-        skip && $0 ~ end_re { skip=0; next }
+    # Exact match, not a regex — see peer_pubkey.
+    awk -v begin="${PEER_BEGIN_PREFIX}${name}" -v end="${PEER_END_PREFIX}${name}" '
+        $0 == begin { skip=1; next }
+        skip && $0 == end { skip=0; next }
         skip { next }
         { print }
     ' "$config_file" > "$tmp" || die "Failed to rewrite config"
@@ -436,23 +483,13 @@ peer_remove() {
     trap - RETURN
 }
 
-# ---------- install manifest ----------
-# One manifest per WireGuard interface, e.g. /etc/wireguard/.manifest-wg0
-# Each line: TYPE|VALUE  (so reset.sh can act on them precisely)
-#   SYSCTL|/etc/sysctl.d/99-wireguard-wg0.conf
-#   SERVICE|wg-quick@wg0
-#   FW_FIREWALLD|port:51820/udp
-#   FW_FIREWALLD|masquerade
-#   FW_UFW|allow:51820/udp
-#   FW_UFW|route:wg0
-#   FW_NFT|wg0
-#   SELINUX_PORT|wireguard_port_t:udp:51820
-#   FILE|/etc/wireguard/wg0.conf
-#   DIR|/etc/wireguard/wg0
 # ---------- systemd unit installation ----------
 # Shared by install-healthcheck.sh and install-logging.sh so the two installers
 # stay one implementation. Units are identified by filename, so re-installing
 # overwrites in place and can never produce a duplicate.
+#
+# With DRY_RUN=true (the installers' --dry-run) every helper below still makes
+# its checks, but only prints what it would write or run.
 
 UNIT_DST="${UNIT_DST:-/etc/systemd/system}"
 
@@ -468,10 +505,25 @@ unit_install_service() {
     local src="${repo_dir}/systemd/${base}.service"
     [[ -f "$src" ]] || die "Missing ${src}"
 
-    sed -E \
+    local unit
+    unit=$(sed -E \
         -e "s#^ExecStart=[^ ]*/([A-Za-z0-9_.-]+\.sh)#ExecStart=${repo_dir}/\1#" \
         -e "s#^Documentation=file://[^ ]*/([A-Za-z0-9_.-]+\.sh)#Documentation=file://${repo_dir}/\1#" \
-        "$src" > "${UNIT_DST}/${base}.service" \
+        "$src") || die "Failed to read ${src}"
+
+    # A timer pointed at a script that isn't there fires forever and does
+    # nothing, so refuse to install one.
+    local exec_line exec_path
+    exec_line=$(grep -m1 '^ExecStart=' <<<"$unit")
+    exec_path="${exec_line#ExecStart=}"
+    exec_path="${exec_path%% *}"
+    [[ -x "$exec_path" ]] || die "${base}.service would run '${exec_path}', which is missing or not executable"
+
+    if ${DRY_RUN:-false}; then
+        echo "  would write ${UNIT_DST}/${base}.service  (${exec_line})"
+        return 0
+    fi
+    printf '%s\n' "$unit" > "${UNIT_DST}/${base}.service" \
         || die "Failed to write ${UNIT_DST}/${base}.service"
     print_success "installed ${base}.service"
 }
@@ -481,6 +533,10 @@ unit_install_timer() {
     local repo_dir="$1" base="$2"
     local src="${repo_dir}/systemd/${base}.timer"
     [[ -f "$src" ]] || die "Missing ${src}"
+    if ${DRY_RUN:-false}; then
+        echo "  would copy ${src} -> ${UNIT_DST}/${base}.timer"
+        return 0
+    fi
     cp "$src" "${UNIT_DST}/${base}.timer" || die "Failed to copy ${base}.timer"
     print_success "installed ${base}.timer"
 }
@@ -488,15 +544,36 @@ unit_install_timer() {
 # restart (not just start) so a changed interval takes effect immediately.
 unit_enable_timer() {
     local base="$1"
-    systemctl daemon-reload
-    systemctl enable "${base}.timer" >/dev/null 2>&1
-    systemctl restart "${base}.timer"
+    if ${DRY_RUN:-false}; then
+        echo "  would run: systemctl daemon-reload; systemctl enable ${base}.timer; systemctl restart ${base}.timer"
+        return 0
+    fi
+    systemctl daemon-reload || die "systemctl daemon-reload failed"
+    systemctl enable "${base}.timer" >/dev/null 2>&1 || die "Failed to enable ${base}.timer"
+    systemctl restart "${base}.timer" || die "Failed to start ${base}.timer"
+    print_success "systemd reloaded; ${base}.timer enabled and started"
+
+    # A timer can be enabled and active with nothing scheduled — that is how the
+    # old OnBootSec units failed silently — so check before claiming success.
+    local next
+    next=$(systemctl show "${base}.timer" -p NextElapseUSecMonotonic --value 2>/dev/null)
+    if [[ -z "$next" || "$next" == "infinity" ]]; then
+        print_warning "${base}.timer is enabled and active but has nothing scheduled, so it will never fire — check its OnActiveSec/OnUnitActiveSec"
+    fi
+    return 0
 }
 
 unit_remove() {
-    local base="$1"
+    local base="$1" f
+    if ${DRY_RUN:-false}; then
+        echo "  would run: systemctl disable --now ${base}.timer"
+        for f in "${base}.timer" "${base}.service"; do
+            [[ -e "${UNIT_DST}/${f}" ]] && echo "  would remove ${UNIT_DST}/${f}"
+        done
+        echo "  would run: systemctl daemon-reload"
+        return 0
+    fi
     systemctl disable --now "${base}.timer" 2>/dev/null || true
-    local f
     for f in "${base}.timer" "${base}.service"; do
         [[ -e "${UNIT_DST}/${f}" ]] || continue
         rm -f "${UNIT_DST}/${f}" && print_success "removed ${f}"
@@ -512,31 +589,4 @@ unit_warn_on_cron() {
          | grep -Fq "$script"; then
         print_warning "A cron entry references ${script} — it will double-run alongside the timer. Remove the cron line or the timer, not both."
     fi
-}
-
-# ---------- setup manifest ----------
-manifest_path() {
-    local iface="$1"
-    echo "${WG_CONFIG_DIR}/.manifest-${iface}"
-}
-
-manifest_add() {
-    local iface="$1"
-    local type="$2"
-    local value="$3"
-    local path
-    path=$(manifest_path "$iface")
-    mkdir -p "$(dirname "$path")"
-    touch "$path" && chmod 600 "$path"
-    local entry="${type}|${value}"
-    grep -Fxq "$entry" "$path" 2>/dev/null || echo "$entry" >> "$path"
-}
-
-manifest_entries() {
-    local iface="$1"
-    local type="$2"
-    local path
-    path=$(manifest_path "$iface")
-    [[ -f "$path" ]] || return 0
-    grep "^${type}|" "$path" | cut -d'|' -f2-
 }

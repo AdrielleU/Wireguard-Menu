@@ -22,9 +22,15 @@
 # Idempotent: systemd identifies units by filename, so re-running overwrites
 # them in place and re-enabling is a no-op.
 #
+# --dry-run makes every check the install would (the units exist, the unit's
+# script is executable, no cron entry double-runs it) but writes nothing, runs
+# no systemctl and skips the retention projection. It combines with
+# --with-retention and --uninstall.
+#
 # Usage:
 #   sudo ./install-logging.sh                   # install/refresh + enable
 #   sudo ./install-logging.sh --with-retention  # ... and widen journal retention
+#   sudo ./install-logging.sh --dry-run         # show what an install would do; change nothing
 #   sudo ./install-logging.sh --check-retention # project the achievable window
 #   sudo ./install-logging.sh --status          # timer state + retention check
 #   sudo ./install-logging.sh --uninstall       # stop, disable, remove units
@@ -36,8 +42,11 @@ REPO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "${REPO_DIR}/utils.sh"
 
 BASE="wireguard-log-connections"
+DRY_RUN=false
 JOURNALD_DROPIN="journald-wireguard-audit.conf"
-JOURNALD_DST="/etc/systemd/journald.conf.d"
+# Overridable like UNIT_DST, so the retention install can be exercised against
+# a throwaway directory instead of the host's journald config.
+JOURNALD_DST="${JOURNALD_DST:-/etc/systemd/journald.conf.d}"
 
 # The window the audit trail is expected to cover. HIPAA §164.316(b)(2)(i) is
 # 6 years; override for a different regime.
@@ -51,6 +60,10 @@ RETENTION_TARGET_DAYS="${RETENTION_TARGET_DAYS:-2192}"
 # restarts systemd-journald, so it is never applied by a bare install.
 install_retention() {
     [[ -f "${REPO_DIR}/systemd/${JOURNALD_DROPIN}" ]] || die "Missing ${REPO_DIR}/systemd/${JOURNALD_DROPIN}"
+    if $DRY_RUN; then
+        echo "  would install ${JOURNALD_DST}/${JOURNALD_DROPIN} and restart systemd-journald"
+        return 0
+    fi
     mkdir -p "$JOURNALD_DST"
     install -m 0644 "${REPO_DIR}/systemd/${JOURNALD_DROPIN}" "${JOURNALD_DST}/${JOURNALD_DROPIN}" \
         || die "Failed to install ${JOURNALD_DROPIN}"
@@ -172,6 +185,7 @@ install_units() {
     unit_install_service "$REPO_DIR" "$BASE"
     unit_install_timer   "$REPO_DIR" "$BASE"
     unit_enable_timer    "$BASE"
+    $DRY_RUN && return
     print_success "Audit-log timer enabled — unit points at ${REPO_DIR}"
     echo
     systemctl list-timers "${BASE}.timer" --all --no-pager
@@ -179,6 +193,10 @@ install_units() {
 
 uninstall_units() {
     unit_remove "$BASE"
+    if $DRY_RUN; then
+        print_info "Dry run: nothing was changed."
+        return
+    fi
     print_success "Uninstalled. (Scripts in ${REPO_DIR} are left untouched.)"
     # Deliberately NOT removed: shrinking retention here would discard existing
     # audit history, which is the opposite of what an uninstall should risk.
@@ -199,13 +217,32 @@ show_status() {
 
 main() {
     check_root
-    case "${1:-}" in
-        --uninstall)       uninstall_units ;;
-        --with-retention)  install_units; echo; install_retention; check_retention ;;
-        --check-retention) check_retention ;;
-        --status)          show_status ;;
-        "")                install_units; check_retention ;;
-        *)                 die "Unknown option: $1 (use --with-retention, --check-retention, --status, --uninstall, or no args)" ;;
+    check_systemd
+    local action="install" retention=false arg
+    for arg in "$@"; do
+        case "$arg" in
+            --dry-run)         DRY_RUN=true ;;
+            --with-retention)  retention=true ;;
+            --check-retention) action="check" ;;
+            --status)          action="status" ;;
+            --uninstall)       action="uninstall" ;;
+            *)                 die "Unknown option: $arg (use --with-retention, --check-retention, --status, --uninstall, --dry-run, or no args)" ;;
+        esac
+    done
+
+    case "$action" in
+        check)     check_retention ;;
+        status)    show_status ;;
+        uninstall) uninstall_units ;;
+        install)
+            install_units
+            if $retention; then echo; install_retention; fi
+            if $DRY_RUN; then
+                print_info "Dry run: checks passed, nothing was changed. (--check-retention projects the retention window.)"
+            else
+                check_retention
+            fi
+            ;;
     esac
 }
 

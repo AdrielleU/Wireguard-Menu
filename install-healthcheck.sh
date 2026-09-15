@@ -15,8 +15,13 @@
 # Idempotent: systemd identifies units by filename, so re-running overwrites
 # them in place and re-enabling is a no-op.
 #
+# --dry-run makes every check the install would (the unit's script exists and
+# is executable, no cron entry double-runs it) but writes nothing and runs no
+# systemctl. It also combines with --uninstall.
+#
 # Usage:
 #   sudo ./install-healthcheck.sh              # install/refresh + enable
+#   sudo ./install-healthcheck.sh --dry-run    # show what that would do; change nothing
 #   sudo ./install-healthcheck.sh --uninstall  # stop, disable, remove units
 #   sudo ./install-healthcheck.sh --status     # show timer state
 ################################################################################
@@ -27,12 +32,17 @@ REPO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "${REPO_DIR}/utils.sh"
 
 BASE="wireguard-healthcheck"
+DRY_RUN=false
 
 install_units() {
     unit_warn_on_cron "healthcheck.sh"
     unit_install_service "$REPO_DIR" "$BASE"
     unit_install_timer   "$REPO_DIR" "$BASE"
     unit_enable_timer    "$BASE"
+    if $DRY_RUN; then
+        print_info "Dry run: checks passed, nothing was changed."
+        return
+    fi
     print_success "Healthcheck timer enabled — unit points at ${REPO_DIR}"
     echo
     systemctl list-timers "${BASE}.timer" --all --no-pager
@@ -44,14 +54,32 @@ show_status() {
     systemctl status "${BASE}.service" --no-pager -n 5 2>/dev/null || true
 }
 
+uninstall_units() {
+    unit_remove "$BASE"
+    if $DRY_RUN; then
+        print_info "Dry run: nothing was changed."
+    else
+        print_success "Uninstalled. (Scripts in ${REPO_DIR} are left untouched.)"
+    fi
+}
+
 main() {
     check_root
-    case "${1:-}" in
-        --uninstall) unit_remove "$BASE"
-                     print_success "Uninstalled. (Scripts in ${REPO_DIR} are left untouched.)" ;;
-        --status)    show_status ;;
-        "")          install_units ;;
-        *)           die "Unknown option: $1 (use --uninstall, --status, or no args)" ;;
+    check_systemd
+    local action="install" arg
+    for arg in "$@"; do
+        case "$arg" in
+            --dry-run)   DRY_RUN=true ;;
+            --uninstall) action="uninstall" ;;
+            --status)    action="status" ;;
+            *)           die "Unknown option: $arg (use --dry-run, --uninstall, --status, or no args)" ;;
+        esac
+    done
+
+    case "$action" in
+        install)   install_units ;;
+        uninstall) uninstall_units ;;
+        status)    show_status ;;
     esac
 }
 

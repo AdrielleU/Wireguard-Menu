@@ -21,6 +21,7 @@
 #
 # Options:
 #   -i <iface>   log only this interface (default: all detected interfaces)
+#   --dry-run    print the records it would write; log nothing, write no state
 #
 # Retention (HIPAA): the journal keeps ~9 months by default. For a longer
 # window install the drop-in shipped with this repo:
@@ -31,24 +32,38 @@ set -uo pipefail   # not -e — keep going if one interface dump fails
 
 source "$(dirname "$0")/utils.sh"
 
-# STATE_DIR / ACTIVE_WITHIN are env-overridable so the integration test
-# (test-monitoring.sh) can drive this script against an isolated state dir
-# with a short activity window, without disturbing the production logger.
+# STATE_DIR / ACTIVE_WITHIN are env-overridable so this script can be driven
+# against an isolated state dir with a short activity window, without
+# disturbing the production logger.
 STATE_DIR="${WIREGUARD_CONN_STATE_DIR:-/var/lib/wireguard-connections}"
 ACTIVE_WITHIN="${WIREGUARD_CONN_ACTIVE_WITHIN:-180}"   # secs since last handshake = connected
 
 WG_INTERFACE=""   # -i limits logging to one interface (default: all detected)
+DRY_RUN=false     # --dry-run: print what would be logged, change nothing
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -i|--interface) WG_INTERFACE="$2"; shift 2 ;;
-        -h|--help)      sed -n '3,26p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        --dry-run)      DRY_RUN=true; shift ;;
+        -h|--help)      sed -n '3,27p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *)              die "Unknown option: $1" ;;
     esac
 done
 
 check_root
-mkdir -p "$STATE_DIR"
-chmod 700 "$STATE_DIR"
+if ! $DRY_RUN; then
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR"
+fi
+
+# One connect/disconnect record: logged for real, or printed under --dry-run.
+emit_event() {
+    local event="$1" details="$2"
+    if $DRY_RUN; then
+        echo "  would log: action=${event} ${details}"
+    else
+        log_conn_event "$event" "$details"
+    fi
+}
 
 # Map a public key to its peer name from /etc/wireguard/<iface>.conf.
 # Accepts the new `# BEGIN_PEER <name>` form and the legacy `# Client/Site:` form.
@@ -84,7 +99,12 @@ fi
 for iface in "${interfaces[@]}"; do
     [[ -z "$iface" ]] && continue
     state_file="${STATE_DIR}/${iface}.state"
-    touch "$state_file"
+    # A dry run reads whatever state exists, but never creates or writes it.
+    if $DRY_RUN; then
+        [[ -f "$state_file" ]] || state_file=/dev/null
+    else
+        touch "$state_file"
+    fi
     now=$(date +%s)
 
     # State lines are:
@@ -173,7 +193,7 @@ for iface in "${interfaces[@]}"; do
                 duration=""
             fi
         fi
-        log_conn_event "$event" \
+        emit_event "$event" \
             "peer=$name interface=$iface endpoint=$endpoint allowed_ips=$allowed_ips${session:+ session=$session}${duration:+ duration_sec=$duration} pubkey=$pk"
     done
 
@@ -194,15 +214,21 @@ for iface in "${interfaces[@]}"; do
             duration=""
         fi
         name=$(peer_name "$iface" "$pk")
-        log_conn_event DISCONNECT \
+        emit_event DISCONNECT \
             "peer=$name interface=$iface endpoint=$endpoint allowed_ips=$allowed_ips${session:+ session=$session}${duration:+ duration_sec=$duration} reason=peer-removed pubkey=$pk"
     done
 
-    : > "$state_file"
-    for pk in "${!current[@]}"; do
-        printf '%s\t%s\t%s\t%s\n' \
-            "$pk" "${current[$pk]}" "${cur_since[$pk]}" "${cur_sess[$pk]}" >> "$state_file"
-    done
+    if ! $DRY_RUN; then
+        : > "$state_file"
+        for pk in "${!current[@]}"; do
+            printf '%s\t%s\t%s\t%s\n' \
+                "$pk" "${current[$pk]}" "${cur_since[$pk]}" "${cur_sess[$pk]}" >> "$state_file"
+        done
+    fi
 
     unset current previous cur_since cur_sess prev_since prev_sess
 done
+
+if $DRY_RUN; then
+    print_info "Dry run: nothing was logged and no state was written."
+fi

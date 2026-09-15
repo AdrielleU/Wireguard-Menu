@@ -5,6 +5,14 @@ After=wg-quick.target
 
 [Service]
 Type=oneshot
+
+# A timer this frequent makes systemd log "Starting/Finished/Deactivated" on
+# every run — thousands of lines a day, dwarfing the records this unit exists to
+# write. Those lines are info level, so filtering at notice drops them, while
+# SyslogLevel=notice keeps what the script itself prints. The audit records are
+# notice too (log_audit / log_conn_event in utils.sh), so they are unaffected.
+LogLevelMax=notice
+SyslogLevel=notice
 ExecStart=/etc/wireguard/scripts/log-connections.sh
 
 # Hardening

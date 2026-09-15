@@ -10,15 +10,26 @@
 #                             scripts expect?"                   (on disk)
 #
 # The check that matters most is marker coverage: WireGuard happily loads a
-# [Peer] block with no `# BEGIN_PEER <name>` markers, but list/toggle/remove/
-# rotate all read peers via those markers, so such a peer connects fine while
+# [Peer] block with no `# BEGIN_PEER <name>` markers, but Remove Peer,
+# Toggle Peer and Rotate Keys all read peers via those markers, so such a peer connects fine while
 # being invisible to — and unmanageable by — every script here. That happens
 # after a hand-edit, or when restoring a config written before the marker
 # format existed. Nothing else in the toolkit reports it.
 #
+# Site boxes are held to a different standard. A spoke, or either end of a 1:1
+# site-to-site link, runs a config nobody here wrote: one bare [Peer] and no
+# key directory. The marker and key checks would fail it on every
+# run, so it is checked instead for what a site box needs to connect and
+# heal itself: an Endpoint (or a ListenPort), PersistentKeepalive, and a
+# Healthcheck-Reachability target. An interface gets the site profile when its
+# conf says "# Healthcheck-Role = site" (or client), carries a
+# "# Healthcheck-Reachability" line, or --site is given. "Role = server" wins
+# over a reachability line.
+#
 # Usage: sudo ./verify-config.sh [OPTIONS]
 #   -i, --interface NAME   Interface to verify (default: prompt / autodetect)
 #   -a, --all              Verify every detected interface
+#       --site             Check every target as a site box
 #   -s, --strict           Treat warnings as failures too
 #   -q, --quiet            Only print problems and the summary
 #   -h, --help             Show this help
@@ -32,6 +43,7 @@ source "$(dirname "$0")/utils.sh"
 
 WG_INTERFACE=""
 ALL=false
+SITE=false
 STRICT=false
 QUIET=false
 
@@ -65,11 +77,44 @@ check_mode() {
 # CHECKS
 ################################################################################
 
+# True if the [Interface] section of <conf> sets <key>.
+iface_has_key() {
+    local conf="$1" key="$2"
+    awk -v k="$key" '
+        /^[[:space:]]*\[/ { in_i = ($0 ~ /^\[Interface\]/); next }
+        in_i && $0 ~ "^[[:space:]]*" k "[[:space:]]*=" { found = 1 }
+        END { exit !found }
+    ' "$conf"
+}
+
+# Which set of checks <conf> is held to: "server" or "site" (see the header).
+# Keyed on the same comment lines healthcheck.sh reads, so a site box that is
+# set up for the healthcheck needs nothing extra to be verified as one.
+config_profile() {
+    local conf="$1" role
+    if $SITE; then echo site; return; fi
+    role=$(awk '
+        /^[[:space:]]*#[[:space:]]*Healthcheck-Role[[:space:]]*=/ {
+            sub(/^[^=]*=/, ""); gsub(/[[:space:]]/, ""); print tolower($0); exit
+        }' "$conf" 2>/dev/null)
+    case "$role" in
+        server|hub)  echo server ;;
+        site|client) echo site ;;
+        *)
+            if grep -qE '^[[:space:]]*#[[:space:]]*Healthcheck-Reachability[[:space:]]*=' "$conf" 2>/dev/null; then
+                echo site
+            else
+                echo server
+            fi
+            ;;
+    esac
+}
+
 # --- the server config itself ---------------------------------------------
 verify_server_config() {
-    local conf="$1" iface="$2"
+    local conf="$1" iface="$2" profile="${3:-server}"
 
-    section "server config  (${conf})"
+    section "${profile} config  (${conf})"
 
     if [[ ! -f "$conf" ]]; then
         err "no config file at ${conf}"
@@ -111,16 +156,14 @@ verify_server_config() {
 
     local key
     for key in PrivateKey Address ListenPort; do
-        if awk -v k="$key" '
-                /^[[:space:]]*\[/ { in_i = ($0 ~ /^\[Interface\]/); next }
-                in_i && $0 ~ "^[[:space:]]*" k "[[:space:]]*=" { found = 1 }
-                END { exit !found }
-            ' "$conf"; then
+        if iface_has_key "$conf" "$key"; then
             ok "[Interface] has ${key}"
         else
             # A client-mode config legitimately has no ListenPort; everything
-            # this toolkit calls a server does.
+            # this toolkit calls a server does. A site box that only dials out
+            # needs none, and verify_site_peers checks it can still connect.
             if [[ "$key" == "ListenPort" ]]; then
+                [[ "$profile" == site ]] && continue
                 warn "[Interface] has no ListenPort (fine for a client config, not for a server)"
             else
                 err "[Interface] has no ${key}"
@@ -129,6 +172,62 @@ verify_server_config() {
     done
 
     check_mode "$conf" 600
+}
+
+# --- a site box: can it connect, and can it heal itself? -------------------
+# Nothing here manages a site box's peers, so markers and key files don't
+# matter on one. What does: whether it can reach its upstream at all, whether
+# the kernel keeps retrying when that upstream blips, and whether healthcheck.sh
+# has a target that lets it notice a tunnel that is up but dead.
+verify_site_peers() {
+    local conf="$1"
+
+    section "site peers"
+
+    local listen=false
+    iface_has_key "$conf" ListenPort && listen=true
+
+    # One "level|message" line per finding, then a final "count|<n>".
+    local findings
+    findings=$(awk -v listen="$listen" '
+        function value(  v) { v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v); return v }
+        function flush(  label) {
+            label = "[Peer] #" n (ep != "" ? " (" ep ")" : "")
+            if (!pk)   print "err|" label ": no PublicKey"
+            if (!aips) print "err|" label ": no AllowedIPs"
+            if (ep == "" && listen != "true")
+                print "err|" label ": no Endpoint, and [Interface] has no ListenPort, so this box can neither dial out nor be reached"
+            else if (ep == "")
+                print "ok|" label ": no Endpoint; waits to be dialled on its ListenPort"
+            else if (ka == "" || ka == "0" || ka == "off")
+                print "warn|" label ": no PersistentKeepalive; after ~90s of failed handshakes the kernel stops retrying, so the tunnel cannot come back on its own"
+            else
+                print "ok|" label ": Endpoint set, PersistentKeepalive = " ka
+        }
+        /^[[:space:]]*\[/ {
+            if (inp) flush()
+            inp = ($0 ~ /^[[:space:]]*\[Peer\]/)
+            if (inp) { n++; pk = 0; aips = 0; ep = ""; ka = "" }
+            next
+        }
+        !inp { next }
+        /^[[:space:]]*PublicKey[[:space:]]*=/           { pk = 1 }
+        /^[[:space:]]*AllowedIPs[[:space:]]*=/          { aips = 1 }
+        /^[[:space:]]*Endpoint[[:space:]]*=/            { ep = value() }
+        /^[[:space:]]*PersistentKeepalive[[:space:]]*=/ { ka = value() }
+        END { if (inp) flush(); print "count|" (n + 0) }
+    ' "$conf")
+
+    local level msg count=0
+    while IFS='|' read -r level msg; do
+        case "$level" in
+            count) count="$msg" ;;
+            err)   err "$msg" ;;
+            warn)  warn "$msg" ;;
+            ok)    ok "$msg" ;;
+        esac
+    done <<<"$findings"
+    (( count > 0 )) || err "no [Peer] section; this box has nothing to connect to"
 }
 
 # --- marker coverage: the drift that nothing else catches ------------------
@@ -140,7 +239,8 @@ verify_marker_coverage() {
     # grep -c already prints 0 when nothing matches (and exits 1) — a `|| echo 0`
     # here would append a second 0 and corrupt the arithmetic below.
     local raw marked
-    raw=$(grep -c '^[[:space:]]*\[Peer\]' "$conf" 2>/dev/null)
+    # Paused blocks count too: their [Peer] line is only commented out.
+    raw=$(strip_pause_prefixes "$conf" 2>/dev/null | grep -c '^[[:space:]]*\[Peer\]')
     marked=$(peer_list "$conf" | grep -c .)
     raw=${raw:-0}; marked=${marked:-0}
 
@@ -149,7 +249,7 @@ verify_marker_coverage() {
         return 0
     fi
 
-    err "${marked}/${raw} [Peer] blocks carry BEGIN_PEER markers — $((raw - marked)) peer(s) are invisible to list/toggle/remove/rotate"
+    err "${marked}/${raw} [Peer] blocks carry BEGIN_PEER markers — $((raw - marked)) peer(s) are invisible to Remove Peer, Toggle Peer and Rotate Keys"
 
     # Name the offenders by public key so they can be found and re-added.
     local unmanaged
@@ -162,7 +262,7 @@ verify_marker_coverage() {
         }
     ' "$conf")
     [[ -n "$unmanaged" ]] && echo "$unmanaged"
-    echo "    fix: re-add these with add-peer.sh, or wrap each block in"
+    echo "    fix: re-add them, or wrap each block in"
     echo "         '# BEGIN_PEER <name>' / '# END_PEER <name>' by hand"
 }
 
@@ -199,9 +299,24 @@ verify_peer_blocks() {
     # Per-block required fields.
     for name in "${peers[@]}"; do
         local block
+        # Paused blocks are checked through their prefix.
         block=$(awk -v b="# BEGIN_PEER ${name}" -v e="# END_PEER ${name}" '
             $0 == b { inb = 1; next } $0 == e { exit } inb { print }
+        ' "$conf" | strip_pause_prefixes)
+
+        # Paused and live WireGuard lines in the same block: wg-quick strip keeps
+        # comments, so WireGuard applies the live ones to the [Peer] above.
+        local raw_block paused_lines live_lines
+        raw_block=$(awk -v b="# BEGIN_PEER ${name}" -v e="# END_PEER ${name}" '
+            $0 == b { inb = 1; next } $0 == e { exit } inb { print }
         ' "$conf")
+        paused_lines=$(grep -c "^${PEER_PAUSE_PREFIX}" <<<"$raw_block")
+        live_lines=$(grep -cE '^[[:space:]]*(\[Peer\]|[A-Za-z][A-Za-z0-9]*[[:space:]]*=)' <<<"$raw_block")
+        if (( paused_lines > 0 && live_lines > 0 )); then
+            err "peer '${name}': half paused — ${paused_lines} line(s) commented out with '${PEER_PAUSE_PREFIX}', ${live_lines} still live; WireGuard would apply the live one(s) to the peer above it"
+        elif (( paused_lines > 0 )); then
+            ok "peer '${name}': paused"
+        fi
 
         local problems=()
         grep -qE '^[[:space:]]*PublicKey[[:space:]]*=' <<<"$block"  || problems+=("no PublicKey")
@@ -212,14 +327,14 @@ verify_peer_blocks() {
             continue
         fi
 
-        # Type metadata is what list-peers.sh renders in its type column;
-        # missing it degrades the display but breaks nothing, so: warning.
+        # Type metadata records what the peer is; missing it loses that note
+        # but breaks nothing, so: warning.
         if ! grep -qE '^#[[:space:]]*(Client|Site|Peer-to-Peer):' <<<"$block"; then
-            warn "peer '${name}': no '# Client:/# Site:/# Peer-to-Peer:' type line (list-peers.sh will show it as Client)"
+            warn "peer '${name}': no '# Client:/# Site:/# Peer-to-Peer:' type line (nothing records what this peer is)"
         fi
 
         peer_validate_name "$name" 2>/dev/null \
-            || warn "peer '${name}': name would be rejected by add-peer.sh today"
+            || warn "peer '${name}': name would be rejected by the peer-name rules today"
     done
 
     (( ERRORS == 0 )) && ok "${#peers[@]} block(s) structurally complete"
@@ -239,14 +354,15 @@ verify_no_collisions() {
         local pairs="" line
         for name in "${peers[@]}"; do
             local vals
-            vals=$(awk -v b="# BEGIN_PEER ${name}" -v e="# END_PEER ${name}" -v k="$field" '
-                $0 == b { inb = 1; next } $0 == e { exit }
+            # A paused peer still owns its key and IPs.
+            vals=$(strip_pause_prefixes "$conf" | awk -v b="# BEGIN_PEER ${name}" -v e="# END_PEER ${name}" -v k="$field" '
+                $0 == b { inb = 1; next } $0 == e { inb = 0; next }
                 inb && $0 ~ "^[[:space:]]*" k "[[:space:]]*=" {
                     sub(/^[^=]*=[[:space:]]*/, "")
                     n = split($0, a, ",")
                     for (i = 1; i <= n; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[i]); print a[i] }
                 }
-            ' "$conf")
+            ')
             while read -r line; do
                 [[ -n "$line" ]] && pairs+="${line}|${name}"$'\n'
             done <<<"$vals"
@@ -304,7 +420,7 @@ verify_key_files() {
                 err "server-publickey is not the public key of server-privatekey (peers are being handed a stale key)"
             fi
         else
-            warn "no ${pub_file} (add-peer.sh reads it to build peer configs)"
+            warn "no ${pub_file} (the server public key that peers put in their config)"
         fi
     else
         warn "no ${priv_file}"
@@ -333,7 +449,6 @@ verify_key_files() {
             warn "peer '${name}': no ${name}-publickey on disk"
         fi
 
-        [[ -f "$peer_conf" ]] || warn "peer '${name}': no ${name}.conf (show-qr.sh cannot render it)"
         check_mode "$peer_conf" 600
         check_mode "${keys_dir}/${name}-privatekey" 600
     done
@@ -352,32 +467,76 @@ verify_key_files() {
     shopt -u nullglob
 }
 
-# --- the manifest healthcheck.sh depends on --------------------------------
-verify_manifest() {
-    local iface="$1"
-    local manifest; manifest=$(manifest_path "$iface")
+# --- the comments healthcheck.sh acts on ------------------------------------
+# Two inert "#" lines in [Interface] decide what healthcheck.sh does with this
+# box, and nothing else reports on them:
+#   # Healthcheck-Role = server        never auto-restart this tunnel
+#   # Healthcheck-Reachability = <ip>  ping this through the tunnel, and restart
+#                                      when it stops answering (site/client box)
+verify_healthcheck() {
+    local conf="$1" profile="$2"
 
-    section "setup manifest  (${manifest})"
+    section "healthcheck comments"
 
-    if [[ ! -f "$manifest" ]]; then
-        warn "no manifest — healthcheck.sh cannot verify the firewall, and reset.sh cannot cleanly undo setup. Re-run setup.sh to regenerate."
+    local role targets
+    role=$(awk '
+        /^[[:space:]]*#[[:space:]]*Healthcheck-Role[[:space:]]*=/ {
+            sub(/^[^=]*=/, ""); gsub(/[[:space:]]/, ""); print tolower($0); exit
+        }' "$conf")
+    targets=$(awk '
+        /^[[:space:]]*#[[:space:]]*Healthcheck-Reachability[[:space:]]*=/ {
+            sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); if ($0 != "") print
+        }' "$conf")
+
+    # Neither line: nothing says what this box is, and healthcheck.sh falls back
+    # to treating it as a client — so --restart would bounce a server.
+    if [[ -z "$role" && -z "$targets" ]]; then
+        err "nothing declares what this box is: add '# Healthcheck-Role = server' to [Interface] on a server (never auto-restarted), or '# Healthcheck-Role = client' plus '# Healthcheck-Reachability = <upstream tunnel IP>' on a client or site box"
         return 0
     fi
-    ok "manifest present"
-    check_mode "$manifest" 600
 
-    local backends
-    backends=$(cut -d'|' -f1 "$manifest" | grep '^FW_' | sort -u | paste -sd', ')
-    if [[ -n "$backends" ]]; then
-        ok "firewall backend(s) recorded: ${backends}"
-    else
-        warn "manifest records no firewall rules (FW_*) — healthcheck's firewall check is a no-op"
+    if [[ "$profile" == server ]]; then
+        case "$role" in
+            server|hub) ok "Healthcheck-Role = ${role}: healthcheck.sh never restarts this tunnel" ;;
+            "")         err "no '# Healthcheck-Role = server' line in [Interface]: healthcheck.sh --restart would bounce this server on a structural failure, dropping every connected peer" ;;
+            *)          err "'# Healthcheck-Role = ${role}' is not a value healthcheck.sh knows: use server (or hub) here, or client/site with a Healthcheck-Reachability target" ;;
+        esac
+        if [[ -n "$targets" ]]; then
+            warn "Healthcheck-Reachability is set, but a server never restarts on reachability, so the line does nothing"
+        fi
+        return 0
     fi
 
-    if manifest_entries "$iface" SERVICE | grep -qxF "wg-quick@${iface}"; then
-        ok "service recorded: wg-quick@${iface}"
-    else
-        warn "manifest has no SERVICE entry for wg-quick@${iface}"
+    case "$role" in
+        "")          ;;
+        client|site) ok "Healthcheck-Role = ${role}" ;;
+        *)           err "'# Healthcheck-Role = ${role}' is not a value healthcheck.sh knows: use client or site here, or server on a server" ;;
+    esac
+    if [[ -z "$targets" ]]; then
+        warn "no '# Healthcheck-Reachability = <upstream tunnel IP>' line: define one and healthcheck.sh can see a tunnel that is up but passing no traffic; without it only a dead service or a missing address is caught"
+        return 0
+    fi
+
+    # Every target must be something healthcheck.sh can ping, and pinging our own
+    # address proves nothing about the tunnel.
+    local own t bad=0
+    own=$(awk '
+        /^[[:space:]]*\[/ { in_i = ($0 ~ /^\[Interface\]/); next }
+        in_i && /^[[:space:]]*Address[[:space:]]*=/ {
+            sub(/^[^=]*=[[:space:]]*/, ""); n = split($0, a, ",")
+            for (i = 1; i <= n; i++) { gsub(/[[:space:]]/, "", a[i]); sub(/\/.*/, "", a[i]); print a[i] }
+        }' "$conf")
+    for t in ${targets//,/ }; do
+        if ! looks_like_host "$t"; then
+            err "Healthcheck-Reachability target '${t}' is not a valid IP or hostname; healthcheck.sh ignores it"
+            bad=1
+        elif grep -qxF "$t" <<<"$own"; then
+            warn "Healthcheck-Reachability target '${t}' is this box's own address, so pinging it never tests the tunnel"
+            bad=1
+        fi
+    done
+    if (( ! bad )); then
+        ok "Healthcheck-Reachability: $(paste -sd' ' <<<"$targets") — pinged through the tunnel"
     fi
 }
 
@@ -388,14 +547,29 @@ verify_manifest() {
 verify_interface() {
     local iface="$1"
     local conf="${WG_CONFIG_DIR}/${iface}.conf"
+    local profile; profile=$(config_profile "$conf")
 
-    $QUIET || { echo; echo -e "${BLUE}########  ${iface}  ########${NC}"; }
+    if ! $QUIET; then
+        echo
+        if [[ "$profile" == site ]]; then
+            echo -e "${BLUE}########  ${iface}  (site box)  ########${NC}"
+        else
+            echo -e "${BLUE}########  ${iface}  ########${NC}"
+        fi
+    fi
 
-    verify_server_config "$conf" "$iface" || return
+    verify_server_config "$conf" "$iface" "$profile" || return
+
+    if [[ "$profile" == site ]]; then
+        verify_site_peers "$conf"
+        verify_healthcheck "$conf" site
+        return
+    fi
+
     verify_marker_coverage "$conf"
     verify_peer_blocks "$conf"
     verify_key_files "$conf" "$iface"
-    verify_manifest "$iface"
+    verify_healthcheck "$conf" server
 }
 
 parse_arguments() {
@@ -403,9 +577,10 @@ parse_arguments() {
         case "$1" in
             -i|--interface) WG_INTERFACE="$2"; shift 2 ;;
             -a|--all)       ALL=true; shift ;;
+            --site)         SITE=true; shift ;;
             -s|--strict)    STRICT=true; shift ;;
             -q|--quiet)     QUIET=true; shift ;;
-            -h|--help)      sed -n '3,27p' "$0" | sed 's/^# \?//'; exit 0 ;;
+            -h|--help)      sed -n '3,37p' "$0" | sed 's/^# \?//'; exit 0 ;;
             *)              die "Unknown option: $1" ;;
         esac
     done

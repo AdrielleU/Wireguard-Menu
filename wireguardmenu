@@ -5,9 +5,9 @@
 # Usage:
 #   wireguardmenu                  # launch the interactive menu (menu.sh)
 #   wireguardmenu <command> [args] # run a single action, e.g:
-#       wireguardmenu reset
-#       wireguardmenu rotate-keys
-#       wireguardmenu add-peer -i wg0
+#       wireguardmenu verify --all
+#       wireguardmenu healthcheck -v
+#       wireguardmenu list-peers
 #   wireguardmenu help             # list commands
 #   wireguardmenu install          # symlink this into /usr/local/bin
 #   wireguardmenu uninstall        # remove that symlink
@@ -37,17 +37,14 @@ PROG="$(basename "$0")"
 LINK_TARGET="/usr/local/bin/wireguardmenu"
 
 # command  ->  "script.sh|one-line description"
-# Ordered for the help output. Interactive-only actions (restart/reload) live
-# inside menu.sh and are reached via the bare `wireguardmenu` menu.
+# Ordered for the help output. A bare `wireguardmenu` opens menu.sh.
 declare -A COMMANDS=(
-    [setup]="setup.sh|Set up a new WireGuard server"
-    [add-peer]="add-peer.sh|Add a peer (client or site)"
-    [remove-peer]="remove-peer.sh|Remove a peer"
-    [list-peers]="list-peers.sh|List / view peers"
-    [toggle-peer]="toggle-peer.sh|Enable or disable a peer"
-    [show-qr]="show-qr.sh|Show a client QR code"
-    [rotate-keys]="rotate-keys.sh|Rotate server or peer keys"
-    [reset]="reset.sh|Reset / clean up WireGuard"
+    [setup]="menu.sh|Set up a new WireGuard server (in the menu)"
+    [add-peer]="menu.sh|Add a client peer (in the menu)"
+    [remove-peer]="menu.sh|Remove a peer (in the menu)"
+    [list-peers]="menu.sh|List peers, wg show all (in the menu)"
+    [toggle-peer]="menu.sh|Pause or resume a peer (in the menu)"
+    [rotate-keys]="menu.sh|Rotate server or peer keys (in the menu)"
     [healthcheck]="healthcheck.sh|Run health checks (is the tunnel working now?)"
     [verify]="verify-config.sh|Verify the config matches the expected format"
     [log-connections]="log-connections.sh|Connection logging / audit"
@@ -55,8 +52,8 @@ declare -A COMMANDS=(
 )
 
 # Display order for help (assoc arrays are unordered in bash).
-ORDER=(setup add-peer remove-peer list-peers toggle-peer show-qr \
-       rotate-keys reset healthcheck verify log-connections menu)
+ORDER=(setup add-peer remove-peer list-peers toggle-peer \
+       rotate-keys healthcheck verify log-connections menu)
 
 # Convenience aliases
 declare -A ALIASES=(
@@ -66,7 +63,6 @@ declare -A ALIASES=(
     [rm]="remove-peer"
     [remove]="remove-peer"
     [toggle]="toggle-peer"
-    [qr]="show-qr"
     [health]="healthcheck"
     [check]="verify"
     [verify-config]="verify"
@@ -83,7 +79,7 @@ Usage:
   ${PROG} help             Show this help
   ${PROG} install          Symlink into ${LINK_TARGET%/*}
   ${PROG} uninstall        Remove that symlink
-  ${PROG} test [--all]     Run the test suites (see: ${PROG} test --help)
+  ${PROG} test             Run every script's --dry-run (see: ${PROG} test --help)
 
 Commands:
 EOF
@@ -94,7 +90,7 @@ EOF
     done
     echo ""
     echo "Aliases: rotate=rotate-keys, add=add-peer, rm=remove-peer, ls=list-peers,"
-    echo "         qr=show-qr, health=healthcheck, check=verify, logs=log-connections"
+    echo "         health=healthcheck, check=verify, logs=log-connections"
     echo ""
     echo "Scripts location: ${REPO_DIR}"
 }
@@ -125,40 +121,36 @@ uninstall_link() {
     fi
 }
 
-# Test suites, ordered fast-and-safe first. The split is by SYSTEM IMPACT, which
-# is what you want to know before running one:
-#   fast  — fixtures in a temp dir only; touches no interfaces, units or config
-#   full  — additionally stands up real WireGuard interfaces, a netns and veth
-#           pairs, and drives real systemd units (~2 min)
-FAST_SUITES=(test-verify-config.sh test-installers.sh)
-FULL_SUITES=(test-monitoring.sh)
+# What `wireguardmenu test` runs: each script's own --dry-run. Every check they
+# make, but nothing written — no units, no systemctl, no journal entries — so
+# this is safe on a live server at any time.
+# Each entry is a script in this repo followed by its arguments.
+TEST_RUNS=(
+    "install-healthcheck.sh --dry-run"
+    "install-logging.sh --dry-run"
+    "log-connections.sh --dry-run"
+)
 
 run_tests() {
-    local -a suites=("${FAST_SUITES[@]}")
-    local mode="fast"
-
     case "${1:-}" in
-        --all|--full)  suites+=("${FULL_SUITES[@]}"); mode="all" ;;
-        --fast|"")     ;;
+        "") ;;
         -h|--help)
             cat <<EOF
-${PROG} test [--fast|--all]
+${PROG} test
 
-  --fast   (default) fixture-only suites: $(IFS=' '; echo "${FAST_SUITES[*]}")
-           A few seconds. Creates no interfaces, writes no units, reads no
-           production config — safe to run on a live server at any time.
+Runs each script's own --dry-run:
+$(printf '  %s\n' "${TEST_RUNS[@]}")
+Every check a real run makes, but nothing written: no units, no systemctl and
+no journal entries. Safe on a live server at any time.
 
-  --all    the above plus: $(IFS=' '; echo "${FULL_SUITES[*]}")
-           ~2 minutes. Stands up throwaway WireGuard interfaces, a network
-           namespace and veth pairs, and drives real systemd units. Safe (it
-           tears everything down via an EXIT trap and never touches production
-           interfaces) but it does act on the system — run it deliberately.
+Two more need no flag, because they only read: verify-config.sh, and
+healthcheck.sh without --restart.
 
-Requires root. Exits non-zero if any suite fails.
+Requires root. Exits non-zero if any run fails.
 EOF
             exit 0
             ;;
-        *) echo "Unknown test option: $1 (use --fast or --all)" >&2; exit 2 ;;
+        *) echo "Unknown test option: $1 (test takes no options)" >&2; exit 2 ;;
     esac
 
     if [[ $EUID -ne 0 ]]; then
@@ -166,27 +158,28 @@ EOF
         exit 1
     fi
 
-    local failed=0 suite path
-    for suite in "${suites[@]}"; do
-        path="${REPO_DIR}/${suite}"
+    local failed=0 run path
+    local -a args
+    for run in "${TEST_RUNS[@]}"; do
+        read -r -a args <<<"$run"
+        path="${REPO_DIR}/${args[0]}"
         if [[ ! -x "$path" ]]; then
-            echo "Missing or non-executable suite: $path" >&2
+            echo "Missing or non-executable script: $path" >&2
             failed=$((failed + 1))
             continue
         fi
         echo
-        echo "################  ${suite}  ################"
-        "$path" || failed=$((failed + 1))
+        echo "################  ${run}  ################"
+        "$path" "${args[@]:1}" || failed=$((failed + 1))
     done
 
     echo
-    echo "################  ${mode} run complete  ################"
+    echo "################  complete  ################"
     if (( failed == 0 )); then
-        echo "All suites passed (${#suites[@]} run)."
-        [[ "$mode" == "fast" ]] && echo "Run '${PROG} test --all' to include the live integration suite."
+        echo "All dry runs passed (${#TEST_RUNS[@]} run)."
         exit 0
     fi
-    echo "${failed} of ${#suites[@]} suite(s) failed." >&2
+    echo "${failed} of ${#TEST_RUNS[@]} dry run(s) failed." >&2
     exit 1
 }
 

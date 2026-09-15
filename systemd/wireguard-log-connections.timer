@@ -2,10 +2,12 @@
 Description=Run WireGuard connection logger every 2 minutes
 
 [Timer]
-OnBootSec=1min
+# OnActiveSec counts from when the timer starts, OnBootSec from the kernel: a
+# slow boot that starts timers more than a minute in skips OnBootSec for good,
+# leaving the timer enabled and active but never firing.
+OnActiveSec=1min
 OnUnitActiveSec=2min
 RandomizedDelaySec=30
-Persistent=true
 
 [Install]
 WantedBy=timers.target

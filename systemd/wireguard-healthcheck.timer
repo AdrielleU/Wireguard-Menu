@@ -2,10 +2,12 @@
 Description=Run WireGuard healthcheck every minute (re-resolve ~2 min, restart ~3 min into an outage)
 
 [Timer]
-OnBootSec=1min
+# OnActiveSec counts from when the timer starts, OnBootSec from the kernel: a
+# slow boot that starts timers more than a minute in skips OnBootSec for good,
+# leaving the timer enabled and active but never firing.
+OnActiveSec=1min
 OnUnitActiveSec=60s
 RandomizedDelaySec=10
-Persistent=true
 
 [Install]
 WantedBy=timers.target

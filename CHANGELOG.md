@@ -8,9 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`menu.sh` rewritten** — the menu does the work itself instead of launching a
+  script per action, built on `utils.sh`. The actions are deliberately minimal.
+  *Setup WireGuard Server* writes `<iface>.conf` and the server keypair
+  (reusing existing keys) and marks it `# Healthcheck-Role = server` so the
+  healthcheck never bounces it; an existing config is left alone and checked
+  with `verify-config.sh` instead. *Add Peer* generates a client keypair and adds the
+  peer to the config in the `BEGIN_PEER` format the peer scripts read. *Remove
+  Peer* deletes the peer's block and key files. *Toggle Peer* pauses a peer —
+  its WireGuard lines commented out with `#! ` — or resumes it. *Rotate Keys*
+  gives one peer or the server a new keypair, swaps the key in the config
+  (paused peers included) and updates client configs kept in `<iface>/`. *List
+  Peers* runs `wg show all`. Each
+  then syncs a running interface from the file with
+  `wg syncconf <iface> <(wg-quick strip <conf>)`, however it was started, so
+  unchanged peers stay connected. The strip runs on its own first: a strip that
+  fails inside the pipe hands syncconf an empty config, which drops every peer
+  and clears the private key. Remove, Toggle and Rotate finish with
+  `verify-config.sh`. Each action runs in a subshell, so a failure returns to
+  the menu.
+- **`verify-config.sh` site-box profile.** A spoke's config — one bare
+  `[Peer]`, no markers, no key directory, no manifest — failed marker coverage
+  on every run, so the check was useless on exactly the boxes that now receive
+  it. An interface with a `# Healthcheck-Reachability` line or
+  `# Healthcheck-Role = site|client`, or any interface under `--site`, is now
+  checked for what a site box needs instead: `Endpoint` (or `ListenPort`),
+  `PersistentKeepalive`, and a reachability target, plus the manifest if one
+  exists. `Role = server` still gets the full checks.
+- **`--dry-run` on `install-healthcheck.sh` and `install-logging.sh`**, so the
+  installers test themselves: every check a real run makes, but nothing
+  written and no `systemctl`. The unit helpers in
+  `utils.sh` now refuse to install a unit whose `ExecStart` script is missing or
+  not executable, on real runs too — that is a timer firing forever against
+  nothing. These replace the separate installer and verify-config test suites;
+  `verify-config.sh` only reads, so running it is its own check.
 - **`wireguardmenu test [--fast|--all]`** — one entry point for the suites,
-  which previously had none. `--fast` (default) runs the fixture-only suites in
-  a few seconds; `--all` adds the live integration suite. The split is by system
+  which previously had none. `--fast` (default) runs the installers' and the
+  deploy's `--dry-run` in a few seconds; `--all` adds the live integration suite. The split is by system
   impact rather than by subject, since "does this create interfaces and drive
   systemd" is the thing worth knowing before running one. Exits non-zero if any
   suite fails, so it can gate a commit.
@@ -44,14 +78,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SystemMaxUse` evicts silently, and nothing reported it. Measured on a modest
   server, the previously shipped 2G cap held ~724 days — under two years, not
   six.
-- `test-installers.sh` — 37 checks covering unit-path rewriting (including that
-  the healthcheck's `--restart` argument survives it), that each installer
-  touches only its own units, rejection of unsafe repo paths, and the retention
-  projection across suffix parsing, drop-in merge order, undersized/sufficient/
-  unset caps and a configurable target window. Unit writes are redirected via
-  `UNIT_DST` and retention reads a fixture via `JOURNALD_CONF_ROOT`, so the
-  suite never writes to `/etc/systemd/system` or reads the host's journald
-  config.
 
 - **`verify-config.sh` (`wireguardmenu verify`)** — asserts that an interface's
   on-disk state matches the conventions these scripts write and read. It is a
@@ -75,14 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Note that `wg-quick strip` is *not* a validator — it is a filter that exits 0
   on arbitrary garbage — so the structural check is done here directly rather
   than delegated to it.
-- `test-verify-config.sh` — 62 fault-injection checks for the above. Each test
-  starts from a conformant fixture built with real `wg genkey` material, injects
-  exactly one defect, and asserts both the message and the exit code, so a check
-  that stops working fails one named test. Verified by mutation: disabling the
-  marker-coverage check, the server-key comparison, the unterminated-block
-  check, the warning/error split, or the exit code each makes the suite fail.
-  Purely filesystem-based (everything runs under `WG_CONFIG_DIR` in a temp dir),
-  so it needs no interfaces or systemd units and is safe on a live server.
 - `menu.sh` grew a **Diagnostics** section exposing both `verify-config.sh` and
   `healthcheck.sh`; the latter was previously reachable only via
   `wireguardmenu healthcheck`, never from the interactive menu.
@@ -99,6 +117,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since shrinking retention would discard existing history.
 
 ### Changed
+- **The timer units no longer fill the journal with their own start/stop
+  lines.** A 60s healthcheck and a 2min logger made systemd write
+  "Starting/Finished/Deactivated" on every run — 105,164 entries in 30 days on
+  this host, against 2,700 from everything else combined, or roughly 3.5MB/day
+  of journal that was almost entirely our own timers announcing themselves.
+  Both units now set `LogLevelMax=notice`, which drops those (systemd logs them
+  at info), with `SyslogLevel=notice` so the scripts' own output is kept, and
+  `log_audit()` writes at `auth.notice` instead of `auth.info` — an info-level
+  record survives that filter only sometimes, which is worse than never. A
+  healthy healthcheck run now writes 0 journal lines instead of 2; failures,
+  script output and every audit record still land. Connect/disconnect records
+  were already written only on state change, so nothing there needed narrowing.
+- **The setup manifest is gone.** Nothing had written one since `setup.sh` was
+  removed, so `healthcheck.sh`'s firewall check was a no-op on every server
+  built with `menu.sh`. Removed: `manifest_path/add/entries` from
+  `utils.sh`, the firewall check and its auto-start of a stopped firewalld/ufw
+  from `healthcheck.sh` (~90 lines), and the manifest section from
+  `verify-config.sh`. On an old `setup.sh` box the healthcheck no longer
+  notices a stopped firewall closing the UDP port.
+- `verify-config.sh` now checks the two comment lines `healthcheck.sh` acts on,
+  which nothing else reported: a config with neither line is an error (nothing
+  says whether the box is a server or a client, and the healthcheck assumes
+  client), a server missing `# Healthcheck-Role = server` is an error (without
+  it `--restart` bounces the server on a structural failure, dropping every
+  peer), a role value it does not know is an error, a reachability target that is not a valid IP or hostname is an
+  error (the healthcheck silently ignores it), and a target that is the box's
+  own address is flagged because pinging it never tests the tunnel.
+  `looks_like_host()` moved from `healthcheck.sh` to `utils.sh` so both use one
+  implementation.
+- `healthcheck.sh`, `log-connections.sh`, `verify-config.sh` and `utils.sh` no
+  longer name `menu.sh` in anything they print: they are deployed to remote
+  boxes without it, where a message telling the operator to run it would be a
+  dead end.
+- `wireguardmenu test` runs each script's `--dry-run` rather than a suite list;
+  `--fast` / `--all` are gone with the live suite.
+- `verify-config.sh` reports a paused peer as `paused` instead of saying
+  nothing, and fails a block that is only half paused — some WireGuard lines
+  commented out, some not. `wg-quick strip` keeps comments, so WireGuard applies
+  the live lines to the `[Peer]` above: in testing, a stray live `PublicKey`
+  replaced the previous peer's key, and that peer disappeared while the stray
+  key inherited its `AllowedIPs`.
+- The installers say when systemd was reloaded and the timer enabled and
+  started, rather than only naming the unit files, and warn when a timer ends up
+  enabled and active with nothing scheduled.
+- The installers and `healthcheck.sh` check that the host runs systemd
+  (`/run/systemd/system`) and stop straight away if it does not. The installers
+  also stop with an error when `systemctl daemon-reload`, `enable` or starting the timer
+  fails, instead of printing success.
+- `verify-config.sh` no longer warns about a peer without a client config
+  (`<name>.conf`) or an interface without a setup manifest. Both warnings
+  existed for `show-qr.sh` and `reset.sh`, and fired on every server set up by
+  `menu.sh`. A manifest that does exist is still checked.
 - **`setup.sh` and `reset.sh` now use the shared helpers they were already
   sourcing.** Both scripts sourced `utils.sh` and then redefined `print_*`,
   `log`, `die`, `check_root` and the colour variables, so they silently ran on
@@ -134,10 +204,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous plain tagged line rather than losing the record.
 
 ### Fixed
+- **The healthcheck and connection-logger timers could stop running for good
+  after a reboot.** They started from `OnBootSec=1min`, which counts from kernel
+  boot. On a host whose boot took about 30 minutes to reach the timers, that
+  trigger had already passed, and `OnUnitActiveSec` had no earlier run to count
+  from, so nothing was ever scheduled again, while `systemctl` still showed both
+  timers `enabled` and `active`. Found on a server where neither had run for 11
+  days. They now use `OnActiveSec=1min`, which counts from when the timer
+  starts. Re-run the installers to pick it up.
+- `verify-config.sh` failed any config holding a peer disabled by
+  `toggle-peer.sh`: the commented-out block made marker coverage report
+  "2/1 … -1 peer(s) are invisible" and the block "no PublicKey, no AllowedIPs".
+  Disabled and paused blocks (`#! ` lines) are now read through that prefix, and
+  `peer_pubkey()` finds their key.
+- `peer_remove()` and `peer_pubkey()` in `utils.sh` matched a peer's markers as
+  a regex, and peer names may contain `.` — so removing `a.b` also deleted a
+  peer named `axb`, and `peer_pubkey a.b` could return `axb`'s key (which
+  `remove-peer.sh` then used to disconnect the live peer). Marker lines are now
+  compared exactly.
 - `unit_install_service()` checked the source file's existence before
   validating the repo path, so a path containing `#` (which breaks the `sed`
   delimiter used for unit rewriting) reported a misleading "missing file"
-  error instead of the real cause. Caught by `test-installers.sh`.
+  error instead of the real cause.
 - The shipped journal retention drop-in paired `MaxRetentionSec=6year` with
   `SystemMaxUse=2G`. Since size wins over age, that silently capped the audit
   trail at roughly two years on a typical host — well short of the six-year
@@ -195,6 +283,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Interactive menu for selecting server or peer rotation
   - Maintains all functionality from both previous scripts
   - Updated menu.sh to reflect single key rotation option
+
+### Removed
+- **`setup.sh`.** Server setup is now *Setup WireGuard Server* in
+  `menu.sh`, which only writes the config and keys. The rest of what
+  `setup.sh` did is not done anywhere now: installing packages, IP forwarding,
+  firewall rules, SELinux, the setup manifest (which `reset.sh` and the
+  healthcheck's firewall check read), starting `wg-quick@<iface>`, importing a
+  config (`--config`) and client mode (`--peer-of`). `wireguardmenu setup` opens the menu.
+- **`add-peer.sh` and `remove-peer.sh`.** Adding and removing peers is now
+  *Add Peer* / *Remove Peer* in `menu.sh`. Not carried over: site and p2p
+  peers, the peer's own client config file (so `show-qr.sh` has nothing to show
+  for a new peer until one is written by hand), the DNS, routing and keepalive
+  options, non-interactive flags (`-i`, `-n`, …), and the `REMOVE_PEER` audit
+  record `remove-peer.sh` wrote. `wireguardmenu add-peer` / `remove-peer` open the menu.
+- **`toggle-peer.sh`.** Pausing and resuming a peer is now *Toggle Peer* in
+  `menu.sh`, which comments a peer out with the same `#! ` prefix, so peers
+  it disabled show as paused there. Not carried over: the non-interactive flags
+  and the `TOGGLE_PEER` audit record. `wireguardmenu toggle-peer` opens the menu.
+- **`rotate-keys.sh`.** Key rotation is now *Rotate Keys* in `menu.sh`. Not
+  carried over: the `-s` / `-p` flags and the `KEY_ROTATION` audit record.
+  `wireguardmenu rotate-keys` opens the menu.
+- **`reset.sh`.** Nothing replaces it. Taking a server down — `wg-quick down`,
+  then deleting its config and key directory — is manual, and the firewall
+  rules, IP forwarding and packages an old `setup.sh` install set up are no
+  longer undone by any script. Removed from the menu and `wireguardmenu`.
+- **`show-qr.sh`.** Nothing writes peer client configs any more, so there was
+  nothing for it to show. Removed from the menu and `wireguardmenu`, along with the `qr` alias.
+- **`test-monitoring.sh` and `test-lib.sh`.** The live integration suite (62
+  checks that stood up throwaway interfaces, a netns and veth pairs, and drove
+  real systemd units against healthcheck.sh and log-connections.sh) and its
+  assertion harness are gone, in favour of each script testing itself:
+  `log-connections.sh` gains a `--dry-run` that prints the connect/disconnect
+  records it would write without logging or writing state, joining the two
+  installers' dry runs in `wireguardmenu test`.
+  `healthcheck.sh` without `--restart` already reports without changing
+  anything. What is no longer checked automatically is the healthcheck's
+  recovery behaviour — the restart ladder, the WAN gate, the cooldown — and the
+  logger's session and duration tracking.
+- **The old `menu.sh`** — the menu that launched a script per action — is gone;
+  the rewrite above took its name, and a bare `wireguardmenu` (or
+  `wireguardmenu menu`) opens it. Not carried over: the interactive
+  *Restart / Reload Server* action — `wg syncconf` already runs after every
+  action in `menu.sh`, and an interface-level change still needs
+  `sudo systemctl restart wg-quick@<iface>` by hand — and the `RELOAD` /
+  `RESTART` audit records it wrote, which leaves `healthcheck.sh` as the only
+  writer of the `wireguard-audit` tag.
+- **`list-peers.sh`.** Listing is now *List Peers* in `menu.sh`, which runs
+  `wg show all` — the kernel's own view, rather than a rendering of the config.
+  Not carried over: the per-peer and detailed views, the type column, and the
+  fallback listing of peers that have no markers. `wireguardmenu list-peers` opens the menu.
 
 ## [2.0.0] - 2025-10-23
 

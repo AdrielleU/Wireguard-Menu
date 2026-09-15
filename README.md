@@ -14,17 +14,7 @@ Provide a comprehensive command-line interface for WireGuard server and client m
 
 ## Features
 
-### Automatic Detection & Configuration
-- **OS Detection**: Automatically detects and configures for RHEL, CentOS, Rocky, AlmaLinux, Fedora, Ubuntu, and Debian
-- **Package Manager**: Auto-selects dnf/yum (RHEL-based) or apt (Debian-based)
-- **Firewall Detection**: Automatically detects and configures firewalld, ufw, iptables, or nftables
-- **Kernel Checking**: Verifies kernel version compatibility for WireGuard support
-- **SELinux Support**: Handles SELinux contexts automatically on RHEL-based systems
-
-### Safety & Conflict Prevention
-- **Network Conflict Detection**: Checks for IP address range conflicts with existing interfaces
-- **Port Conflict Detection**: Verifies UDP ports are available before use
-- **Interface Conflict Detection**: Prevents duplicate interface names
+### Safety
 - **Configuration Backup**: Automatically backs up existing configs with timestamps
 - **Service Management**: Safely stops/starts services when needed
 
@@ -72,124 +62,125 @@ WireGuard has been included in the mainline Linux kernel since version 5.6 (Marc
 The easiest way to manage your WireGuard servers:
 
 ```bash
-./menu.sh
+sudo ./menu.sh
 ```
 
-This displays a clean menu with all available management operations:
-- Peer Management (add, remove, list, toggle enable/disable)
-- Peer Configuration (QR codes)
-- Server Setup & Management (initial setup, restart/reload, rotate keys, reset)
-- Auditing (connection logging)
+It does the work itself rather than launching other scripts:
+- Peer Management (add, remove, pause/resume, list)
+- Server Setup & Management (initial setup, rotate keys)
 
-### Quick Setup (Command Line)
+Every action ends by checking the config with `verify-config.sh`.
 
-Set up your first WireGuard server with defaults:
+### Set up a server
+
 ```bash
-sudo ./setup.sh
+sudo ./menu.sh      # then: 5) Setup WireGuard Server
 ```
 
-You'll be prompted for:
-- Interface name (default: wg0)
-- Listen port (default: 51820)
-- Server IP address (default: 10.0.0.1/24)
-- VPN network range (default: 10.0.0.0/24)
+You'll be prompted for the interface name (default `wg0`), listen port (default
+`51820`) and server address (default `10.0.0.1/24`); press Enter to accept a
+default. It generates the server keypair into `/etc/wireguard/<iface>/`, writes
+`/etc/wireguard/<iface>.conf`, and checks the result with `verify-config.sh`.
+The config gets a `# Healthcheck-Role = server` line, which is what stops
+`healthcheck.sh` from ever auto-restarting it — see
+[Never auto-restart the server](#never-auto-restart-the-server).
+An existing config is never overwritten — it is checked instead. For another
+server on the same box, pick a different interface, port and address (e.g.
+`wg1`, `51821`, `10.0.1.1/24`).
 
-Press Enter to accept defaults, or type custom values.
+Setup only writes the config and keys. Installing `wireguard-tools`, IP
+forwarding and opening the UDP port are up to you — see
+[Manual Setup](#manual-setup-no-scripts), steps 0, 6 and 7 — and then start it:
 
-### Command-Line Arguments
-
-Provide configuration via command-line arguments:
 ```bash
-sudo ./setup.sh \
-  --interface wg0 \
-  --port 51820 \
-  --server-ip 10.0.0.1/24 \
-  --network 10.0.0.0/24
+sudo systemctl enable --now wg-quick@wg0
 ```
 
-### Mixed Mode
+### Add a peer
 
-Provide some arguments, get prompted for others:
 ```bash
-sudo ./setup.sh --port 51820
-# Will prompt for interface name, server IP, and network
+sudo ./menu.sh      # then: 1) Add Peer (Client)
 ```
 
-### Running Multiple Servers
+It asks for the interface (if there are several), a peer name and a tunnel IP
+(the next free one is suggested). It generates the peer's keypair into
+`/etc/wireguard/<iface>/<name>-privatekey` and `-publickey`, adds the peer to
+`<iface>.conf`, and if the interface is up, syncs it from the file with
+`wg syncconf <iface> <(wg-quick strip <conf>)`, so connected peers stay up. It
+adds client peers only (for site
+peers, see [Multi-Site](#multi-site-hub-and-spoke-topology)) and does not write
+the peer's own config file: build that from the private key and the server
+public key it prints ([Manual Setup, step 8](#8-the-client-side)). Kept as
+`/etc/wireguard/<iface>/<name>.conf`, Rotate Keys updates it for you.
 
-First server (uses defaults):
+### Remove a peer
+
 ```bash
-sudo ./setup.sh
+sudo ./menu.sh      # then: 2) Remove Peer
 ```
 
-Second server (different interface, port, and network):
+Pick the peer and confirm. It deletes the peer's block from `<iface>.conf` —
+everything from its `# BEGIN_PEER <name>` line through `# END_PEER <name>` —
+along with its key files, backing the config up first. If the interface is up —
+however it was started — it syncs it from the file (`wg syncconf` with
+`wg-quick strip`), which drops just that peer; the others stay connected. It
+always finishes by checking the config with `verify-config.sh`.
+
+### Pause or resume a peer
+
 ```bash
-sudo ./setup.sh \
-  --interface wg1 \
-  --port 51821 \
-  --server-ip 10.0.1.1/24 \
-  --network 10.0.1.0/24
+sudo ./menu.sh      # then: 3) Toggle Peer (pause/resume)
 ```
 
-Third server:
+The list shows each peer as `[active]` or `[paused]`; pick one and confirm.
+Pausing comments out the peer's WireGuard lines with `#! `. If the interface is
+up it is then synced from the file (`wg syncconf` with `wg-quick strip`), which
+leaves the commented lines out and so drops the peer:
+
+```
+# BEGIN_PEER bob
+# Client: bob
+#! [Peer]
+#! PublicKey = …
+#! AllowedIPs = 10.0.0.3/32
+# END_PEER bob
+```
+
+The markers stay, so the peer keeps its name and IP and stays paused across
+restarts. Resuming uncomments the lines, and the same sync adds the peer back
+with everything in its block — Endpoint, keepalive, preshared key. Both finish
+by checking the config with `verify-config.sh`, which reports the peer as
+`paused` and fails a block left half commented out.
+
+### List peers
+
 ```bash
-sudo ./setup.sh \
-  --interface wg2 \
-  --port 51822 \
-  --server-ip 10.0.2.1/24 \
-  --network 10.0.2.0/24
+sudo ./menu.sh      # then: 4) List Peers (wg show all)
 ```
 
-### Help
+Runs `wg show all`: every interface with its peers, endpoints, last handshake
+and transfer. It is the kernel's own view, so a paused peer is not in it —
+`verify-config.sh` is what reports those as `paused`.
 
-View all options:
+### Rotate keys
+
 ```bash
-./setup.sh --help
+sudo ./menu.sh      # then: 6) Rotate Keys (server or peer)
 ```
 
-## Command-Line Options
+Choose one peer's keys or the server's, and confirm. It backs up the config,
+replaces the key files with a new keypair, and swaps the key where it sits in
+the config — the peer's `PublicKey` in its block (paused peers included), or the
+server's `PrivateKey` in `[Interface]`. If the interface is up it is synced from
+the file, and the config is then checked with `verify-config.sh`.
 
-| Option | Description | Default |
-|---|---|---|
-| `--interface NAME` | Interface name | wg0 |
-| `--port PORT` | UDP listen port | 51820 |
-| `--server-ip IP` | Server IP with CIDR | 10.0.0.1/24 |
-| `--network CIDR` | VPN network range | 10.0.0.0/24 |
-| `-h, --help` | Show help message | - |
+- **Peer keys:** only that peer is cut off, until it has its new private key
+  (`/etc/wireguard/<iface>/<name>-privatekey`).
+- **Server keys:** every peer is cut off until its config has the new server
+  public key, which is printed at the end.
 
-## What the Script Does
-
-1. **Checks Prerequisites**
-   - Root privileges
-   - Kernel version compatibility
-   - OS detection
-   - WireGuard kernel module availability
-
-2. **Validates Configuration**
-   - Lists existing WireGuard servers
-   - Checks for interface conflicts
-   - Checks for port conflicts
-   - Checks for network conflicts
-   - Shows configuration summary for approval
-
-3. **Installs & Configures**
-   - Installs wireguard-tools (if needed)
-   - Generates server keys
-   - Creates WireGuard configuration
-   - Enables IP forwarding
-   - Configures firewall rules
-   - Handles SELinux (on RHEL)
-
-4. **Starts Services**
-   - Enables WireGuard service
-   - Starts WireGuard interface
-   - Verifies service is running
-
-5. **Provides Summary**
-   - Server public key
-   - Configuration file location
-   - Useful management commands
-   - Next steps for adding clients
+Client configs kept as `/etc/wireguard/<iface>/<name>.conf` get the new key
+automatically.
 
 ## Managing WireGuard Servers
 
@@ -253,245 +244,47 @@ systemctl status wg-quick@wg0
 ## Available Scripts
 
 ### 1. menu.sh
-**Interactive menu for all WireGuard operations**
+**Menu that does the work itself: server setup, adding, removing and pausing peers, and key rotation**
 
 ```bash
-./menu.sh
+sudo ./menu.sh
 ```
 
-Displays a clean, organized menu of all available scripts. Best for interactive use.
-
-### 2. setup.sh
-**Initial WireGuard server setup**
-
-```bash
-sudo ./setup.sh [OPTIONS]
-```
-
-**Options:**
-- `--interface NAME` - Interface name (default: wg0)
-- `--port PORT` - UDP listen port (default: 51820)
-- `--server-ip IP` - Server IP with CIDR (default: 10.0.0.1/24)
-- `--network CIDR` - VPN network range (default: 10.0.0.0/24)
-- `-h, --help` - Show help message
-
-**Example:**
-```bash
-# Interactive mode
-sudo ./setup.sh
-
-# With arguments
-sudo ./setup.sh --interface wg1 --port 51821 --server-ip 10.0.1.1/24 --network 10.0.1.0/24
-```
-
-### 3. add-peer.sh
-**Add a new peer (client, site, or peer-to-peer) to a WireGuard server**
-
-```bash
-sudo ./add-peer.sh [OPTIONS]
-```
-
-**Options:**
-- `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-n, --name NAME` - Peer name
-- `-t, --type TYPE` - Peer type: `client`, `site`, or `p2p`
-- `--ip IP` - Peer tunnel IP (auto-suggested if not provided)
-- `-h, --help` - Show help
-
-**Features:**
-- Auto-detects single server or shows selection menu
-- Suggests the next available IP in the VPN subnet
-- Generates the peer keypair automatically
-- Writes the peer config file to `/etc/wireguard/<iface>/<name>.conf`
-- Hot-reloads the server with `wg syncconf` (other peers stay connected)
-
-**Example:**
-```bash
-# Interactive mode
-sudo ./add-peer.sh
-
-# With arguments
-sudo ./add-peer.sh --interface wg0 --name laptop --type client
-```
-
-### 4. remove-peer.sh
-**Remove a peer from a WireGuard server**
-
-```bash
-sudo ./remove-peer.sh [OPTIONS]
-```
-
-**Options:**
-- `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-n, --name NAME` - Peer name to remove
-- `-h, --help` - Show help
-
-**Features:**
-- Removes the peer block from the server configuration
-- Deletes the peer's config file and keys
-- Hot-reloads the server (other peers stay connected)
-- Creates a timestamped backup of the server config first
-
-**Example:**
-```bash
-# Interactive mode
-sudo ./remove-peer.sh
-
-# With arguments
-sudo ./remove-peer.sh --interface wg0 --name old-laptop
-```
-
-### 5. list-peers.sh
-**List all peers or view specific peer status**
-
-```bash
-./list-peers.sh [OPTIONS]
-```
-
-**Options:**
-- `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-p, --peer NAME` - View specific peer details
-- `-d, --detailed` - Show more details (public keys, etc.)
-- `-h, --help` - Show help
-
-**What it shows:**
-- All peers (Clients, Sites, P2P) with type indicators
-- Connection status (Connected/Idle/Never)
-- Tunnel IP addresses
-- Remote LANs (for Sites and P2P peers)
-- Last seen time and data transfer (with -d flag)
-- Live connection status with auto-refresh
-
-**Example:**
-```bash
-# List all peers
-./list-peers.sh
-
-# List peers on specific interface
-./list-peers.sh -i wg0
-
-# View specific peer details
-./list-peers.sh -p laptop
-
-# List with detailed info
-./list-peers.sh -d
-```
-
-### 6. rotate-keys.sh
-**Regenerate encryption keys for server or peers (unified key rotation)**
-
-```bash
-sudo ./rotate-keys.sh [OPTIONS]
-```
-
-**Options:**
-- `-s, --server` - Rotate server keys
-- `-p, --peer NAME` - Rotate peer keys
-- `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-h, --help` - Show help
-
-**Server Key Rotation:**
-- Removes old server keys (prevents conflicts)
-- Generates new server keypair
-- Updates server configuration
-- Regenerates ALL peer configs with new server public key
-- Restarts server (all peers disconnected until they update)
-- **WARNING:** Disconnects ALL peers. They need new configs to reconnect.
-
-**Peer Key Rotation:**
-- Generates new peer keypair
-- Updates server config with new public key
-- Creates new peer config file
-- Restarts server to apply changes
-- Peer must update their config to reconnect
-
-**Examples:**
-```bash
-# Interactive mode
-sudo ./rotate-keys.sh
-
-# Rotate server keys
-sudo ./rotate-keys.sh -s -i wg0
-
-# Rotate peer keys
-sudo ./rotate-keys.sh -p laptop -i wg0
-```
-
-### 7. show-qr.sh
-**Display client config as QR code for mobile devices**
-
-```bash
-sudo ./show-qr.sh [OPTIONS]
-```
-
-**Options:**
-- `-i, --interface NAME` - WireGuard interface (e.g., wg0)
-- `-c, --client NAME` - Client name
-- `-h, --help` - Show help
-
-**Requires:** `qrencode` package
-```bash
-# Install on RHEL/CentOS/Rocky/AlmaLinux
-dnf install qrencode
-
-# Install on Ubuntu/Debian
-apt install qrencode
-```
-
-**Example:**
-```bash
-# Interactive mode
-sudo ./show-qr.sh
-
-# With arguments
-sudo ./show-qr.sh --interface wg0 --client phone
-```
+See [Set up a server](#set-up-a-server), [Add a peer](#add-a-peer), [Remove a peer](#remove-a-peer), [Pause or resume a peer](#pause-or-resume-a-peer), [List peers](#list-peers) and [Rotate keys](#rotate-keys).
 
 ## Typical Workflows
 
 ### First-time Setup
 1. Run server setup:
    ```bash
-   sudo ./setup.sh
+   sudo ./menu.sh      # 5) Setup WireGuard Server, then start wg-quick@wg0
    ```
 
 2. Add your first peer:
    ```bash
-   sudo ./add-peer.sh
+   sudo ./menu.sh      # 1) Add Peer (Client)
    ```
 
-3. Show QR code for mobile:
-   ```bash
-   sudo ./show-qr.sh
-   ```
+3. Build the peer's client config ([Manual Setup, step 8](#8-the-client-side))
+   from the private key and server public key Add Peer printed, and put it on
+   the device.
 
 ### Daily Operations
 Use the interactive menu for convenience:
 ```bash
-./menu.sh
+sudo ./menu.sh
 ```
 
-Or use individual scripts:
+Add and remove peers with `sudo ./menu.sh` (options 1 and 2); *4) List
+Peers* shows what the kernel has:
 ```bash
-# Add new peer
-sudo ./add-peer.sh --interface wg0 --name new-phone --type client
-
-# View peer status
-./list-peers.sh -i wg0 -p laptop
-
-# Remove old peer
-sudo ./remove-peer.sh --interface wg0 --name old-device
+sudo wg show all
 ```
 
 ### Security Maintenance
-Periodically rotate keys:
-```bash
-# Rotate individual peer keys
-sudo ./rotate-keys.sh -p laptop -i wg0
-
-# Rotate server keys (affects all peers!)
-sudo ./rotate-keys.sh -s -i wg0
-```
+Periodically rotate keys with `sudo ./menu.sh` → *6) Rotate Keys*: one peer
+at a time, or the server's keys (which cuts off every peer until it has the new
+server public key). See [Rotate keys](#rotate-keys).
 
 ## Multi-Site (Hub-and-Spoke) Topology
 
@@ -540,43 +333,67 @@ LAN and routing will break.
 
 ### 1. Set up Site A (the hub)
 
-On the hub server:
+On the hub server, run `sudo ./menu.sh` → *Setup WireGuard Server* with
+interface `wg0`, port `51820` and address `10.0.0.1/24`. Then open UDP 51820,
+put `wg0` in firewalld's `trusted` zone, enable IP forwarding, and start it:
 
 ```bash
-sudo ./setup.sh \
-  --interface wg0 \
-  --port 51820 \
-  --server-ip 10.0.0.1/24 \
-  --network 10.0.0.0/24
+sudo firewall-cmd --permanent --add-port=51820/udp
+sudo firewall-cmd --permanent --zone=trusted --add-interface=wg0
+sudo firewall-cmd --reload
+sudo systemctl enable --now wg-quick@wg0
 ```
 
-This installs WireGuard, opens UDP 51820 in firewalld, places `wg0` in the
-`trusted` zone, and starts the service. **Do not** enable exit-node mode —
-hub-only routing between sites does not need MASQUERADE.
+Forwarding is [Manual Setup, step 6](#6-forwarding-server-only). Hub-only
+routing between sites does not need MASQUERADE.
 
 ### 2. Add each spoke as a `site` peer on the hub
 
-```bash
-# Site B
-sudo ./add-peer.sh --interface wg0 --name siteB --type site \
-  --ip 10.0.0.2 --remote-network 192.168.20.0/24
+Site peers route a whole LAN, so they are added by hand (`menu.sh`'s Add
+Peer does client peers only). On the hub, generate each spoke's keypair:
 
-# Site C
-sudo ./add-peer.sh --interface wg0 --name siteC --type site \
-  --ip 10.0.0.3 --remote-network 192.168.30.0/24
+```bash
+cd /etc/wireguard/wg0
+umask 077
+wg genkey | tee siteB-privatekey | wg pubkey > siteB-publickey
+wg genkey | tee siteC-privatekey | wg pubkey > siteC-publickey
 ```
 
-Each invocation writes a `[Peer]` block on the hub with
-`AllowedIPs = <tunnel_ip>/32, <remote_lan>` — telling the hub which traffic
-to push into which tunnel. It also generates a peer config file at
-`/etc/wireguard/wg0/siteB.conf` and `/etc/wireguard/wg0/siteC.conf` that
-you copy to the respective spoke servers.
+Then append a block per spoke to `/etc/wireguard/wg0.conf`. Keep the
+`BEGIN_PEER`/`END_PEER` markers — they are how Remove Peer, Toggle Peer and
+`verify-config.sh` find the peer:
 
-### 3. Edit each spoke so it can reach the *other* spoke's LAN
+```ini
+# BEGIN_PEER siteB
+# Site: siteB
+[Peer]
+PublicKey = <contents of siteB-publickey>
+AllowedIPs = 10.0.0.2/32, 192.168.20.0/24
+# END_PEER siteB
 
-The auto-generated spoke config only knows about the hub. To let Site B
-reach Site C (and vice versa), each spoke's `[Peer Site A]` block needs the
-other spokes' LANs added to `AllowedIPs`.
+# BEGIN_PEER siteC
+# Site: siteC
+[Peer]
+PublicKey = <contents of siteC-publickey>
+AllowedIPs = 10.0.0.3/32, 192.168.30.0/24
+# END_PEER siteC
+```
+
+`AllowedIPs = <tunnel_ip>/32, <remote_lan>` tells the hub which traffic to push
+into which tunnel. Restart (not reload) the hub, so `wg-quick` adds routes for
+those LANs:
+
+```bash
+sudo systemctl restart wg-quick@wg0
+```
+
+### 3. Write each spoke's config so it can reach the *other* spoke's LAN
+
+Each spoke's `/etc/wireguard/wg0.conf` holds its private key (`siteB-privatekey`
+from step 2) and one `[Peer]` block for the hub, using the hub's
+`/etc/wireguard/wg0/server-publickey`. To let Site B reach Site C (and vice
+versa), that block's `AllowedIPs` lists the WG overlay plus the other spokes'
+LANs.
 
 `/etc/wireguard/wg0.conf` on **Site B**:
 
@@ -619,10 +436,10 @@ sudo systemctl restart wg-quick@wg0
 
 ### 4. Hub: forwarding between spokes
 
-`setup.sh` already places `wg0` in firewalld's `trusted` zone, and
-firewalld permits forwarding between interfaces in the same trusted zone by
-default — so no extra rules are needed for `wg0 → wg0` spoke-to-spoke
-traffic. IP forwarding is enabled persistently in step 6 of the script.
+With `wg0` in firewalld's `trusted` zone (step 1), firewalld permits
+forwarding between interfaces in the same trusted zone by default — so no extra
+rules are needed for `wg0 → wg0` spoke-to-spoke traffic. IP forwarding must be
+enabled persistently ([Manual Setup, step 6](#6-forwarding-server-only)).
 
 If you've moved away from the default firewalld policy or are using a
 different backend, make sure FORWARD `wg0 → wg0` is permitted on the hub.
@@ -647,14 +464,11 @@ counters going up on both `[Peer]` blocks while the ping is running.
 
 To add Site D with LAN `192.168.40.0/24`:
 
-1. **On the hub**, add the new spoke peer:
-   ```bash
-   sudo ./add-peer.sh --interface wg0 --name siteD --type site \
-     --ip 10.0.0.4 --remote-network 192.168.40.0/24
-   ```
-2. **On Site D**, install the generated `siteD.conf`, then edit
-   `AllowedIPs` on its `[Peer Site A]` block to include every other spoke's
-   LAN: `10.0.0.0/24, 192.168.20.0/24, 192.168.30.0/24`. Start the service.
+1. **On the hub**, generate `siteD`'s keys and add its block as in step 2, with
+   `AllowedIPs = 10.0.0.4/32, 192.168.40.0/24`, then restart `wg-quick@wg0`.
+2. **On Site D**, write its `wg0.conf` as in step 3, with `AllowedIPs` on the
+   hub block listing every other spoke's LAN:
+   `10.0.0.0/24, 192.168.20.0/24, 192.168.30.0/24`. Start the service.
 3. **On every existing spoke (B, C)**, append `192.168.40.0/24` to the
    `AllowedIPs` line, then `systemctl restart wg-quick@wg0`.
 
@@ -665,19 +479,14 @@ pushes the new `AllowedIPs` everywhere.
 
 ## Firewall Support
 
-The script automatically detects and configures:
-- **firewalld** (RHEL, CentOS, Fedora default)
-- **ufw** (Ubuntu default)
-- **iptables** (legacy systems)
-- **nftables** (modern systems)
+Nothing here configures or checks the firewall: open the UDP port yourself
+([Manual Setup, step 7](#7-open-the-firewall)).
 
 ## Security Features
 
-- Automatic SELinux context configuration (RHEL-based)
-- Restrictive file permissions (600) on config files
-- Secure key generation with proper umask
-- Firewall rules with NAT masquerading
-- IP forwarding enabled safely and persistently
+- Restrictive file permissions (600) on configs and keys
+- Keys generated under `umask 077`, so a private key is never briefly readable
+- Server config backed up before each peer add or remove
 
 ## Troubleshooting
 
@@ -695,44 +504,32 @@ modprobe wireguard
 ```
 
 ### Port already in use
-The script checks for port conflicts automatically. If you see this error:
+Setup does not check for port conflicts, so `wg-quick@<iface>` fails to start.
+Find what holds the port, then set a different `ListenPort` in
+`/etc/wireguard/<iface>.conf`:
 ```bash
-# Check what's using the port
 ss -ulnp | grep 51820
-
-# Choose a different port
-sudo ./setup.sh --port 51821
 ```
 
 ### Network conflicts
-The script warns about network conflicts. Use a different network range:
-```bash
-sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
-```
+Setup does not check whether the address overlaps another interface's network.
+Check with `ip -br addr` and pick a range nothing else uses (e.g. `10.0.1.1/24`)
+when running setup.
 
 ## Project Structure
 
 ```
 /etc/wireguard/scripts/
-├── menu.sh                # Interactive menu (start here!)
-├── setup.sh               # Initial server setup
-├── add-peer.sh                      # Add a new peer (client/site/p2p)
-├── remove-peer.sh                   # Remove a peer
-├── toggle-peer.sh                   # Enable/disable a peer without removing it
-├── list-peers.sh                     # List/view all peers with status
-├── rotate-keys.sh                   # Rotate server or peer keys
-├── show-qr.sh                       # Display peer config as QR code
-├── reset.sh               # Cleanup / reset WireGuard state
+├── menu.sh                      # Menu that does the work itself: setup, peers, key rotation
 ├── healthcheck.sh                   # One-shot runtime health check (cron / systemd timer)
 ├── verify-config.sh                 # Config conformance check (does it match our format?)
-├── test-verify-config.sh            # Fault-injection tests for verify-config.sh
-├── test-installers.sh               # Tests for the installers + retention projection
-├── test-lib.sh                      # Shared test harness (sourced by the test-*.sh suites)
 ├── log-connections.sh                # Connection logger for systemd journal
 ├── install-healthcheck.sh           # Install/enable the healthcheck timer (availability)
 ├── install-logging.sh               # Install/enable the audit-log timer + retention (compliance)
 ├── systemd/
 │   ├── journald-wireguard-audit.conf       # Journal retention drop-in (opt-in)
+│   ├── wireguard-healthcheck.service       # Oneshot service for the healthcheck
+│   ├── wireguard-healthcheck.timer         # Fires the service every 60s
 │   ├── wireguard-log-connections.service   # Oneshot service for the connection logger
 │   └── wireguard-log-connections.timer     # Fires the service every 2 min
 ├── utils.sh                         # Shared helpers (sourced by other scripts)
@@ -745,39 +542,31 @@ sudo ./setup.sh --server-ip 10.0.1.1/24 --network 10.0.1.0/24
 ## Running the tests
 
 ```bash
-sudo ./wireguardmenu test          # fast suites only (~7s)
-sudo ./wireguardmenu test --all    # everything, including live integration (~2min)
-sudo ./wireguardmenu test --help   # what each mode actually does
+sudo ./wireguardmenu test          # every script's --dry-run (a few seconds)
+sudo ./wireguardmenu test --help   # what it runs
 ```
 
-The suites are split by **system impact**, which is what you want to know
-before running one:
+Each script tests itself: `--dry-run` makes every check a real run would and
+prints what it would do, but writes nothing.
 
-| Suite | Checks | Time | Touches |
-| ----- | -----: | ---: | ------- |
-| `test-verify-config.sh` | 62 | ~5s | Temp fixtures only |
-| `test-installers.sh` | 37 | ~2s | Temp fixtures only |
-| `test-monitoring.sh` | 67 | ~2min | Real throwaway interfaces, a netns, veth pairs, real systemd units |
+| Dry run | Checks | Touches |
+| ------- | ------ | ------- |
+| `install-healthcheck.sh --dry-run` | the unit's script exists and is executable; no cron entry double-runs it | nothing |
+| `install-logging.sh --dry-run` | the same, plus the retention drop-in with `--with-retention` | nothing |
+| `log-connections.sh --dry-run` | reads `wg show dump` and the state file, prints the connect/disconnect records it would write | nothing — no journal entries, no state file |
 
-`--fast` (the default) runs the first two: they create no interfaces, write no
-units and read no production config, so they are safe on a live server at any
-time. `--all` adds `test-monitoring.sh`, which does act on the system — it
-stands everything up under PID-derived throwaway names, never touches your
-production interfaces, and tears down via an `EXIT` trap, but run it
-deliberately rather than casually.
+Two more need no flag, because they only read:
 
-Each suite is still runnable on its own (`sudo ./test-installers.sh`), which is
-what you want when iterating on one script. The shared assertion harness lives
-in `test-lib.sh`; it is deliberately not in `utils.sh`, since the production
-scripts — `healthcheck.sh` and `log-connections.sh` run from timers every 60s
-and 2min — have no reason to carry assertion helpers.
+- **`verify-config.sh`** — running it *is* the check.
+- **`healthcheck.sh` without `--restart`** — it reports what it finds and
+  changes nothing. Add `-i <iface>` to look at one interface only.
 
 ## Manual Setup (no scripts)
 
 Mirrors the official [WireGuard QuickStart](https://www.wireguard.com/quickstart/).
-Read this section to understand exactly what `setup.sh` and
-`add-peer.sh` are doing under the hood, or to deploy WireGuard somewhere the
-scripts cannot run.
+Read this section to understand what `menu.sh` does under the
+hood — including the install, forwarding and firewall steps that setup
+leaves to you — or to deploy WireGuard somewhere the scripts cannot run.
 
 ### 0. Install WireGuard
 
@@ -893,15 +682,12 @@ sudo wg-quick down wg0    # tear down
 
 | Manual step | Script equivalent |
 | ----------- | ----------------- |
-| Install + create iface + keys + conf | `sudo ./setup.sh` |
-| Add a `[Peer]` block + client config | `sudo ./add-peer.sh` |
-| Remove a `[Peer]` block | `sudo ./remove-peer.sh` |
-| Disable a peer without deleting it | `sudo ./toggle-peer.sh` |
-| Inspect peers / handshakes | `./list-peers.sh` |
-| Show config as a QR code | `./show-qr.sh` |
-| Rotate server or peer keys | `sudo ./rotate-keys.sh` |
-| Import an existing `.conf` file | `sudo ./setup.sh --config <file>` |
-| Tear everything down | `sudo ./reset.sh` |
+| Keys + conf | `sudo ./menu.sh` → Setup WireGuard Server |
+| Add a `[Peer]` block (client peers; the client config is step 8) | `sudo ./menu.sh` → Add Peer |
+| Remove a `[Peer]` block | `sudo ./menu.sh` → Remove Peer |
+| Disable a peer without deleting it | `sudo ./menu.sh` → Toggle Peer |
+| Inspect peers / handshakes | `sudo ./menu.sh` → List Peers (`wg show all`) |
+| Rotate server or peer keys | `sudo ./menu.sh` → Rotate Keys |
 | Check the config matches this toolkit's format | `sudo ./verify-config.sh` |
 | Check the tunnel is up and working | `sudo ./healthcheck.sh` |
 
@@ -919,6 +705,7 @@ sudo ./verify-config.sh              # verify one interface (prompts if several)
 sudo ./verify-config.sh -i wg0       # verify wg0
 sudo ./verify-config.sh --all        # sweep every interface
 sudo ./verify-config.sh -q --strict  # problems only; warnings fail too (CI / timers)
+sudo ./verify-config.sh --site       # check as a site box (spoke), not a server
 ```
 
 Errors exit 1, warnings exit 0 unless `--strict`. `verify-config.sh` is
@@ -926,16 +713,16 @@ read-only — it never touches the running tunnel.
 
 The check worth knowing about is **marker coverage**. Every peer block this
 toolkit writes is wrapped in `# BEGIN_PEER <name>` / `# END_PEER <name>`, and
-`list-peers.sh`, `toggle-peer.sh`, `remove-peer.sh` and `rotate-keys.sh` all
-find peers through those markers. WireGuard itself does not care about them —
+Remove Peer, Toggle Peer and Rotate Keys all find peers through those
+markers. WireGuard itself does not care about them —
 so a `[Peer]` block added by hand, or restored from a config written before the
 marker format, will connect perfectly well while being **invisible to every
 management script here**. `verify-config.sh` is the only thing that reports it:
 
 ```
-FAIL 2/3 [Peer] blocks carry BEGIN_PEER markers — 1 peer(s) are invisible to list/toggle/remove/rotate
+FAIL 2/3 [Peer] blocks carry BEGIN_PEER markers — 1 peer(s) are invisible to Remove Peer, Toggle Peer and Rotate Keys
     unmarked peer, PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
-    fix: re-add these with add-peer.sh, or wrap each block in
+    fix: re-add these with menu.sh (Add Peer), or wrap each block in
          '# BEGIN_PEER <name>' / '# END_PEER <name>' by hand
 ```
 
@@ -943,25 +730,52 @@ It also catches unterminated marker blocks, duplicate peer names, duplicate
 `PublicKey` or `AllowedIPs` across peers, a `server-privatekey` that no longer
 matches the config's `PrivateKey` (a rotation that half-completed), peer public
 keys on disk that disagree with the server config, orphan peer `.conf` files,
-key material that is not mode 600, and a missing setup manifest.
+and key material that is not mode 600. Paused peers are reported as `paused`,
+and a block that is only *half* paused — some WireGuard lines commented out,
+some not — is an error: `wg-quick strip` keeps comments, so WireGuard applies
+the live lines to the `[Peer]` above, silently replacing that peer's key.
+
+It also checks the two comment lines `healthcheck.sh` acts on, which nothing
+else reports:
+
+- **Neither line set** is an error: nothing says whether this is a server (never
+  auto-restarted) or a client/site box, and the healthcheck falls back to
+  treating it as a client — so `--restart` would bounce a server.
+- **A server without `# Healthcheck-Role = server`** is an error, because
+  `healthcheck.sh --restart` would bounce it on a structural failure and drop
+  every peer.
+- **A role value it doesn't know** (`= sever`) is an error; use `server`, `hub`,
+  `client` or `site`.
+- **`# Healthcheck-Reachability` targets** have to be valid IPs or hostnames — a
+  typo is an error, since the healthcheck ignores it — and not the box's own
+  address, which would never test the tunnel. A client/site box with no target
+  gets a warning: only a dead service or a missing address is caught.
 
 > Note: `wg-quick strip` is sometimes suggested as a config validator. It is
 > not one — it is a filter that prints the config with comments removed, and it
 > exits 0 on arbitrary garbage. `verify-config.sh` parses the structure itself.
 
-`test-verify-config.sh` covers it, one injected defect at a time:
+### Site boxes
 
-```bash
-sudo ./test-verify-config.sh         # 62 checks
-sudo ./test-verify-config.sh -k      # keep the fixture dir for inspection
+A spoke's config is not one these scripts wrote — one bare `[Peer]`, no
+markers and no key directory — so the checks above would fail it on every run. Instead it is checked as a **site box**, for what such a box needs
+to connect and heal itself:
+
+- each `[Peer]` has `PublicKey`, `AllowedIPs`, and an `Endpoint` (or the box has
+  a `ListenPort` and waits to be dialled)
+- `PersistentKeepalive` is set — without it the tunnel cannot come back on its
+  own after an outage
+- there is a `# Healthcheck-Reachability` target for the healthcheck, it is a
+  valid IP or hostname, and it is not this box's own address
+
+An interface gets the site profile when its conf has a
+`# Healthcheck-Reachability` line or `# Healthcheck-Role = site`, or when you
+pass `--site`. `# Healthcheck-Role = server` always gets the full checks. The
+header says which one ran:
+
 ```
-
-Or run every suite at once — see [Running the tests](#running-the-tests).
-
-It is purely filesystem-based — it builds throwaway config trees under a temp
-dir and drives every run with `WG_CONFIG_DIR` pointed at them, so unlike
-`test-monitoring.sh` it creates no interfaces, touches no systemd units, and
-never reads or writes `/etc/wireguard`. Safe to run on a live server.
+########  wg0  (site box)  ########
+```
 
 ## Health Check
 
@@ -973,15 +787,12 @@ For each WireGuard interface it verifies:
 3. every `Address = …` declared in `<iface>.conf` is actually assigned to
    the interface — catches the wg-quick race where the service comes up
    "successfully" but the IP never makes it onto the interface
-4. the firewall backend recorded in the per-interface manifest is still
-   effective — firewalld/ufw services active, or the nftables rules we
-   wrote at setup time still present in the kernel. Without this, the
-   VPN looks healthy but the UDP port is closed and peers can't connect.
-5. *(optional)* with a ping target configured, that the tunnel can actually
+4. *(optional)* with a ping target configured, that the tunnel can actually
    reach the upstream server — see [Upstream reachability](#upstream-reachability-site--client-boxes).
 
-If any check fails, `--restart` will `systemctl restart wg-quick@<iface>`
-(or `systemctl start firewalld|ufw` for the firewall case) and re-verify.
+If any check fails, `--restart` will `systemctl restart wg-quick@<iface>` and
+re-verify. The firewall is not checked: nothing here configures it, so there is
+nothing recorded to check it against.
 
 ```bash
 sudo ./healthcheck.sh                # check all interfaces, exit 1 if any fail
@@ -996,14 +807,14 @@ journal under the `wireguard-audit` tag.
 
 ### The goal: set-and-forget stability
 
-`healthcheck.sh`, the connection logger, and `test-monitoring.sh` together aim
-to make a WireGuard box something you **configure once and trust to keep itself
-up** — not something you babysit. The design choices all serve that:
+`healthcheck.sh` and the connection logger aim to make a WireGuard box
+something you **configure once and trust to keep itself up** — not something
+you babysit. The design choices all serve that:
 
 - **Self-healing, not just alerting.** On a timer with `--restart`, the box
   detects *and repairs* the failure modes that leave a tunnel "up" but dead — a
-  missing address after a wg-quick race, a stopped firewall silently closing the
-  port, or (on a site box) a tunnel that no longer carries traffic. You don't get
+  missing address after a wg-quick race, or (on a site box) a tunnel that no
+  longer carries traffic. You don't get
   paged at 3am; the box fixes itself and leaves an audit trail.
 - **Safe by default, opt-in for the risky parts.** The structural checks are
   always on. The one action that could disrupt many peers — restarting on
@@ -1014,10 +825,6 @@ up** — not something you babysit. The design choices all serve that:
   (consecutive-failure threshold, persisted streak) and backs off instead of
   restart-looping during a real outage — stability under failure, not just on a
   good day.
-- **Proven, not assumed.** `test-monitoring.sh` stands up throwaway interfaces
-  and *actually breaks them* — flushes the address, stops the service, makes the
-  upstream unreachable, ages a peer to idle — then asserts the box detects and
-  recovers each. The safety guarantees above are tested, not just documented.
 
 The result is a small, dependency-free set of shell scripts that give you the
 hands-off reliability you'd otherwise reach for a much heavier orchestration
@@ -1039,10 +846,12 @@ idempotent — re-run after moving the repo or pulling changes:
 
 ```bash
 sudo ./install-healthcheck.sh              # install/refresh + enable + start
+sudo ./install-healthcheck.sh --dry-run    # show what that would do; change nothing
 sudo ./install-healthcheck.sh --status     # timer state
 sudo ./install-healthcheck.sh --uninstall  # stop, disable, remove units
 
 sudo ./install-logging.sh                  # install/refresh + enable + start
+sudo ./install-logging.sh --dry-run        # show what an install would do; change nothing
 sudo ./install-logging.sh --with-retention # ... and widen journal retention
 sudo ./install-logging.sh --check-retention # project the achievable window
 sudo ./install-logging.sh --status         # timer state + record count + retention
@@ -1052,7 +861,20 @@ sudo ./install-logging.sh --status         # timer state + record count + retent
 > path (`/etc/wireguard/scripts/…`). Installing them verbatim gives you a timer
 > that fires forever against a script that isn't there.
 
-The healthcheck runs **every 60s**; the connection logger every 2 min.
+> **Remote site boxes** that don't carry this repo: copy the monitoring files
+> across and run these installers there — see
+> [Remote site boxes](#remote-site-boxes-monitoring-only).
+
+The healthcheck runs **every 60s**; the connection logger every 2 min. Both
+units set `LogLevelMax=notice`, which keeps systemd's per-run
+"Starting/Finished/Deactivated" lines out of the journal — at those intervals
+they come to ~6,500 lines a day, far more than the records the units exist to
+write. `SyslogLevel=notice` keeps what the scripts themselves print, and the
+audit records are notice level, so both survive the filter. Both
+installers, and `healthcheck.sh` itself, need a host running systemd and stop
+straight away without it. Each install prints the units it wrote and says when
+systemd was reloaded and the timer enabled and started, then warns if the timer
+ends up with nothing scheduled.
 
 ### Verifying it's actually working
 
@@ -1063,7 +885,7 @@ two can read perfectly green while the thing is doing nothing useful:
 # 1. Armed, and will it survive a reboot?  ("enabled" is the one that matters)
 systemctl is-enabled wireguard-healthcheck.timer
 systemctl is-active  wireguard-healthcheck.timer
-systemctl list-timers 'wireguard-*' --all
+systemctl list-timers 'wireguard-*' --all      # NEXT must be a time, not "-"
 
 # 2. Is the service succeeding, not just firing?
 systemctl status wireguard-healthcheck.service
@@ -1074,16 +896,26 @@ journalctl -t wireguard-audit --since -24h
 journalctl -t wireguard-audit -f          # live, during an incident
 
 # 4. End-to-end proof on demand
-sudo ./healthcheck.sh -v
-sudo ./test-monitoring.sh                 # full harness
+sudo ./healthcheck.sh -v                  # every check, changes nothing
+sudo ./log-connections.sh --dry-run       # the records it would write
 ```
 
-Two things that look like problems but aren't, and one that looks fine but isn't:
+Two things that look like problems but aren't, and two that look fine but aren't:
 
 * The service is `Type=oneshot`, so its healthy steady state is
   **`inactive (dead)` with `status=0/SUCCESS`**. That is correct, not a failure.
+* **An empty unit journal is also healthy.** `journalctl -u
+  wireguard-healthcheck.service` shows nothing for a clean run, because the unit
+  filters systemd's per-run chatter (see above). Failures, the scripts' own
+  output, and every audit record still land — check
+  `journalctl -t wireguard-audit`.
 * **Silence under `wireguard-audit` is healthy** — it only logs failures and
   actions, never routine success.
+* **A timer can be `enabled` and `active` and still never fire.** Check the
+  `NEXT` column of `systemctl list-timers`: `-` means nothing is scheduled.
+  Timers that start from `OnBootSec` are skipped for good when a slow boot
+  starts them more than a minute in; these units use `OnActiveSec=1min`, so
+  re-run the installers if yours still say `OnBootSec`.
 * **Unit drift is the failure mode that hides best.** If the installed units
   fall out of sync with the repo, every layer above still reports green while
   the live cadence and paths are whatever you installed months ago:
@@ -1140,7 +972,8 @@ for testing or for an unusually conservative box.
 > kernel purges staged packets and stops retrying (`MAX_TIMER_HANDSHAKES`). It
 > only keeps trying at all because the keepalive re-triggers a handshake every
 > 25s. A peer conf without it goes permanently dead until something in userspace
-> intervenes. `setup.sh` and `add-peer.sh` set `25` by default — don't remove it.
+> intervenes. Put `PersistentKeepalive = 25` in every peer's own config — Add
+> Peer does not write peer configs, so nothing sets it for you.
 
 You enable it **per interface**, by adding a comment line to the `[Interface]`
 section of that box's `/etc/wireguard/<iface>.conf` (the `.1` is your server's
@@ -1227,18 +1060,15 @@ non-zero; watch with `journalctl -t wireguard-audit -f`.
 **This line is what protects the server.** Reachability being unset only stops
 the *ping-based* restart path — the structural checks (service dead, interface
 missing, address missing) run on every interface regardless and will restart an
-unmarked server. Set the role explicitly.
+unmarked server. Set the role explicitly — *Setup WireGuard Server* writes the
+line into every config it creates, and `verify-config.sh` reports a server
+without it as an error.
 
 | | Server (`Role = server`) | Client / site |
 |---|---|---|
 | Detects + alerts | ✅ | ✅ |
 | Restarts the tunnel | ❌ never | ✅ at 180s |
 | Re-resolves endpoints | ❌ | ✅ at 120s |
-| Starts a stopped firewalld/ufw | ✅ | ✅ |
-
-The last row is deliberate: starting a stopped firewall drops nobody, it
-*restores* peer connectivity. A server with its firewall down looks healthy
-while the UDP port is closed and no peer can connect.
 
 ## Connection Logging
 
@@ -1430,12 +1260,111 @@ limit is whichever binds first.
 
 ### Config-change audit (separate tag)
 
-`add-peer.sh` / `remove-peer.sh` / `toggle-peer.sh` log admin actions under
-the `wireguard-audit` tag (different from `wireguard-connections`):
+`healthcheck.sh` is the only thing that writes to the `wireguard-audit` tag now
+(failures, restarts, recoveries), separate from `wireguard-connections`. Nothing
+done through `menu.sh` is logged.
 
 ```bash
 journalctl -t wireguard-audit                                  # admin actions
 journalctl -t wireguard-audit -t wireguard-connections         # combined timeline
+```
+
+## Remote Site Boxes (monitoring only)
+
+A remote site-to-site box — a spoke in the
+[hub-and-spoke layout](#multi-site-hub-and-spoke-topology), or either end of a
+1:1 link — doesn't need the whole toolkit. It needs the two controls and the
+config check:
+
+| Files | For |
+| ----- | --- |
+| `healthcheck.sh`, `install-healthcheck.sh` | Availability — restart the tunnel when it dies |
+| `log-connections.sh`, `install-logging.sh` | Audit — the connect/disconnect trail |
+| `verify-config.sh` | Is this box's config shaped right? |
+| `utils.sh` | Sourced by all of the above |
+| `systemd/` | The units, and the journald retention drop-in |
+
+The site box needs Linux with systemd and `wireguard-tools`, with the tunnel
+running as `wg-quick@<iface>` — that is the service the healthcheck checks and
+restarts.
+
+### 1. Copy the files over
+
+```bash
+rsync -a healthcheck.sh log-connections.sh verify-config.sh \
+         install-healthcheck.sh install-logging.sh utils.sh systemd \
+         root@site-b:/etc/wireguard/scripts/
+```
+
+`scp -r` does the same job, and a `tar` piped over `ssh` works where neither is
+installed. Wherever you put them, the timers run these as root, so they must end
+up root-owned, executable, and not writable by anyone else:
+
+```bash
+ssh root@site-b 'chown -R root:root /etc/wireguard/scripts &&
+                 chmod 755 /etc/wireguard/scripts/*.sh'
+```
+
+### 2. Run the two installers there
+
+```bash
+ssh root@site-b '
+  /etc/wireguard/scripts/install-healthcheck.sh
+  /etc/wireguard/scripts/install-logging.sh
+'
+```
+
+Each installer copies its own unit files out of `systemd/` into
+`/etc/systemd/system/`, rewrites `ExecStart` to wherever you put the scripts,
+reloads systemd, and enables and starts the timer. They stop straight away if
+the host isn't running systemd, refuse to install a unit whose script is missing
+or not executable, and warn if a timer ends up with nothing scheduled. Add
+`--with-retention` to `install-logging.sh` for the 6-year journal window, or
+`--dry-run` to either one to see what it would do first.
+
+Re-running them is also how you push an update after copying newer files: they
+overwrite the units in place.
+
+### 3. Check it took
+
+```bash
+ssh root@site-b '
+  /etc/wireguard/scripts/verify-config.sh --all
+  systemctl list-timers "wireguard-*"
+'
+```
+
+`verify-config.sh` should report 0 errors, and it is what tells you whether this
+box declares itself properly (see the next section). In `list-timers`, `NEXT`
+must show a time — `-` means nothing is scheduled.
+
+### Configure each site box — one line
+
+Deployed as-is, the healthcheck catches structural failures only: a dead
+service, a missing address. To also catch a tunnel that is up but passing no
+traffic, give it the hub's in-tunnel IP in the `[Interface]` section of the
+site box's `/etc/wireguard/wg0.conf`:
+
+```ini
+[Interface]
+# Healthcheck-Reachability = 10.0.0.1
+Address    = 10.0.0.2/24
+PrivateKey = <SITE_B_PRIVATE_KEY>
+```
+
+No restart needed. The same line makes `verify-config.sh` check the box as a
+[site box](#site-boxes). How the restart ladder then behaves is under
+[Upstream reachability](#upstream-reachability-site--client-boxes).
+
+If a remote box is itself a **server** that other peers dial into, mark it
+`# Healthcheck-Role = server` instead, so the healthcheck never bounces it — see
+[Never auto-restart the server](#never-auto-restart-the-server).
+
+### Checking on a site box later
+
+```bash
+ssh root@site-b 'systemctl list-timers "wireguard-*"; /etc/wireguard/scripts/verify-config.sh --all'
+ssh root@site-b 'journalctl -t wireguard-audit -t wireguard-connections --since -1h -o short-iso'
 ```
 
 ## Contributing

@@ -1,16 +1,24 @@
 [Unit]
-Description=WireGuard healthcheck (service + interface + addresses + firewall)
+Description=WireGuard healthcheck (service + interface + addresses + reachability)
 Documentation=file:///etc/wireguard/scripts/healthcheck.sh
 After=wg-quick.target
 
 [Service]
 Type=oneshot
+
+# A timer this frequent makes systemd log "Starting/Finished/Deactivated" on
+# every run — thousands of lines a day, dwarfing the records this unit exists to
+# write. Those lines are info level, so filtering at notice drops them, while
+# SyslogLevel=notice keeps what the script itself prints. The audit records are
+# notice too (log_audit / log_conn_event in utils.sh), so they are unaffected.
+LogLevelMax=notice
+SyslogLevel=notice
 ExecStart=/etc/wireguard/scripts/healthcheck.sh --restart
 
-# Minimal hardening. Less restrictive than the connection-log unit because
-# this script may need to `systemctl restart wg-quick@<iface>` and inspect
-# firewall state via nft/iptables/firewall-cmd — locking it down breaks
-# auto-recovery.
+# Minimal hardening. Less restrictive than the connection-log unit because this
+# script may need to `systemctl restart wg-quick@<iface>`, ping through the
+# tunnel and write its streak state under /etc/wireguard — locking it down
+# breaks auto-recovery.
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

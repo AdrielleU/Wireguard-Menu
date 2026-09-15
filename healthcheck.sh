@@ -10,11 +10,6 @@
 #   3. every Address declared in <iface>.conf is actually assigned to the
 #      kernel interface — catches the wg-quick race where the service comes
 #      up "successfully" but the IP never makes it onto the interface
-#   4. the firewall backend recorded in the per-interface manifest is still
-#      effective: firewalld/ufw services active, or nftables rules we wrote
-#      at setup time still present in the kernel. Without this, the VPN
-#      looks healthy but the UDP port is closed and peers can't connect.
-#
 # Peer reachability is reported informationally only — peers may legitimately
 # be offline, so they don't trigger restarts.
 #
@@ -23,8 +18,7 @@
 # section of its <iface>.conf (or passing --ping-target for a manual run). The
 # target may be one or more IPs and/or hostnames (comma/space separated, or on
 # several lines); the tunnel is alive if ANY of them answers. When set, the
-# interface is pinged through the tunnel after it and the firewall are confirmed
-# healthy. The main server's conf has no such line, so a many-peer server is never
+# interface is pinged through the tunnel once it is confirmed healthy. The main server's conf has no such line, so a many-peer server is never
 # restarted on an unreachable host.
 #
 # Server protection (strict): mark the main VPN server's conf with
@@ -32,8 +26,7 @@
 # in its [Interface] section. A server is monitored and alerted on but its tunnel
 # is NEVER auto-restarted — not on a structural failure, not on reachability, not
 # even with --restart — because bouncing it would drop every connected peer, and
-# a false positive must never do that. (Non-disruptive recovery that does not
-# drop peers, i.e. starting a stopped firewall service, is still performed.)
+# a false positive must never do that.
 # Client/site boxes omit the line (or set "= client") to keep normal --restart
 # behavior. When a server is unhealthy the run logs HEALTHCHECK_NORESTART and
 # exits non-zero so you're alerted; restart it by hand once you've confirmed it's
@@ -106,7 +99,7 @@
 #
 # NOTE: PersistentKeepalive is load-bearing for self-healing. Without it the
 # kernel purges staged packets and stops retrying entirely after ~90s, so the
-# tunnel stays dead until userspace acts. setup.sh/add-peer.sh set 25s.
+# tunnel stays dead until userspace acts. Peer configs should set 25s.
 ################################################################################
 
 set -uo pipefail   # not -e — we want the script to keep going across interfaces
@@ -174,6 +167,9 @@ WAN_PUBLIC_ANCHORS="1.1.1.1 8.8.8.8"
 #
 # => Any DISRUPTIVE action must stay at or above 180s or it will fire on healthy
 #    tunnels. Non-disruptive action may safely happen earlier.
+# Kept as a named constant, not used in code: the SOFT_RECOVERY_SECS reasoning
+# below is stated in terms of it, and it belongs beside its sibling.
+# shellcheck disable=SC2034
 WG_REKEY_ATTEMPT_SECS=90    # WireGuard gives up its own fast retry here
 WG_REJECT_AFTER_SECS=180    # session key hard-dead here
 
@@ -243,7 +239,7 @@ parse_arguments() {
             --fail-threshold) PING_FAIL_THRESHOLD="$2"; shift 2 ;;
             -v|--verbose)     VERBOSE=true; shift ;;
             -h|--help)
-                sed -n '3,84p' "$0" | sed 's/^# \?//'
+                sed -n '3,102p' "$0" | sed 's/^# \?//'
                 exit 0
                 ;;
             *) die "Unknown option: $1" ;;
@@ -291,61 +287,9 @@ check_interface() {
     echo "ok"
 }
 
-# Verify the firewall backend(s) recorded in this interface's manifest are
-# still effective. For firewalld/ufw we check the service is active (a stopped
-# service means no rules are loaded). For nftables the "service" concept
-# doesn't apply, so we check that the specific FORWARD rule we wrote at setup
-# time is still present in the running kernel — a flush or reboot without
-# persistence would silently lose it.
-#
-# Before any of that we check the recorded backend's *tooling* still exists. The
-# manifest is a snapshot from setup time; if the recorded backend's command is
-# gone entirely (e.g. someone switched the box from ufw to firewalld without
-# re-running setup), the manifest is stale and we can no longer meaningfully
-# verify the firewall. That's reported distinctly as "firewall-stale:<backend>"
-# so it reads as "refresh the manifest", not "the firewall is down".
-# Returns "ok", "firewall-stale:<backend>", or a short failure reason.
-check_firewall() {
-    local iface="$1"
-    local manifest; manifest=$(manifest_path "$iface")
-    [[ -f "$manifest" ]] || { echo "ok"; return; }   # no manifest -> can't check
 
-    local backends; backends=$(awk -F'|' '/^FW_/ {print $1}' "$manifest" | sort -u)
-    [[ -z "$backends" ]] && { echo "ok"; return; }
-
-    local b
-    while read -r b; do
-        [[ -z "$b" ]] && continue
-        case "$b" in
-            FW_FIREWALLD)
-                command -v firewall-cmd &>/dev/null \
-                    || { echo "firewall-stale:firewalld"; return; }
-                systemctl is-active --quiet firewalld 2>/dev/null \
-                    || { echo "firewall-down:firewalld"; return; }
-                ;;
-            FW_UFW)
-                command -v ufw &>/dev/null \
-                    || { echo "firewall-stale:ufw"; return; }
-                if ufw status 2>/dev/null | grep -qi "Status: active"; then :
-                elif systemctl is-active --quiet ufw 2>/dev/null; then :
-                else echo "firewall-down:ufw"; return
-                fi
-                ;;
-            FW_NFT)
-                command -v nft &>/dev/null \
-                    || { echo "firewall-stale:nftables"; return; }
-                if ! nft list table inet wireguard 2>/dev/null | grep -q "iifname \"${iface}\""; then
-                    echo "firewall-rules-missing:nftables"; return
-                fi
-                ;;
-        esac
-    done <<< "$backends"
-
-    echo "ok"
-}
-
-# Per-interface consecutive-reachability-failure counter, persisted next to the
-# manifest so it survives between timer runs. Stored as a single integer.
+# Per-interface consecutive-reachability-failure counter, persisted beside the
+# interface's config so it survives between timer runs. A single integer.
 reach_state_file() { echo "${WG_CONFIG_DIR}/.healthcheck-${1}.reachfail"; }
 
 reach_fail_count() {
@@ -412,23 +356,6 @@ reach_targets() {
     for t in ${raw//,/ }; do echo "$t"; done
 }
 
-# True if the argument is a syntactically valid reachability target: an IPv4
-# address (octets in range), a loose IPv6 address, or a DNS hostname. Guards the
-# "# Healthcheck-Reachability =" comment so a typo (e.g. 10.0.0.999) is caught
-# and ignored rather than silently treated as "unreachable" — which, with
-# --restart, would turn a config typo into a tunnel-restart loop.
-looks_like_host() {
-    local h="$1"
-    [[ -z "$h" ]] && return 1
-    if [[ "$h" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then   # IPv4 shape
-        local o; IFS=. read -ra o <<<"$h"
-        local n; for n in "${o[@]}"; do (( n <= 255 )) || return 1; done
-        return 0
-    fi
-    [[ "$h" == *:* && "$h" =~ ^[0-9a-fA-F:]+$ ]] && return 0   # IPv6 (loose)
-    # Hostname: dot-separated labels of alnum/hyphen, not starting/ending in '-'.
-    [[ ${#h} -le 253 && "$h" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]
-}
 
 # Verify the tunnel can actually carry traffic by pinging this interface's
 # reachability target(s) (the upstream server's in-tunnel IP, and/or hostnames)
@@ -631,9 +558,7 @@ process_interface() {
 
     # Is a *tunnel* restart permitted on this interface? Requires --restart AND a
     # non-server role. A server is monitored and alerted on but its tunnel is never
-    # bounced (dropping all peers). Non-disruptive recovery that does NOT drop
-    # peers — starting a stopped firewall service — is still allowed on a server,
-    # since it only restores peer connectivity.
+    # bounced (dropping all peers).
     local may_restart=false
     local role; role=$(iface_role "$iface")
     if $DO_RESTART && [[ "$role" != "server" ]]; then may_restart=true; fi
@@ -659,7 +584,7 @@ process_interface() {
                 if [[ "$recheck" == "ok" ]]; then
                     print_success "${iface}: recovered after restart"
                     log_audit "HEALTHCHECK_RECOVERY" "interface=${iface}"
-                    # fall through to firewall check
+                    # fall through to the reachability check
                 else
                     print_error "${iface}: still ${recheck} after restart"
                     log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=interface reason=${recheck}"
@@ -675,61 +600,7 @@ process_interface() {
         fi
     fi
 
-    # Interface is up — verify the firewall we configured is still effective.
-    # A stopped firewalld/ufw silently closes the UDP port; flushed nftables
-    # drops FORWARD traffic. Neither shows up in `wg-quick` status.
-    local fw_result; fw_result=$(check_firewall "$iface")
-    if [[ "$fw_result" == firewall-stale:* ]]; then
-        # The recorded backend's tooling is gone, so the manifest predates a
-        # firewall change on this box and we can't verify the real firewall.
-        # Warn so the operator refreshes the manifest, but don't fail the tunnel
-        # health or attempt a restart — the tunnel itself may be perfectly fine,
-        # and there is no backend of the recorded type left to act on.
-        local stale_be="${fw_result#firewall-stale:}"
-        print_warning "${iface}: recorded firewall backend '${stale_be}' is no longer installed — manifest is stale; rerun setup.sh firewall config to refresh it"
-        log_audit "HEALTHCHECK_CONFIG" "interface=${iface} reason=firewall-backend-stale backend=${stale_be} note=tooling-not-installed-rerun-setup"
-        # fall through past the firewall block; do not restart or return unhealthy
-    elif [[ "$fw_result" != "ok" ]]; then
-        print_warning "${iface}: ${fw_result}"
-        log_audit "HEALTHCHECK_FAIL" "interface=${iface} reason=${fw_result}"
-
-        if $DO_RESTART; then
-            local fw_svc=""
-            case "$fw_result" in
-                firewall-down:firewalld) fw_svc=firewalld ;;
-                firewall-down:ufw)       fw_svc=ufw ;;
-            esac
-            if [[ -n "$fw_svc" ]]; then
-                print_info "${iface}: starting ${fw_svc} ..."
-                log_audit "HEALTHCHECK_RESTART" "interface=${iface} component=firewall service=${fw_svc} reason=${fw_result}"
-                if systemctl start "$fw_svc" 2>/dev/null; then
-                    sleep 2
-                    local refw; refw=$(check_firewall "$iface")
-                    if [[ "$refw" == "ok" ]]; then
-                        print_success "${iface}: ${fw_svc} started"
-                        log_audit "HEALTHCHECK_RECOVERY" "interface=${iface} component=firewall service=${fw_svc}"
-                    else
-                        print_error "${iface}: ${fw_svc} still failing after start (${refw})"
-                        log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=firewall service=${fw_svc} reason=${refw}"
-                        return 1
-                    fi
-                else
-                    print_error "${iface}: failed to start ${fw_svc}"
-                    log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=firewall service=${fw_svc} reason=systemctl-start-command-failed"
-                    return 1
-                fi
-            else
-                # nftables rules vanished — no safe auto-recovery from cron
-                print_warning "${iface}: cannot auto-recover ${fw_result}; rerun setup.sh firewall config"
-                log_audit "HEALTHCHECK_RESTART_FAILED" "interface=${iface} component=firewall reason=${fw_result} note=no-auto-recovery-manual-fix-required"
-                return 1
-            fi
-        else
-            return 1
-        fi
-    fi
-
-    # Interface + firewall are healthy. If an upstream target is configured,
+    # The interface is healthy. If an upstream target is configured,
     # confirm the tunnel actually carries traffic. A failed ping alone is NOT
     # enough to restart: we corroborate it with the handshake age (is the crypto
     # session really dead?) and the off-tunnel WAN status (is a restart even
@@ -867,6 +738,7 @@ process_interface() {
 main() {
     parse_arguments "$@"
     check_root
+    check_systemd   # every check and restart below goes through wg-quick@<iface>
 
     local -a interfaces
     if [[ -n "$WG_INTERFACE" ]]; then
