@@ -1591,7 +1591,8 @@ Each installer copies its own unit files out of `systemd/` into
 `/etc/systemd/system/`, rewrites `ExecStart` to wherever you put the scripts,
 reloads systemd, and enables and starts the timer. They stop straight away if
 the host isn't running systemd, refuse to install a unit whose script is missing
-or not executable, and warn if a timer ends up with nothing scheduled. Add
+or not executable, and warn if a timer ends up with nothing scheduled.
+
 `install-logging.sh` also widens journal retention to whatever the disk allows
 when the host has no `SystemMaxUse` of its own; `--with-retention` forces that
 over an existing setting. Add `--dry-run` to either installer to see what it
