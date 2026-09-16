@@ -260,12 +260,22 @@ parse_arguments() {
 check_interface() {
     local iface="$1"
 
+    # Under -v each check that PASSES reports itself. These go to STDERR because
+    # this function's stdout is the machine-readable verdict the caller captures.
+    # A failing check gets no tick of its own: the caller already prints the
+    # reason, and the checks after it never run -- the list stopping is the
+    # honest picture of how far it got.
+    local addr_count=0
+
     if ! systemctl is-active --quiet "wg-quick@${iface}"; then
         echo "service-inactive"; return
     fi
+    $VERBOSE && print_success "${iface}: 1/3 wg-quick@${iface} service is active" >&2
+
     if ! ip link show "$iface" &>/dev/null; then
         echo "interface-missing"; return
     fi
+    $VERBOSE && print_success "${iface}: 2/3 kernel interface exists" >&2
 
     local conf="${WG_CONFIG_DIR}/${iface}.conf"
     if [[ -f "$conf" ]]; then
@@ -279,6 +289,7 @@ check_interface() {
                 echo "address-missing:${addr}"
                 return
             fi
+            addr_count=$(( addr_count + 1 ))
         done < <(awk -F'=' '
             /^[[:space:]]*\[/ { in_iface = ($0 ~ /^\[Interface\]/); next }
             in_iface && /^[[:space:]]*Address[[:space:]]*=/ {
@@ -287,6 +298,9 @@ check_interface() {
                 for (i=1;i<=n;i++) print a[i]
             }
         ' "$conf")
+        $VERBOSE && print_success "${iface}: 3/3 all ${addr_count} declared address(es) assigned to the interface" >&2
+    else
+        $VERBOSE && print_warning "${iface}: 3/3 skipped — no conf at ${conf}, cannot check declared addresses" >&2
     fi
 
     echo "ok"
@@ -694,8 +708,18 @@ process_interface() {
     # checks.
     local reach; reach=$(check_reachability "$iface")
     if [[ "$reach" == "skipped" ]]; then
-        :   # reachability not enabled for this interface — structural checks only
+        # reachability not enabled for this interface — structural checks only
+        if $VERBOSE; then
+            print_info "${iface}: 4/4 reachability not configured — add '# Healthcheck-Reachability = <upstream tunnel IP>' to test that traffic actually passes"
+        fi
     elif [[ "$reach" == "ok" ]]; then
+        if $VERBOSE; then
+            local vt; vt=$(paste -sd' ' < <(reach_targets "$iface"))
+            print_success "${iface}: 4/4 reachability — ${vt} answered through the tunnel"
+            # The session this verdict actually rests on, which is the server
+            # peer's and not a lateral site's (see tunnel_handshake_age).
+            print_info "${iface}: server-peer handshake is $(tunnel_handshake_age "$iface")s old"
+        fi
         # Good check clears any failure streak.
         [[ "$(reach_fail_count "$iface")" -ne 0 ]] && reach_fail_set "$iface" 0
     elif [[ "$reach" == "misconfigured" ]]; then

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`healthcheck.sh -v` now itemizes each check** instead of collapsing them
+  into one verdict per interface: `1/3` service active, `2/3` kernel interface
+  exists, `3/3` every declared address actually assigned, and `4/4` reachability
+  (with the server-peer handshake age, which is the session that verdict rests
+  on). A failing check gets no line of its own — the caller already prints the
+  reason, and the checks after it never run, so the list stopping where it does
+  is the honest picture of how far it got. Ticks go to stderr because
+  `check_interface`'s stdout is the machine-readable verdict the caller
+  captures. **The bare run is unchanged and still silent**, so the timer path
+  writes nothing new.
 - **README: "Start Here: Adopting a Config You Didn't Generate"** — numbered
   walkthrough for a stock WireGuard config from a blog or vendor portal, which
   connects fine and is still wrong for these tools. Covers why an undeclared box

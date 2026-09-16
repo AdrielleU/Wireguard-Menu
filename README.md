@@ -174,9 +174,33 @@ A populated `NEXT` column means it is really running.
 ### 8. Run the check by hand before the timer does
 
 ```bash
-sudo ./healthcheck.sh          # every interface
-sudo ./healthcheck.sh -i wg0 -v   # one interface, report healthy ones too
+sudo ./healthcheck.sh          # every interface; silent unless something is wrong
+sudo ./healthcheck.sh -i wg0 -v   # itemize every check
 ```
+
+`-v` ticks off each check individually, so you can see what actually passed:
+
+```
+[✓] wg0: 1/3 wg-quick@wg0 service is active
+[✓] wg0: 2/3 kernel interface exists
+[✓] wg0: 3/3 all 1 declared address(es) assigned to the interface
+[✓] wg0: 4/4 reachability — 10.10.0.1 answered through the tunnel
+[i] wg0: server-peer handshake is 58s old
+[✓] wg0: healthy
+  peers: 1/1 connected (handshake within 300s), 0 stale
+```
+
+A failing check ends the list rather than marking the rest — the checks after it
+genuinely never run:
+
+```
+[✓] wg0: 1/3 wg-quick@wg0 service is active
+[✓] wg0: 2/3 kernel interface exists
+[!] wg0: address-missing:10.10.0.1/24
+```
+
+That third check is the one worth knowing about: it catches the wg-quick race
+where the service reports success but the IP never reaches the interface.
 
 **A bare run never restarts anything.** Restarting requires `--restart`, stated
 explicitly — there is no flag that turns it on as a side effect. The run reports
