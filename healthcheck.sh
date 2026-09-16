@@ -215,12 +215,17 @@ RESTART_BUFFER_SECS=0
 # recovery past 3 min.
 HANDSHAKE_DEAD_SECS="${HANDSHAKE_DEAD_SECS:-$(( WG_REJECT_AFTER_SECS + RESTART_BUFFER_SECS ))}"   # 180s / 3 min
 
-# Minimum seconds between two disruptive restarts of the same interface. Without
-# this, a failure that a restart cannot fix restarts the interface on EVERY tick
-# (the post-restart streak reset re-arms immediately at PING_FAIL_THRESHOLD=1),
-# which on a 60s timer is a restart storm that drops peers every minute. The
-# cooldown makes the destructive step "once, and only if sure" while still
-# retrying occasionally so the box self-heals when the real cause clears.
+# Minimum seconds between two disruptive restarts of the same interface, shared
+# by BOTH rungs that can restart: the structural failure above and the
+# reachability failure below. One mark, one cooldown, so the guarantee is a flat
+# "at most one disruptive restart per interface per window" no matter which
+# check tripped. Without it a failure that a restart cannot fix restarts the
+# interface on EVERY tick — on the reachability rung because the post-restart
+# streak reset re-arms immediately at PING_FAIL_THRESHOLD=1, and on the
+# structural rung because "service-inactive" is still true 60s later — which on
+# a 60s timer is a restart storm that drops peers every minute. The cooldown
+# makes the destructive step "once, and only if sure" while still retrying
+# occasionally so the box self-heals when the real cause clears.
 RESTART_COOLDOWN_SECS="${RESTART_COOLDOWN_SECS:-900}"   # 15 min
 
 # Consecutive confirmed-down checks required before a restart. Kept at 1 because
@@ -576,8 +581,28 @@ process_interface() {
             log_audit "HEALTHCHECK_NORESTART" "interface=${iface} role=server reason=${result}"
             return 1
         elif $may_restart; then
+            # Same rate limit as the reachability rung below. A restart that did
+            # not fix a structural failure will not fix it 60s later either, and
+            # without this the timer bounces a broken wg-quick@ on every tick —
+            # which buries the original fault and, on a site box, drops the
+            # tunnel repeatedly. The FIRST restart is never delayed: the cooldown
+            # only gates repeats, and the mark is shared with the reachability
+            # rung, so the real guarantee is one disruptive restart per
+            # RESTART_COOLDOWN_SECS per interface whatever the cause.
+            #
+            # No failure streak here, unlike the reachability path: that streak
+            # exists to ride out flaky pings, whereas "the service is not active"
+            # is unambiguous on the first look and waiting only extends an
+            # outage we can already prove.
+            local scd; scd=$(restart_cooldown_left "$iface")
+            if (( scd > 0 )); then
+                print_warning "${iface}: ${result}, but last restart was < ${RESTART_COOLDOWN_SECS}s ago — holding ${scd}s before restarting again"
+                log_audit "HEALTHCHECK_RESTART_SUPPRESSED" "interface=${iface} component=interface reason=${result} cooldown_left=${scd}"
+                return 1
+            fi
             print_info "${iface}: restarting wg-quick@${iface} ..."
             log_audit "HEALTHCHECK_RESTART" "interface=${iface} component=interface reason=${result}"
+            restart_mark "$iface"
             if systemctl restart "wg-quick@${iface}"; then
                 sleep 2
                 local recheck; recheck=$(check_interface "$iface")

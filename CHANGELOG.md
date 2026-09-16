@@ -123,6 +123,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since shrinking retention would discard existing history.
 
 ### Changed
+- **The restart cooldown now covers both rungs that can restart an interface.**
+  `RESTART_COOLDOWN_SECS` (15 min) gated only the reachability rung; a
+  structural failure — `service-inactive`, `interface-missing`,
+  `address-missing` — restarted `wg-quick@<iface>` on every tick, so a service
+  that could not start was bounced every 60s by the timer, burying the original
+  fault and dropping the tunnel repeatedly on a site box. Both rungs now share
+  one mark and one cooldown: at most one disruptive restart per interface per
+  window, whichever check tripped. The first restart is never delayed. No
+  failure streak was added to the structural rung — that streak exists to ride
+  out flaky pings, whereas "the service is not active" is unambiguous on the
+  first look. This also makes good on the tier-2 comment, which already cited
+  the cooldown as what caps the blast radius of a false positive.
 - **Journal retention now defaults to "keep everything the disk allows".** A
   stock journald caps itself at 10% of the filesystem or 4G, whichever is
   smaller — 4G on a 70G root, which is weeks on a busy host and silently ages
