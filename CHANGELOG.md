@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **README: "Start Here: Adopting a Config You Didn't Generate"** — numbered
+  walkthrough for a stock WireGuard config from a blog or vendor portal, which
+  connects fine and is still wrong for these tools. Covers why an undeclared box
+  is judged as a server, which two comment lines fix it, when `BEGIN_PEER`
+  markers are required (server: error; site: not checked, but needed for the
+  menu's peer actions), and the before/after `verify-config.sh` output.
 - **`menu.sh` rewritten** — the menu does the work itself instead of launching a
   script per action, built on `utils.sh`. The actions are deliberately minimal.
   *Setup WireGuard Server* writes `<iface>.conf` and the server keypair
@@ -117,6 +123,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since shrinking retention would discard existing history.
 
 ### Changed
+- **Journal retention now defaults to "keep everything the disk allows".** A
+  stock journald caps itself at 10% of the filesystem or 4G, whichever is
+  smaller — 4G on a 70G root, which is weeks on a busy host and silently ages
+  the audit trail out well inside a 6-year requirement. `install-logging.sh`
+  now installs the retention drop-in on a bare install **when the host sets no
+  `SystemMaxUse` of its own**; an explicit operator setting is never
+  overridden, and `--with-retention` still forces ours over one. The drop-in
+  sets `SystemMaxUse=100T` (above any real filesystem, so it never binds) and
+  `MaxRetentionSec=0` (age-based deletion off), leaving `SystemKeepFree` as the
+  only bound — which is also what keeps the journal from filling the disk.
+  Measured on the development host: journald's own ceiling moved from 4G to
+  48.7G. There is no true "forever" on a finite disk and the docs say so.
+- `--check-retention` no longer reports a fantasy window when the cap is above
+  the filesystem. It now recognises that case and reports the disk-bounded
+  ceiling, preferring journald's own figure ("... is 1.8G, max 48.7G, ...",
+  which has `SystemKeepFree` already reconciled) over estimating from `df`.
+- `--check-retention` now says when its own measurement is untrustworthy. It
+  projects the retention window from journal that already exists, so on a host
+  upgraded from units without `LogLevelMax=notice` the rate is dominated by
+  chatter that is no longer written — it over-sizes the disk until that history
+  rotates away. It now detects the case (filtered unit newer than the oldest
+  journal entry) and warns with the date to re-check after. The sizing comment
+  in `journald-wireguard-audit.conf` no longer quotes a MB/day figure at all,
+  since the one it quoted described the old noise.
 - **The timer units no longer fill the journal with their own start/stop
   lines.** A 60s healthcheck and a 2min logger made systemd write
   "Starting/Finished/Deactivated" on every run — 105,164 entries in 30 days on

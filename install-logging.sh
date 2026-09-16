@@ -113,6 +113,53 @@ human() {   # bytes -> human, one decimal
     }'
 }
 
+# journald states its own effective ceiling at every start:
+#   "System Journal (/var/log/journal/<id>) is 1.8G, max 48.7G, 46.8G free."
+# That figure is authoritative -- it is SystemMaxUse and SystemKeepFree already
+# reconciled -- so prefer it over estimating from df, which cannot know what
+# SystemKeepFree reserves. Echoes bytes, or nothing if journald has not said.
+journald_reported_max() {
+    local line v num unit
+    line=$(journalctl -u systemd-journald --no-pager -o cat 2>/dev/null \
+           | grep -oE 'max [0-9]+(\.[0-9]+)?[KMGT]?,' | tail -n1) || return 1
+    [[ -n "$line" ]] || return 1
+    v=${line#max }; v=${v%,}
+    num="${v%[KMGT]}"; unit="${v#"$num"}"
+    [[ "$num" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+    awk -v n="$num" -v u="$unit" 'BEGIN{
+        m = (u=="K")?1024 : (u=="M")?1048576 : (u=="G")?1073741824 :
+            (u=="T")?1099511627776 : 1
+        printf "%d", n * m
+    }'
+}
+
+# Bytes of free space on the filesystem holding the journal. journald stops
+# short of consuming all of it by SystemKeepFree, so current usage plus this is
+# an upper bound on how large the journal can get, not a promise.
+journal_fs_free() {
+    local dir=/var/log/journal
+    [[ -d "$dir" ]] || dir=/var/log
+    local avail
+    avail=$(df -B1 --output=avail "$dir" 2>/dev/null | tail -n1 | tr -d '[:space:]')
+    [[ "$avail" =~ ^[0-9]+$ ]] || return 1
+    echo "$avail"
+}
+
+# True when the journal still holds entries written before this host's units
+# gained LogLevelMax=notice — i.e. when the measured growth rate is inflated by
+# per-run timer chatter that is no longer written at all. The unit file's mtime
+# is the upgrade point, since that is when install-logging.sh last wrote it.
+journal_predates_log_filter() {
+    local unit="${UNIT_DST}/${BASE}.service"
+    [[ -f "$unit" ]] || return 1
+    grep -q '^LogLevelMax=' "$unit" 2>/dev/null || return 1
+    _WG_FILTER_SINCE=$(stat -c %Y "$unit" 2>/dev/null) || return 1
+    local oldest
+    oldest=$(journalctl --no-pager -o short-unix 2>/dev/null | head -1 | cut -d. -f1)
+    [[ "$oldest" =~ ^[0-9]+$ ]] || return 1
+    (( oldest < _WG_FILTER_SINCE ))
+}
+
 # Measure real journal growth and project the achievable retention window.
 # This is the check that catches the common failure: a 6-year MaxRetentionSec
 # sitting behind a SystemMaxUse that evicts after a few months.
@@ -154,19 +201,62 @@ check_retention() {
     printf '  target window      %s days\n' "$RETENTION_TARGET_DAYS"
     printf '  needs about        %s to hold that window\n' "$(human "$required")"
 
+    # Measured backwards over journal that already exists, so on a host upgraded
+    # from units without LogLevelMax=notice this rate is dominated by chatter
+    # that will not recur. Measured on one such host: 91% of ALL journal entries
+    # came from these two units before the filter, so the projection over-sizes
+    # the disk until that history rotates away.
+    if journal_predates_log_filter; then
+        print_warning "This rate includes pre-filter timer chatter and over-estimates future growth; re-check after the journal rotates past $(date -d "@${_WG_FILTER_SINCE}" '+%Y-%m-%d' 2>/dev/null || echo 'the upgrade')."
+    fi
+
     if [[ -z "$max_use" ]]; then
-        printf '  SystemMaxUse       not set — journald defaults to 10%% of the filesystem\n'
-        print_warning "SystemMaxUse is unset, so the achievable window depends on disk size. Set it explicitly to make retention verifiable."
+        printf '  SystemMaxUse       not set — journald caps the journal at 10%% of the\n'
+        printf '                     filesystem, or 4G, whichever is smaller\n'
+        print_warning "Nothing is set, so the journal is capped well below the disk. Run the installer (or --with-retention) to keep everything the disk allows."
         return 0
     fi
 
     printf '  SystemMaxUse       %s\n' "$(human "$max_use")"
-    local achievable=$(( max_use / per_day ))
+
+    # A cap set above the filesystem size is the "keep everything" setting: the
+    # binding limit is then free disk minus SystemKeepFree, not SystemMaxUse.
+    # Reporting the configured number in that case would promise a window
+    # hundreds of times longer than the disk can actually deliver.
+    local effective="$max_use" free reported unbounded=false
+    if free=$(journal_fs_free) && (( max_use > free + usage_bytes )); then
+        unbounded=true
+        if reported=$(journald_reported_max) && [[ -n "$reported" ]]; then
+            # journald's own number: SystemMaxUse and SystemKeepFree already
+            # reconciled, so no guessing at the reserve.
+            effective="$reported"
+            printf '  effective cap      %s — disk, not SystemMaxUse, is the limit\n' "$(human "$effective")"
+            printf '                     (journald reports this as its own ceiling)\n'
+        else
+            effective=$(( free + usage_bytes ))
+            printf '  effective cap      ~%s — disk, not SystemMaxUse, is the limit\n' "$(human "$effective")"
+            printf '                     (estimated; journald stops short by SystemKeepFree)\n'
+        fi
+    fi
+
+    local achievable=$(( effective / per_day ))
     printf '  achievable window  ~%s days\n' "$achievable"
 
-    if (( max_use >= required )); then
-        print_success "Retention cap is sufficient for the ${RETENTION_TARGET_DAYS}-day window."
+    if (( effective >= required )); then
+        if $unbounded; then
+            print_success "Keeping everything the disk allows: ~${achievable} days at the current rate, against a ${RETENTION_TARGET_DAYS}-day target."
+        else
+            print_success "Retention cap is sufficient for the ${RETENTION_TARGET_DAYS}-day window."
+        fi
         return 0
+    fi
+
+    if $unbounded; then
+        print_error "Retention is already uncapped and the disk still falls short: ~${achievable} days, not ${RETENTION_TARGET_DAYS}."
+        echo "    Nothing can be raised here — SystemMaxUse is already above the"
+        echo "    filesystem. Add disk, or ship the audit trail off-box to a log"
+        echo "    store sized for the window."
+        return 1
     fi
     print_error "Retention cap is too small: it holds ~${achievable} days, not ${RETENTION_TARGET_DAYS}."
     echo "    Size wins over age, so entries are evicted silently well before"
@@ -236,7 +326,21 @@ main() {
         uninstall) uninstall_units ;;
         install)
             install_units
-            if $retention; then echo; install_retention; fi
+            # Retention defaults to "keep everything the disk allows", but only
+            # when the host has no SystemMaxUse of its own. An explicit setting
+            # is somebody's decision about their disk, so it is never
+            # overridden -- --with-retention forces ours on top when that is
+            # actually what is wanted.
+            if $retention; then
+                echo; install_retention
+            elif [[ -z "$(effective_max_use)" ]]; then
+                echo
+                print_info "No SystemMaxUse is set, so journald would cap the journal at 4G. Installing the keep-everything drop-in."
+                install_retention
+            else
+                echo
+                print_info "SystemMaxUse is already set to $(human "$(effective_max_use)") — leaving retention alone. Use --with-retention to replace it with the keep-everything drop-in."
+            fi
             if $DRY_RUN; then
                 print_info "Dry run: checks passed, nothing was changed. (--check-retention projects the retention window.)"
             else

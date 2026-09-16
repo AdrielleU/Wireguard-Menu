@@ -2,6 +2,211 @@
 
 Complete suite of automated CLI tools for deploying and managing WireGuard VPN servers on Linux.
 
+## Start Here: Adopting a Config You Didn't Generate
+
+**If you pasted a WireGuard config off a blog, a vendor portal, or the official
+quick-start, it will connect fine and still be wrong for these tools.** A stock
+config carries no comment telling this toolkit what the box *is*, so
+`verify-config.sh` judges every config as a **server** by default. On a
+site-to-site box that is the wrong standard, and the consequences are real:
+`healthcheck.sh --restart` treats a server as never-restartable, so a site
+tunnel that has silently died is never brought back — and the menu's Remove
+Peer, Toggle Peer and Rotate Keys cannot see a peer block they have no markers
+for.
+
+Nothing below changes how WireGuard routes packets. It declares intent that a
+`.conf` has no native field for, which is why it lives in comments.
+
+### 1. Put the config where the tools look, with the right mode
+
+```bash
+sudo install -m 600 wg0.conf /etc/wireguard/wg0.conf
+```
+
+The name before `.conf` is the interface name (`wg0` → `wg0.conf`). Mode `600`
+matters: the file holds a private key, and `verify-config.sh` warns on anything
+looser.
+
+### 2. Run the checker first, before changing anything
+
+```bash
+sudo ./verify-config.sh -i wg0
+```
+
+On an untouched config off the internet, expect roughly this:
+
+```
+== server config  (/etc/wireguard/wg0.conf) ==
+  ok   structure is valid (one [Interface], well-formed Key = Value lines)
+  ok   [Interface] has PrivateKey
+  ok   [Interface] has Address
+  warn [Interface] has no ListenPort (fine for a client config, not for a server)
+
+== peer marker coverage ==
+  FAIL 0/1 [Peer] blocks carry BEGIN_PEER markers — 1 peer(s) are invisible to
+       Remove Peer, Toggle Peer and Rotate Keys
+
+== healthcheck comments ==
+  FAIL nothing declares what this box is: add '# Healthcheck-Role = server' to
+       [Interface] on a server (never auto-restarted), or '# Healthcheck-Role =
+       client' plus '# Healthcheck-Reachability = <upstream tunnel IP>' on a
+       client or site box
+
+2 error(s), 3 warning(s) across 1 interface(s)
+```
+
+Note the heading says **server config** — that is the misclassification, and it
+is what produces most of the noise. Fixing step 3 fixes the heading too.
+
+### 3. Declare what this box is — the one edit that is always required
+
+Add **two comment lines** inside `[Interface]`. Which pair depends on the role,
+and this is the only decision in this whole procedure that needs thought:
+
+**A site-to-site endpoint** — a spoke, a branch box, anything that dials a far
+end and should be revived automatically if the tunnel dies:
+
+```ini
+[Interface]
+# Healthcheck-Role = site
+# Healthcheck-Reachability = 10.10.0.1
+```
+
+`Healthcheck-Reachability` is **the far end's tunnel IP**, not this box's own
+address and not a public IP — `healthcheck.sh` pings it *through* the tunnel to
+prove traffic actually passes. Point it at your own address and the check
+always succeeds while proving nothing; `verify-config.sh` warns when it catches
+that.
+
+**A box other sites depend on** — the listening end, which must never be
+bounced out from under connected peers:
+
+```ini
+[Interface]
+# Healthcheck-Role = server
+```
+
+`server` means *never auto-restart this tunnel*. Choose it for the hub even
+when the hub is also one half of a site-to-site pair.
+
+### 4. Wrap each peer in markers — required on a server, recommended everywhere
+
+```ini
+# BEGIN_PEER site-b
+# Site: site-b
+[Peer]
+PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
+AllowedIPs = 10.10.0.2/32, 192.168.50.0/24
+# END_PEER site-b
+```
+
+The name after `BEGIN_PEER` is how the menu refers to that peer, and it must
+match on the `END_PEER` line. The `# Site:` line records what the peer is
+(`# Client:` and `# Peer-to-Peer:` are the other two).
+
+On a box with `Role = server` this is an **error** if missing. On a box with
+`Role = site` it is not checked at all — but add it anyway if you ever intend
+to remove, pause or rotate that peer from the menu, because those actions find
+peers only by marker.
+
+### 5. Add `PersistentKeepalive` on the end that dials out
+
+```ini
+PersistentKeepalive = 25
+```
+
+Only on a peer block that has an `Endpoint`. Without it, the kernel gives up
+retrying after ~90s of failed handshakes and the tunnel cannot recover on its
+own — `verify-config.sh` warns about exactly this. The listening end does not
+need it.
+
+### 6. Re-run until it is clean
+
+```bash
+sudo ./verify-config.sh -i wg0
+```
+
+```
+########  wg0  (site box)  ########
+
+== site config  (/etc/wireguard/wg0.conf) ==
+  ok   structure is valid (one [Interface], well-formed Key = Value lines)
+  ok   [Interface] has PrivateKey
+  ok   [Interface] has Address
+  ok   mode 600 /etc/wireguard/wg0.conf
+
+== site peers ==
+  ok   [Peer] #1 (vpn.example.com:51820): Endpoint set, PersistentKeepalive = 25
+
+== healthcheck comments ==
+  ok   Healthcheck-Role = site
+  ok   Healthcheck-Reachability: 10.10.0.1 — pinged through the tunnel
+
+Config matches the expected format. (1 interface(s) checked)
+```
+
+The heading is now **site box** and the marker and key-directory checks are
+gone — those apply to servers. It exits non-zero while any error remains, so it
+works in a script: `verify-config.sh -i wg0 || exit 1`.
+
+Not every warning must reach zero. A hub legitimately warns `no key directory`
+when it was never used to hand out client configs. **Errors** are the bar.
+
+### 7. Bring it up and hand it to the timers
+
+```bash
+sudo wg-quick up wg0
+sudo systemctl enable wg-quick@wg0
+
+sudo ./install-healthcheck.sh
+sudo ./install-logging.sh
+```
+
+Then confirm the timers are actually scheduled — `enabled` and `active` are not
+sufficient, see [Verifying it's actually working](#verifying-its-actually-working):
+
+```bash
+systemctl list-timers 'wireguard-*'
+```
+
+A populated `NEXT` column means it is really running.
+
+### 8. Run the check by hand before the timer does
+
+```bash
+sudo ./healthcheck.sh          # every interface
+sudo ./healthcheck.sh -i wg0 -v   # one interface, report healthy ones too
+```
+
+**A bare run never restarts anything.** Restarting requires `--restart`, stated
+explicitly — there is no flag that turns it on as a side effect. The run reports
+what it found and exits non-zero if any interface is unhealthy, so it is safe to
+run on a live box at any time.
+
+The timer is what passes `--restart`. Whether that can bounce *this* tunnel was
+decided back in step 3:
+
+| `# Healthcheck-Role` | with `--restart` |
+| -------------------- | ---------------- |
+| `server` (or `hub`)  | **never restarted** — alerted on only |
+| `site` / `client`    | restarted on a structural failure |
+| **line absent**      | **treated as `client` — restarted** |
+
+That last row is the one to check. **An unmarked config defaults to
+restartable**, so a server that never got its marker is quietly enrolled in
+auto-restart, and you find out when a false positive drops every connected peer.
+`verify-config.sh` makes it an error rather than leaving it to be discovered
+that way:
+
+```
+FAIL nothing declares what this box is: add '# Healthcheck-Role = server' to
+     [Interface] on a server (never auto-restarted), or '# Healthcheck-Role =
+     client' plus '# Healthcheck-Reachability = <upstream tunnel IP>' on a
+     client or site box
+```
+
+So step 6 passing clean is what confirms the restart policy is the one you meant.
+
 ## Goal
 
 Provide a comprehensive command-line interface for WireGuard server and client management that:
@@ -552,7 +757,7 @@ prints what it would do, but writes nothing.
 | Dry run | Checks | Touches |
 | ------- | ------ | ------- |
 | `install-healthcheck.sh --dry-run` | the unit's script exists and is executable; no cron entry double-runs it | nothing |
-| `install-logging.sh --dry-run` | the same, plus the retention drop-in with `--with-retention` | nothing |
+| `install-logging.sh --dry-run` | the same, plus which retention branch it would take | nothing |
 | `log-connections.sh --dry-run` | reads `wg show dump` and the state file, prints the connect/disconnect records it would write | nothing — no journal entries, no state file |
 
 Two more need no flag, because they only read:
@@ -838,7 +1043,7 @@ should be able to enable, verify and report on them independently:
 | Installer | Control | Installs |
 | --------- | ------- | -------- |
 | `install-healthcheck.sh` | Availability — is the tunnel up, restart it if not | `wireguard-healthcheck.{service,timer}` |
-| `install-logging.sh` | Audit — the connect/disconnect trail | `wireguard-log-connections.{service,timer}`, and the journal retention drop-in with `--with-retention` |
+| `install-logging.sh` | Audit — the connect/disconnect trail | `wireguard-log-connections.{service,timer}`, and the journal retention drop-in when the host sets no `SystemMaxUse` |
 
 Both rewrite the unit's `ExecStart`/`Documentation` to wherever this repo
 actually lives, so you are not locked to a hardcoded path, and both are
@@ -852,7 +1057,7 @@ sudo ./install-healthcheck.sh --uninstall  # stop, disable, remove units
 
 sudo ./install-logging.sh                  # install/refresh + enable + start
 sudo ./install-logging.sh --dry-run        # show what an install would do; change nothing
-sudo ./install-logging.sh --with-retention # ... and widen journal retention
+sudo ./install-logging.sh --with-retention # ... and force our retention over an existing setting
 sudo ./install-logging.sh --check-retention # project the achievable window
 sudo ./install-logging.sh --status         # timer state + record count + retention
 ```
@@ -900,7 +1105,7 @@ sudo ./healthcheck.sh -v                  # every check, changes nothing
 sudo ./log-connections.sh --dry-run       # the records it would write
 ```
 
-Two things that look like problems but aren't, and two that look fine but aren't:
+Three things that look like problems but aren't, and two that look fine but aren't:
 
 * The service is `Type=oneshot`, so its healthy steady state is
   **`inactive (dead)` with `status=0/SUCCESS`**. That is correct, not a failure.
@@ -915,7 +1120,13 @@ Two things that look like problems but aren't, and two that look fine but aren't
   `NEXT` column of `systemctl list-timers`: `-` means nothing is scheduled.
   Timers that start from `OnBootSec` are skipped for good when a slow boot
   starts them more than a minute in; these units use `OnActiveSec=1min`, so
-  re-run the installers if yours still say `OnBootSec`.
+  re-run the installers if yours still say `OnBootSec`. This went unnoticed for
+  12 days on the development host.
+
+  **But `NEXT -` has a harmless twin:** it also shows blank for the moment the
+  service is actually running, because the next elapse is not computed until
+  the run finishes. Tell them apart by `LAST` — recent means mid-run, days ago
+  means dead.
 * **Unit drift is the failure mode that hides best.** If the installed units
   fall out of sync with the repo, every layer above still reports green while
   the live cadence and paths are whatever you installed months ago:
@@ -1191,25 +1402,48 @@ makes the queries above work without parsing text.
 
 ### Retention (HIPAA: 6 years)
 
-**Retention is not configured by default.** A stock journal keeps only what
-fits its default disk budget — often well under a year — so the audit trail
-silently ages out long before a 6-year requirement. Install the drop-in shipped
-with this repo:
+**The default is now to keep everything the disk allows.** A stock journal
+caps itself at 10% of the filesystem or 4G, whichever is smaller — on a 70G
+root that is 4G, which can be weeks on a busy host and silently ages the audit
+trail out long before a 6-year requirement.
 
-```bash
-sudo ./install-logging.sh --with-retention
-```
-
-That installs `systemd/journald-wireguard-audit.conf` to
-`/etc/systemd/journald.conf.d/` and restarts journald. Doing it by hand is the
-same thing:
+So `install-logging.sh` installs `systemd/journald-wireguard-audit.conf` to
+`/etc/systemd/journald.conf.d/` and restarts journald **when the host has no
+`SystemMaxUse` of its own**. An existing setting is somebody's decision about
+their disk and is never overridden — the installer says which case it took.
+Force ours over an existing value with `--with-retention`. Doing it by hand is
+the same thing:
 
 ```ini
 [Journal]
 Storage=persistent
-SystemMaxUse=8G
-MaxRetentionSec=6year
+SystemMaxUse=100T
+MaxRetentionSec=0
 ```
+
+Those two numbers mean "remove both limits and let the disk be the limit":
+
+- `SystemMaxUse=100T` is above any realistic single filesystem, so it never
+  binds. It reserves and preallocates nothing — it only declines to cap below
+  the disk.
+- `MaxRetentionSec=0` turns **off** age-based deletion (0 means disabled, not
+  zero seconds), so entries are never dropped for being old.
+- `SystemKeepFree` is deliberately left alone. journald "will respect both
+  limits and use the smaller of the two values", so with `SystemMaxUse`
+  effectively unbounded, that free reserve is what now bounds the journal —
+  and what stops it filling the disk.
+
+**There is no true "forever" on a finite disk.** Eviction still happens; it
+happens at the disk limit instead of at 4G. Verify the real ceiling — journald
+states it at every start:
+
+```
+System Journal (/var/log/journal/<id>) is 1.8G, max 48.7G, 46.8G free.
+```
+
+On the host above that moved the ceiling from 4G to 48.7G. If the trail must
+outlive the disk, ship it off-box; retention on a single host is always bounded
+by that host.
 
 ```bash
 sudo mkdir -p /var/log/journal
@@ -1223,9 +1457,11 @@ Two caveats worth knowing before you rely on the number:
   for the same budget and can evict WireGuard history early. Check what you
   actually have with `journalctl --disk-usage` and by looking at the oldest
   retained entry.
-- **Size wins over age.** Once `SystemMaxUse` is reached the oldest entries are
-  dropped even if `MaxRetentionSec` has not elapsed. On a busy host, raise
-  `SystemMaxUse` rather than trusting the time limit alone.
+- **Size wins over age.** Entries are dropped once the size ceiling is reached,
+  however far short of `MaxRetentionSec` they are. That is why the drop-in sets
+  `MaxRetentionSec=0` and lifts the size ceiling instead: an age limit cannot
+  hold a window the disk has no room for, and configuring one invites the
+  belief that it can.
 
 `Storage=persistent` ensures logs survive reboots (`/var/log/journal/` instead
 of `/run/log/journal/`). `SystemMaxUse` caps disk usage; `MaxRetentionSec`
@@ -1253,6 +1489,19 @@ sudo ./install-logging.sh --check-retention
 That is a real reading from a modest server — a 2 GB cap held under two years,
 not six. It exits non-zero when the cap is short, so it can gate a compliance
 check. Set `RETENTION_TARGET_DAYS` for a window other than HIPAA's 6 years.
+
+**On a host upgraded from units without `LogLevelMax=notice`, this rate reads
+high and the check says so.** It measures backwards over journal that already
+exists, and on such a host most of that history is the timers' own per-run
+lines — on the box this was developed against, 91% of all journal entries
+(59,344 of 65,107 over ten days) came from these two units before the filter.
+Silencing them took the whole host from ~6,500 entries/day to ~340. So the
+projection over-sizes the disk until that history rotates away:
+
+```
+[!] This rate includes pre-filter timer chatter and over-estimates future
+    growth; re-check after the journal rotates past 2026-09-15.
+```
 
 A large cap is safe to set: journald also honours `SystemKeepFree` (15% of the
 filesystem by default) and stops before filling the disk, so the effective
@@ -1319,8 +1568,10 @@ Each installer copies its own unit files out of `systemd/` into
 reloads systemd, and enables and starts the timer. They stop straight away if
 the host isn't running systemd, refuse to install a unit whose script is missing
 or not executable, and warn if a timer ends up with nothing scheduled. Add
-`--with-retention` to `install-logging.sh` for the 6-year journal window, or
-`--dry-run` to either one to see what it would do first.
+`install-logging.sh` also widens journal retention to whatever the disk allows
+when the host has no `SystemMaxUse` of its own; `--with-retention` forces that
+over an existing setting. Add `--dry-run` to either installer to see what it
+would do first.
 
 Re-running them is also how you push an update after copying newer files: they
 overwrite the units in place.
