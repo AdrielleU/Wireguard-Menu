@@ -246,6 +246,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous plain tagged line rather than losing the record.
 
 ### Fixed
+- **A healthy site-to-site peer could mask a dead upstream indefinitely.**
+  `tunnel_handshake_age()` took the newest handshake across *every* peer on the
+  interface, so on a box with both an upstream server peer and a lateral
+  site-to-site peer, the lateral peer's fresh handshake kept the reported age
+  young. The 120s and 180s gates were then never reached and a genuinely dead
+  server was reported as "target down" on every tick, forever, with the failure
+  streak cleared each time. Reproduced: server 400s dead + lateral site 20s
+  fresh reported 20s. The age is now taken only across the peers whose
+  AllowedIPs cover the `Healthcheck-Reachability` target — the session to the
+  server — so a lateral peer can neither mask a dead upstream nor trigger a
+  restart of its own. When the target cannot be mapped to a peer (a hostname or
+  IPv6 target, or no AllowedIPs covering it) it falls back to the old
+  all-peers behaviour, which can only under-restart, never over-restart.
 - **The healthcheck and connection-logger timers could stop running for good
   after a reboot.** They started from `OnBootSec=1min`, which counts from kernel
   boot. On a host whose boot took about 30 minutes to reach the timers, that

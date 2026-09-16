@@ -407,18 +407,79 @@ check_reachability() {
 # minimum age. Echoes the age, or a large sentinel if no peer has ever
 # handshaked (tunnel effectively dead). Used to corroborate a failed ping so we
 # don't restart a tunnel that's actually up (the target just happens to be down).
+# Which peers carry traffic for one IPv4 target, by longest-match over their
+# AllowedIPs. Echoes pubkeys, one per line; silent for a target that is not a
+# literal IPv4 (a hostname or an IPv6 address), which the caller treats as
+# "cannot narrow" rather than "no peer".
+#
+# The prefix test is done with division rather than bitwise and(), which POSIX
+# awk does not have: two addresses share a /n when they fall in the same block
+# of 2^(32-n).
+peers_for_target() {
+    local iface="$1" target="$2"
+    wg show "$iface" allowed-ips 2>/dev/null | awk -v t="$target" '
+        function a2n(a,   p, n, i, v) {
+            n = split(a, p, ".")
+            if (n != 4) return -1
+            v = 0
+            for (i = 1; i <= 4; i++) {
+                if (p[i] !~ /^[0-9]+$/ || p[i] + 0 > 255) return -1
+                v = v * 256 + p[i]
+            }
+            return v
+        }
+        BEGIN { tn = a2n(t); if (tn < 0) exit 0 }
+        {
+            pk = $1
+            for (i = 2; i <= NF; i++) {
+                if (split($i, c, "/") != 2) continue
+                base = a2n(c[1]); bits = c[2] + 0
+                if (base < 0 || bits < 0 || bits > 32) continue
+                blk = (bits == 0) ? 4294967296 : 2 ^ (32 - bits)
+                if (int(tn / blk) == int(base / blk)) { print pk; next }
+            }
+        }'
+}
+
+# Age of the newest handshake that matters for THIS check, in seconds.
+#
+# Restricted to the peers that carry the reachability target -- the session to
+# the server -- because taking the newest across every peer lets a healthy
+# lateral site-to-site peer mask a dead upstream: the age reads young, the
+# 120s/180s gates are never reached, and a genuinely dead server is reported as
+# "target down" forever. Verified: server 400s dead + site 20s fresh reported
+# 20s before this narrowing.
+#
+# Falls back to every peer when the target cannot be mapped to one (hostname or
+# IPv6 target, or no AllowedIPs covering it). That is the old behaviour, and it
+# is the safe direction: it can only under-restart, never over-restart.
 tunnel_handshake_age() {
-    local iface="$1" now ts age min=999999
+    local iface="$1" now ts age min=999999 pk t w hit
     command -v wg &>/dev/null || { echo 999999; return; }
     now=$(date +%s)
-    while read -r _ ts; do
+
+    local -a want=()
+    while read -r t; do
+        [[ -n "$t" ]] || continue
+        while read -r pk; do
+            [[ -n "$pk" ]] && want+=("$pk")
+        done < <(peers_for_target "$iface" "$t")
+    done < <(reach_targets "$iface")
+
+    while read -r pk ts; do
         [[ "$ts" =~ ^[0-9]+$ ]] || continue
         (( ts == 0 )) && continue
+        if (( ${#want[@]} > 0 )); then
+            hit=false
+            for w in "${want[@]}"; do [[ "$w" == "$pk" ]] && { hit=true; break; }; done
+            $hit || continue
+        fi
         age=$(( now - ts ))
         (( age < min )) && min=$age
     done < <(wg show "$iface" latest-handshakes 2>/dev/null)
     echo "$min"
 }
+
 
 # The off-tunnel "is the internet even up?" anchors for an interface, one per
 # line. If a "# Healthcheck-WAN = ..." override is present in the conf we use
