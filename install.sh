@@ -65,6 +65,14 @@ LOGROTATE_DST="${LOGROTATE_DST:-/etc/logrotate.d}"
 LOGROTATE_DST_NAME="wireguard"
 WG_LOG_FILE="${WG_LOG_FILE:-/var/log/wireguard.log}"
 
+# The connection logger's state directory. Not optional: its unit sets
+# ProtectSystem=strict with ReadWritePaths pointing here, and systemd REFUSES to
+# start a unit whose ReadWritePaths does not exist -- so on a fresh host the
+# service fails on every tick, and log-connections.sh can never create the
+# directory itself because it never gets to run. Verified with a transient unit:
+# missing -> Result=exit-code, present -> Result=success.
+CONN_STATE_DIR="${WIREGUARD_CONN_STATE_DIR:-/var/lib/wireguard-connections}"
+
 # The window the audit trail is expected to cover. HIPAA §164.316(b)(2)(i) is
 # 6 years; override for a different regime.
 RETENTION_TARGET_DAYS="${RETENTION_TARGET_DAYS:-2192}"
@@ -289,8 +297,45 @@ check_retention() {
 }
 
 ################################################################################
-# UNITS
+# PATHS
 ################################################################################
+
+# Create what the units and scripts need, and NEVER touch anything already
+# there. Every branch checks first: an existing log file holds the audit trail
+# and an existing state directory holds the connection tracking, so recreating
+# either would silently destroy live data on a re-run -- and re-running is the
+# documented way to apply an update.
+ensure_paths() {
+    local made=false
+
+    if [[ ! -d "$CONN_STATE_DIR" ]]; then
+        if $DRY_RUN; then
+            echo "  would create ${CONN_STATE_DIR} (mode 700) — the logger unit cannot start without it"
+        else
+            mkdir -p "$CONN_STATE_DIR" || die "Failed to create ${CONN_STATE_DIR}"
+            chmod 700 "$CONN_STATE_DIR"
+            print_success "created ${CONN_STATE_DIR} (mode 700)"
+        fi
+        made=true
+    fi
+
+    # rsyslog creates the log file itself on the first record, but only once one
+    # arrives -- on a quiet box that can be a long wait, leaving --check-retention
+    # with nothing to report. Creating it empty makes the state deterministic.
+    # Guarded by -e, not -f: a symlink or anything else already at that path is
+    # somebody's decision, not ours to replace.
+    if [[ ! -e "$WG_LOG_FILE" ]]; then
+        if $DRY_RUN; then
+            echo "  would create empty ${WG_LOG_FILE} (mode 600)"
+        else
+            install -m 0600 /dev/null "$WG_LOG_FILE" || die "Failed to create ${WG_LOG_FILE}"
+            print_success "created ${WG_LOG_FILE} (mode 600)"
+        fi
+        made=true
+    fi
+
+    $made || print_info "Paths already present — nothing created, nothing touched."
+}
 
 ################################################################################
 # UNITS
@@ -309,6 +354,11 @@ install_control() {
 }
 
 install_all() {
+    # Before any unit is enabled: the logger's unit will not start at all if its
+    # state directory is missing.
+    ensure_paths
+    echo
+
     if $DO_HEALTHCHECK; then
         echo -e "${CYAN}== availability (healthcheck) ==${NC}"
         install_control "$HEALTHCHECK_BASE" healthcheck.sh "Healthcheck"

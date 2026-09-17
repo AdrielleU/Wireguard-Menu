@@ -317,6 +317,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous plain tagged line rather than losing the record.
 
 ### Fixed
+- **The connection logger's unit could never start on a fresh host.** Its unit
+  sets `ProtectSystem=strict` with `ReadWritePaths=/var/lib/wireguard-connections`,
+  and systemd refuses to start a unit whose `ReadWritePaths` does not exist —
+  so on a host that had never run the logger, the service failed on every tick,
+  and `log-connections.sh` could not create the directory itself because it
+  never got to run. Verified with a transient unit: missing → `Result=exit-code`,
+  present → `Result=success`. `install.sh` now creates it (mode 700) before
+  enabling any unit, and creates `/var/log/wireguard.log` (mode 600) rather than
+  waiting for rsyslog's first record, so `--check-retention` has something to
+  report immediately. Both are guarded by an existence check and never touched
+  if present — an existing log file is the audit trail and an existing state
+  directory is live connection tracking, and re-running the installer is the
+  documented way to apply an update.
 - **`.gitignore` silently excluded a file the installer needed.** A broad
   `*.conf` rule swallowed `syslog/rsyslog-wireguard.conf`: it committed and
   pushed cleanly while being absent from every fresh clone, so a `git pull`
