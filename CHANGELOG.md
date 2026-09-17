@@ -256,6 +256,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous plain tagged line rather than losing the record.
 
 ### Fixed
+- **`--check-retention` could report a ceiling tens of gigabytes too small.**
+  journald logs two ceiling lines — `Runtime Journal (/run/log/journal/...)` for
+  the volatile RAM-backed journal and `System Journal (/var/log/journal/...)`
+  for the persistent one — and `journald_reported_max()` matched both, taking
+  whichever came last. `SystemMaxUse` governs only the System journal; the
+  Runtime one is sized by `RuntimeMaxUse` and is typically tens of megabytes.
+  On one host this reported a 32.2MB ceiling and a 31-day window, then failed
+  the check, on a box whose real ceiling was far larger. The parser is now
+  anchored to `^System Journal `.
+- `--check-retention` now says when journald is running **volatile**.
+  `Storage=persistent` only takes effect once `/var/log/journal` exists; until
+  then the journal lives in `/run` and every reboot discards it, which makes any
+  retention window meaningless. It now warns and gives the one-line fix rather
+  than reporting a number that will not survive a reboot.
 - **A healthy site-to-site peer could mask a dead upstream indefinitely.**
   `tunnel_handshake_age()` took the newest handshake across *every* peer on the
   interface, so on a box with both an upstream server peer and a lateral

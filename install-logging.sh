@@ -113,14 +113,24 @@ human() {   # bytes -> human, one decimal
     }'
 }
 
-# journald states its own effective ceiling at every start:
-#   "System Journal (/var/log/journal/<id>) is 1.8G, max 48.7G, 46.8G free."
-# That figure is authoritative -- it is SystemMaxUse and SystemKeepFree already
+# journald states its own effective ceiling at every start. It logs TWO kinds of
+# line and only one of them is ours:
+#
+#   Runtime Journal (/run/log/journal/<id>) is 8.0M, max 70.5M, 62.5M free.
+#   System  Journal (/var/log/journal/<id>) is 1.8G, max 48.7G, 46.8G free.
+#
+# The Runtime journal is the volatile one in /run -- a RAM-backed tmpfs, sized by
+# RuntimeMaxUse, typically tens of megabytes. SystemMaxUse does not govern it and
+# nothing survives a reboot there. Matching it produced a ~32MB "ceiling" on a
+# box whose real one was far larger. So anchor on "System Journal" explicitly.
+#
+# The System figure is authoritative -- SystemMaxUse and SystemKeepFree already
 # reconciled -- so prefer it over estimating from df, which cannot know what
 # SystemKeepFree reserves. Echoes bytes, or nothing if journald has not said.
 journald_reported_max() {
     local line v num unit
     line=$(journalctl -u systemd-journald --no-pager -o cat 2>/dev/null \
+           | grep -E '^System Journal ' \
            | grep -oE 'max [0-9]+(\.[0-9]+)?[KMGT]?,' | tail -n1) || return 1
     [[ -n "$line" ]] || return 1
     v=${line#max }; v=${v%,}
@@ -132,6 +142,15 @@ journald_reported_max() {
         printf "%d", n * m
     }'
 }
+
+# Is the journal actually persistent? Storage=persistent only takes effect once
+# /var/log/journal exists and is writable; until then journald stays volatile and
+# the whole retention question is moot, because a reboot discards everything.
+# Worth stating plainly rather than reporting a window that will not survive.
+journal_is_persistent() {
+    [[ -d /var/log/journal ]]
+}
+
 
 # Bytes of free space on the filesystem holding the journal. journald stops
 # short of consuming all of it by SystemKeepFree, so current usage plus this is
@@ -195,6 +214,10 @@ check_retention() {
     per_day=$(( usage_bytes / span_days ))
     required=$(( per_day * RETENTION_TARGET_DAYS ))
     max_use=$(effective_max_use)
+
+    if ! journal_is_persistent; then
+        print_warning "/var/log/journal does not exist, so journald is running VOLATILE: the journal lives in /run (RAM) and every reboot discards it. Storage=persistent takes effect once that directory exists — run 'mkdir -p /var/log/journal && systemctl restart systemd-journald'. Until then the window below is not a retention guarantee."
+    fi
 
     printf '  journal on disk    %s over %s days (~%s/day)\n' \
         "$(human "$usage_bytes")" "$span_days" "$(human "$per_day")"
