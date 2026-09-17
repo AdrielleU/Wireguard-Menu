@@ -68,8 +68,36 @@ install_retention() {
     install -m 0644 "${REPO_DIR}/systemd/${JOURNALD_DROPIN}" "${JOURNALD_DST}/${JOURNALD_DROPIN}" \
         || die "Failed to install ${JOURNALD_DROPIN}"
     print_success "installed ${JOURNALD_DST}/${JOURNALD_DROPIN}"
+
+    # Storage=persistent is inert until /var/log/journal exists. systemd docs say
+    # the directory is "created if needed", but on RHEL 9 / CentOS Stream 9 that
+    # does not reliably happen on a mere restart -- the drop-in then looks
+    # installed while journald is still writing to /run (RAM) and losing
+    # everything at reboot, which is exactly the failure this control exists to
+    # prevent. So create it here, with systemd-tmpfiles for the ownership and
+    # mode journald expects (root:systemd-journal, 2755), rather than a bare
+    # mkdir.
+    local persist="${JOURNAL_PERSIST_DIR:-/var/log/journal}"
+    if [[ ! -d "$persist" ]]; then
+        if mkdir -p "$persist"; then
+            print_success "created ${persist} (Storage=persistent has nothing to write to without it)"
+            systemd-tmpfiles --create --prefix "$persist" 2>/dev/null \
+                || print_warning "systemd-tmpfiles could not set ownership on ${persist}; check it is root:systemd-journal mode 2755"
+        else
+            print_warning "could not create ${persist} — journald will stay volatile and lose the trail at every reboot"
+        fi
+    fi
+
     if systemctl restart systemd-journald; then
         print_success "journald restarted"
+        # RHEL 9 and 10 need an explicit flush to move what is already in /run
+        # over to /var/log/journal; without it the persistent directory stays
+        # empty until the next boot.
+        if journalctl --flush 2>/dev/null; then
+            print_success "journal flushed to ${persist}"
+        else
+            print_warning "journalctl --flush failed; run it by hand to move the runtime journal onto disk"
+        fi
     else
         print_warning "journald restart failed — the drop-in applies at next boot"
     fi
@@ -111,6 +139,38 @@ human() {   # bytes -> human, one decimal
         while (b >= 1024 && i < 5) { b /= 1024; i++ }
         printf "%.1f%s", b, u[i]
     }'
+}
+
+# On RHEL-family hosts rsyslog is active by default, reads from journald, and
+# writes a SECOND copy of these records to flat files under its own logrotate
+# policy -- which journald retention has no bearing on whatsoever. Stock RHEL is
+# "weekly" + "rotate 4": about a month. So a host can pass the journald
+# projection above by years and still hold only a month of the trail in
+# /var/log/secure, which is the file an auditor is most likely to be handed.
+#
+# Measured from the oldest rotated file rather than by parsing logrotate config,
+# for the same reason the journal rate is measured rather than assumed.
+# Echoes aligned rows for the block above; returns 1 if any window is short.
+# Returns 0 only when a SHORT window was actually found, so a host with no
+# rsyslog at all (or no records in its files yet) reports nothing rather than a
+# spurious warning.
+report_syslog_copy() {
+    systemctl is-active --quiet rsyslog 2>/dev/null || return 1
+
+    local f oldest days short=1
+    for f in /var/log/secure /var/log/messages /var/log/auth.log /var/log/syslog; do
+        [[ -f "$f" ]] || continue
+        grep -qE 'wireguard-(audit|connections)' "$f" 2>/dev/null || continue
+        oldest=$(ls -1t "${f}"* 2>/dev/null | tail -n1)
+        if [[ -n "$oldest" && "$oldest" != "$f" ]]; then
+            days=$(( ( $(date +%s) - $(stat -c %Y "$oldest" 2>/dev/null || echo 0) ) / 86400 ))
+            printf '  %-9s %-13s %s\n' "also in" "$(basename "$f")" "~${days} days kept by rsyslog/logrotate"
+            (( days < RETENTION_TARGET_DAYS )) && short=0
+        else
+            printf '  %-9s %-13s %s\n' "also in" "$(basename "$f")" "no rotated copies yet (rsyslog/logrotate)"
+        fi
+    done
+    return $short
 }
 
 # journald states its own effective ceiling at every start. It logs TWO kinds of
@@ -262,6 +322,9 @@ check_retention() {
     printf '  %-9s %-13s %s\n' "ceiling"  "$(human "$effective")"            "$ceiling_note"
     printf '  %-9s %-13s %s\n' "holds"    "~${achievable} days"              "at that rate"
     printf '  %-9s %-13s %s\n' "target"   "${RETENTION_TARGET_DAYS} days"    "would need ~$(human "$required")"
+
+    local syslog_short=false
+    report_syslog_copy && syslog_short=true
     echo
 
     # Caveats go after the numbers, never between them.
@@ -269,6 +332,9 @@ check_retention() {
     if ! journal_is_persistent; then
         volatile=true
         print_warning "journald is running VOLATILE — /var/log/journal does not exist, so the journal lives in /run (RAM) and every reboot discards it."
+    fi
+    if $syslog_short; then
+        print_warning "rsyslog keeps its own copy of these records on a separate logrotate schedule that journald settings do not govern (stock RHEL is weekly/rotate 4 — about a month). The window above applies to 'journalctl' queries; the flat files roll off far sooner. Raise 'rotate' in /etc/logrotate.d/rsyslog, or ship the trail off-box."
     fi
     if journal_predates_log_filter; then
         print_warning "The rate above includes pre-filter timer chatter, so it over-estimates growth. Re-check after the journal rotates past $(date -d "@${_WG_FILTER_SINCE}" '+%Y-%m-%d' 2>/dev/null || echo 'the upgrade')."

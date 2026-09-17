@@ -266,6 +266,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous plain tagged line rather than losing the record.
 
 ### Fixed
+- **`Storage=persistent` was installed but never made to take effect.** The
+  drop-in sets it, but journald only writes persistently once
+  `/var/log/journal` exists. systemd documents the directory as "created if
+  needed"; on RHEL 9 / CentOS Stream 9 that does not reliably happen on a
+  restart, so the drop-in looked installed while journald kept writing to
+  `/run` (RAM) and discarding everything at reboot — the exact failure this
+  control exists to prevent. `install_retention()` now creates the directory,
+  runs `systemd-tmpfiles --create` for the ownership and mode journald expects,
+  and issues `journalctl --flush` (required on RHEL 9/10 to move the runtime
+  journal onto disk).
+- **The retention check ignored rsyslog's copy entirely.** On RHEL-family hosts
+  rsyslog is active by default, reads from journald and writes these records to
+  `/var/log/secure` and `/var/log/messages` under its own logrotate policy,
+  which no journald setting governs. Stock RHEL is `weekly` + `rotate 4` — about
+  a month. A host could therefore pass the journald projection by years while
+  holding four weeks of the trail in the files an auditor is most likely to ask
+  for. Measured on the development host: journald ~17883 days, rsyslog files
+  ~25. The check now reports both and warns when the flat-file window is
+  shorter than the target.
 - **`--check-retention` reported success on a volatile journal.** On a host
   where `/var/log/journal` does not exist, journald keeps the journal in `/run`
   (RAM) and discards it at every reboot — but the check still printed
