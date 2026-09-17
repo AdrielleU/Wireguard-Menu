@@ -1539,17 +1539,90 @@ config check:
 | `log-connections.sh`, `install-logging.sh` | Audit — the connect/disconnect trail |
 | `verify-config.sh` | Is this box's config shaped right? |
 | `utils.sh` | Sourced by all of the above |
-| `systemd/` | The units, and the journald retention drop-in |
+| `systemd/` | The timer and service units |
+| `syslog/` | The rsyslog rule that routes the trail to one file, and its logrotate policy |
 
 The site box needs Linux with systemd and `wireguard-tools`, with the tunnel
 running as `wg-quick@<iface>` — that is the service the healthcheck checks and
 restarts.
 
+### 0. Upgrading a box that already ran an earlier version
+
+Do these in order. Step 3 is the one that is easy to forget, because nothing
+fails without it — the old setting simply sits there unmanaged.
+
+**1. Replace the scripts.** Note `syslog/` is a new directory; an upgrade that
+copies only the old file list will install the units but never create the log
+file.
+
+```bash
+cd /etc/wireguard/scripts && git pull
+```
+
+or, copying from your workstation:
+
+```bash
+rsync -a healthcheck.sh log-connections.sh verify-config.sh \
+         install-healthcheck.sh install-logging.sh utils.sh systemd syslog \
+         root@site-b:/etc/wireguard/scripts/
+```
+
+**2. Re-run both installers.** They overwrite the units in place, and
+`install-logging.sh` adds the rsyslog rule and logrotate policy that the earlier
+version did not have.
+
+```bash
+sudo /etc/wireguard/scripts/install-healthcheck.sh
+sudo /etc/wireguard/scripts/install-logging.sh
+```
+
+**3. Remove the journald drop-in the old version installed.** Nothing manages it
+any more, and left alone it keeps `SystemMaxUse=100T` applied to the whole host.
+
+```bash
+sudo rm -f /etc/systemd/journald.conf.d/journald-wireguard-audit.conf
+sudo systemctl restart systemd-journald
+```
+
+**4. Check it took.**
+
+```bash
+sudo /etc/wireguard/scripts/install-logging.sh --check-retention
+systemctl list-timers 'wireguard-*'
+sudo /etc/wireguard/scripts/verify-config.sh --all
+tail /var/log/wireguard.log
+```
+
+`--check-retention` should report the file and `weekly x 320`, `NEXT` must show a
+time for both timers, and `verify-config.sh` must report 0 errors. The log file
+appears on the first record after step 2 — rsyslog polls the journal, so give it
+a few seconds.
+
+**What happens to records written before the upgrade.** They stay exactly where
+they were, under the old tags: `journalctl -t wireguard-audit`,
+`journalctl -t wireguard-connections`, and in `/var/log/messages` and
+`/var/log/secure`. Nothing is migrated or deleted. New records use the single
+`wireguard` tag and go to `/var/log/wireguard.log`, so for a while you will read
+the old history and the new trail in different places.
+
+**If journald was volatile on that host, it stays volatile.** The installer no
+longer manages journald at all. That is no longer a data-loss problem, because
+`/var/log/wireguard.log` is an ordinary file on disk and survives reboots on its
+own — it only means `journalctl -t wireguard` shows records since the last boot.
+If you want the structured view to persist too, that is now an ordinary host
+decision, unrelated to this toolkit:
+
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald && sudo journalctl --flush
+```
+
 ### 1. Copy the files over
 
 ```bash
 rsync -a healthcheck.sh log-connections.sh verify-config.sh \
-         install-healthcheck.sh install-logging.sh utils.sh systemd \
+         install-healthcheck.sh install-logging.sh utils.sh systemd syslog \
          root@site-b:/etc/wireguard/scripts/
 ```
 
