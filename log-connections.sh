@@ -3,7 +3,7 @@
 # WireGuard Connection Logger
 # Description: One-shot connect/disconnect audit logger. Polls `wg show dump`,
 #              diffs against a state file, and writes events to journald under
-#              tag `wireguard-connections`.
+#              tag `wireguard`.
 #
 # Designed to be run from a systemd timer (every ~2 min, matching the
 # WireGuard handshake interval).
@@ -13,7 +13,7 @@
 #   journalctl WG_ACTION=CONNECT -o short-iso        # every connect, with year
 #   journalctl WG_PEER=alice --since -30d            # one peer, last 30 days
 #   journalctl WG_SESSION=<id>                       # one session, both ends
-#   journalctl -t wireguard-connections -f           # follow live, human form
+#   journalctl -t wireguard -f                       # follow live, human form
 #
 # Each connected period gets a session id shared by its CONNECT and DISCONNECT;
 # the DISCONNECT also carries duration_sec. A mid-session endpoint change

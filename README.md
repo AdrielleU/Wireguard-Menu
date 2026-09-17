@@ -761,6 +761,9 @@ when running setup.
 │   ├── wireguard-healthcheck.timer         # Fires the service every 60s
 │   ├── wireguard-log-connections.service   # Oneshot service for the connection logger
 │   └── wireguard-log-connections.timer     # Fires the service every 2 min
+├── syslog/
+│   ├── rsyslog-wireguard.conf              # Routes the `wireguard` tag to /var/log/wireguard.log
+│   └── logrotate-wireguard                 # Retention for that file (the one place it is set)
 ├── utils.sh                         # Shared helpers (sourced by other scripts)
 ├── README.md                        # All user documentation (you are here)
 ├── CHANGELOG.md                     # Version history
@@ -1032,7 +1035,7 @@ sudo ./healthcheck.sh -v             # verbose (also report healthy)
 
 Exit codes: `0` = all healthy, `1` = at least one unhealthy and `--restart`
 did not recover it. Failures and recoveries are also logged to the systemd
-journal under the `wireguard-audit` tag.
+journal under the `wireguard` tag.
 
 ### The goal: set-and-forget stability
 
@@ -1121,8 +1124,8 @@ systemctl status wireguard-healthcheck.service
 journalctl -u wireguard-healthcheck.service --since -1h
 
 # 3. Is it actually DECIDING anything? (the layer people skip)
-journalctl -t wireguard-audit --since -24h
-journalctl -t wireguard-audit -f          # live, during an incident
+journalctl -t wireguard --since -24h
+journalctl -t wireguard -f          # live, during an incident
 
 # 4. End-to-end proof on demand
 sudo ./healthcheck.sh -v                  # every check, changes nothing
@@ -1137,8 +1140,8 @@ Three things that look like problems but aren't, and two that look fine but aren
   wireguard-healthcheck.service` shows nothing for a clean run, because the unit
   filters systemd's per-run chatter (see above). Failures, the scripts' own
   output, and every audit record still land — check
-  `journalctl -t wireguard-audit`.
-* **Silence under `wireguard-audit` is healthy** — it only logs failures and
+  `journalctl -t wireguard`.
+* **Silence under `wireguard` is healthy** — it only logs failures and
   actions, never routine success.
 * **A timer can be `enabled` and `active` and still never fire.** Check the
   `NEXT` column of `systemctl list-timers`: `-` means nothing is scheduled.
@@ -1290,7 +1293,7 @@ With it set, the server is **monitored and alerted on but its tunnel is never
 bounced** — not on a structural failure, not on reachability, not even with
 `--restart`. A false positive there would drop every connected peer, so that
 decision stays with a human. Failures log `HEALTHCHECK_NORESTART` and exit
-non-zero; watch with `journalctl -t wireguard-audit -f`.
+non-zero; watch with `journalctl -t wireguard -f`.
 
 **This line is what protects the server.** Reachability being unset only stops
 the *ping-based* restart path — the structural checks (service dead, interface
@@ -1309,7 +1312,7 @@ without it as an error.
 
 `log-connections.sh` is a small one-shot poller that diffs `wg show dump`
 against a state file and writes connect/disconnect events to the systemd
-journal under the `wireguard-connections` tag. Pair it with the included
+journal under the `wireguard` tag. Pair it with the included
 systemd timer and you get a "who connected when, from what IP" audit trail
 that journald rotates and retains for you.
 
@@ -1345,7 +1348,7 @@ must be copied/symlinked there regardless of where the scripts live.)
 ```bash
 systemctl list-timers wireguard-log-connections.timer    # next/previous fire time
 sudo systemctl start wireguard-log-connections.service   # fire it once now
-journalctl -t wireguard-connections -n 10               # see any events yet?
+journalctl -t wireguard -n 10               # see any events yet?
 ```
 
 If `journalctl` is empty, that's normal — events are only logged on state
@@ -1355,7 +1358,7 @@ the state file and re-run:
 ```bash
 sudo rm -rf /var/lib/wireguard-connections
 sudo systemctl start wireguard-log-connections.service
-journalctl -t wireguard-connections -n 20
+journalctl -t wireguard -n 20
 ```
 
 ### Uninstall
@@ -1387,8 +1390,9 @@ the year, which is useless across a multi-year retention window.
 The human-readable form is still there when you just want to watch:
 
 ```bash
-journalctl -t wireguard-connections -f     # follow peer activity live
-journalctl -t wireguard-audit -f           # follow admin/healthcheck activity
+tail -f /var/log/wireguard.log        # the whole trail, one file
+journalctl -t wireguard -f            # same records, structured and filterable
+journalctl WG_ACTION=DISCONNECT       # query by indexed field
 ```
 
 Each line looks like:
@@ -1423,6 +1427,31 @@ makes the queries above work without parsing text.
   (e.g. `10.0.10.5/32`). For a site-to-site peer it's the tunnel IP plus any
   LAN subnets routed behind that site (e.g. `10.0.10.1/32,192.168.10.0/24`).
 - `pubkey` — the cryptographic identity. Stable even if you rename the peer.
+
+### Where the trail lives
+
+Everything this toolkit logs — peer added/removed, keys rotated, healthcheck
+failures, connect/disconnect — goes out under **one tag, `wireguard`, on
+facility `local0`**, and lands in two places:
+
+```bash
+tail -f /var/log/wireguard.log     # the whole trail, one plain file
+journalctl -t wireguard -f         # the same records, structured
+journalctl WG_ACTION=PEER_REMOVED  # query by indexed field
+```
+
+`install-logging.sh` installs the rsyslog rule that routes the tag to that file,
+and the logrotate policy that decides how long it is kept. The rule ends with
+`stop`, so these records stay out of `/var/log/messages` — the file is the whole
+trail, and the shared logs stay readable. journald keeps its own copy either
+way, so `journalctl -t wireguard` works even if rsyslog is not installed.
+
+One tag, not two: an earlier version split `wireguard-audit` (facility `auth`)
+from `wireguard-connections` (`authpriv`), which scattered related records
+across `/var/log/messages` and `/var/log/secure`, interleaved with sshd and
+sudo. The `action=` field already distinguishes them. `local0` is the facility
+range syslog reserves for custom applications; `auth`/`authpriv` belong to the
+OS's own authentication services.
 
 ### Retention (HIPAA: 6 years)
 
@@ -1544,13 +1573,14 @@ limit is whichever binds first.
 
 ### Config-change audit (separate tag)
 
-`healthcheck.sh` is the only thing that writes to the `wireguard-audit` tag now
-(failures, restarts, recoveries), separate from `wireguard-connections`. Nothing
+`healthcheck.sh` is the only thing that writes to the `wireguard` tag now
+(failures, restarts, recoveries), under the same `wireguard` tag as peer
+activity — the `action=` field tells them apart. Nothing
 done through `menu.sh` is logged.
 
 ```bash
-journalctl -t wireguard-audit                                  # admin actions
-journalctl -t wireguard-audit -t wireguard-connections         # combined timeline
+journalctl -t wireguard                                  # admin actions
+journalctl -t wireguard                                 # the whole timeline
 ```
 
 ## Remote Site Boxes (monitoring only)
@@ -1651,7 +1681,7 @@ If a remote box is itself a **server** that other peers dial into, mark it
 
 ```bash
 ssh root@site-b 'systemctl list-timers "wireguard-*"; /etc/wireguard/scripts/verify-config.sh --all'
-ssh root@site-b 'journalctl -t wireguard-audit -t wireguard-connections --since -1h -o short-iso'
+ssh root@site-b 'journalctl -t wireguard --since -1h -o short-iso'
 ```
 
 ## Contributing

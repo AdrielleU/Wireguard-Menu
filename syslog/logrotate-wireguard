@@ -1,0 +1,28 @@
+# Retention for the WireGuard audit trail.
+#
+# Installed by install-logging.sh to /etc/logrotate.d/wireguard.
+#
+# This is the ONE place retention is decided now. It replaces the old approach
+# of widening journald's host-wide SystemMaxUse, which changed retention for
+# every service on the box to solve a WireGuard problem.
+#
+# 320 weekly files is about 6.1 years, sized for HIPAA 164.316(b)(2)(i). Change
+# "rotate" to change the window: weeks = rotate, so 52 is a year. Check what the
+# host actually holds with: install-logging.sh --check-retention
+#
+# Six years on a single box is optimistic whatever the number says -- disks fail
+# and hosts get rebuilt. Treat this as the local buffer and ship the file to a
+# central log store if the trail genuinely has to survive the machine.
+/var/log/wireguard.log {
+    weekly
+    rotate 320
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+    sharedscripts
+    postrotate
+        /usr/bin/systemctl -s HUP kill rsyslog.service >/dev/null 2>&1 || true
+    endscript
+}

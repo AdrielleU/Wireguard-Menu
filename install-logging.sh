@@ -48,6 +48,17 @@ JOURNALD_DROPIN="journald-wireguard-audit.conf"
 # a throwaway directory instead of the host's journald config.
 JOURNALD_DST="${JOURNALD_DST:-/etc/systemd/journald.conf.d}"
 
+# The dedicated log file, its rsyslog rule and its logrotate policy. This is
+# where the trail actually lives and where its retention is decided; the journald
+# drop-in above only governs how long `journalctl` can still answer for it.
+RSYSLOG_RULE="rsyslog-wireguard.conf"
+RSYSLOG_DST="${RSYSLOG_DST:-/etc/rsyslog.d}"
+RSYSLOG_DST_NAME="49-wireguard.conf"
+LOGROTATE_RULE="logrotate-wireguard"
+LOGROTATE_DST="${LOGROTATE_DST:-/etc/logrotate.d}"
+LOGROTATE_DST_NAME="wireguard"
+WG_LOG_FILE="${WG_LOG_FILE:-/var/log/wireguard.log}"
+
 # The window the audit trail is expected to cover. HIPAA §164.316(b)(2)(i) is
 # 6 years; override for a different regime.
 RETENTION_TARGET_DAYS="${RETENTION_TARGET_DAYS:-2192}"
@@ -58,6 +69,46 @@ RETENTION_TARGET_DAYS="${RETENTION_TARGET_DAYS:-2192}"
 
 # Opt-in: this widens retention for the WHOLE journal (it is not per-tag) and
 # restarts systemd-journald, so it is never applied by a bare install.
+# Install the rsyslog rule and the logrotate policy that give this toolkit its
+# own log file. Unlike the journald drop-in, this changes nothing host-wide: it
+# adds one routing rule for one tag and one rotation policy for one file.
+install_log_routing() {
+    [[ -f "${REPO_DIR}/syslog/${RSYSLOG_RULE}" ]]    || die "Missing ${REPO_DIR}/syslog/${RSYSLOG_RULE}"
+    [[ -f "${REPO_DIR}/syslog/${LOGROTATE_RULE}" ]]  || die "Missing ${REPO_DIR}/syslog/${LOGROTATE_RULE}"
+
+    if $DRY_RUN; then
+        echo "  would install ${RSYSLOG_DST}/${RSYSLOG_DST_NAME} (route tag 'wireguard' -> ${WG_LOG_FILE})"
+        echo "  would install ${LOGROTATE_DST}/${LOGROTATE_DST_NAME} (retention for ${WG_LOG_FILE})"
+        echo "  would run: systemctl restart rsyslog"
+        return 0
+    fi
+
+    if ! systemctl list-unit-files rsyslog.service &>/dev/null; then
+        print_warning "rsyslog is not installed, so ${WG_LOG_FILE} will not be written. Records still go to the journal — query them with: journalctl -t wireguard"
+        return 0
+    fi
+
+    mkdir -p "$RSYSLOG_DST" "$LOGROTATE_DST"
+    install -m 0644 "${REPO_DIR}/syslog/${RSYSLOG_RULE}" "${RSYSLOG_DST}/${RSYSLOG_DST_NAME}" \
+        || die "Failed to install ${RSYSLOG_DST}/${RSYSLOG_DST_NAME}"
+    print_success "installed ${RSYSLOG_DST}/${RSYSLOG_DST_NAME}"
+    install -m 0644 "${REPO_DIR}/syslog/${LOGROTATE_RULE}" "${LOGROTATE_DST}/${LOGROTATE_DST_NAME}" \
+        || die "Failed to install ${LOGROTATE_DST}/${LOGROTATE_DST_NAME}"
+    print_success "installed ${LOGROTATE_DST}/${LOGROTATE_DST_NAME}"
+
+    # logrotate refuses a config group- or world-writable, so check rather than
+    # let rotation silently never happen.
+    if ! logrotate --debug "${LOGROTATE_DST}/${LOGROTATE_DST_NAME}" &>/dev/null; then
+        print_warning "logrotate rejected ${LOGROTATE_DST}/${LOGROTATE_DST_NAME}; check it with: logrotate --debug ${LOGROTATE_DST}/${LOGROTATE_DST_NAME}"
+    fi
+
+    if systemctl restart rsyslog; then
+        print_success "rsyslog restarted — the trail now goes to ${WG_LOG_FILE}"
+    else
+        print_warning "rsyslog restart failed; ${WG_LOG_FILE} will not fill until it is restarted"
+    fi
+}
+
 install_retention() {
     [[ -f "${REPO_DIR}/systemd/${JOURNALD_DROPIN}" ]] || die "Missing ${REPO_DIR}/systemd/${JOURNALD_DROPIN}"
     if $DRY_RUN; then
@@ -158,9 +209,9 @@ report_syslog_copy() {
     systemctl is-active --quiet rsyslog 2>/dev/null || return 1
 
     local f oldest days short=1
-    for f in /var/log/secure /var/log/messages /var/log/auth.log /var/log/syslog; do
+    for f in "$WG_LOG_FILE" /var/log/secure /var/log/messages /var/log/auth.log /var/log/syslog; do
         [[ -f "$f" ]] || continue
-        grep -qE 'wireguard-(audit|connections)' "$f" 2>/dev/null || continue
+        grep -qE 'wireguard(-(audit|connections))?\[' "$f" 2>/dev/null || continue
         oldest=$(ls -1t "${f}"* 2>/dev/null | tail -n1)
         if [[ -n "$oldest" && "$oldest" != "$f" ]]; then
             days=$(( ( $(date +%s) - $(stat -c %Y "$oldest" 2>/dev/null || echo 0) ) / 86400 ))
@@ -407,6 +458,24 @@ uninstall_units() {
         return
     fi
     print_success "Uninstalled. (Scripts in ${REPO_DIR} are left untouched.)"
+
+    # The routing rule goes: with it gone nothing new is written to the file and
+    # records fall back to the journal. The FILE and its rotated copies stay --
+    # deleting an audit trail is not something an uninstall should do on its own
+    # -- and the logrotate policy stays with it so what is there keeps rotating
+    # rather than growing forever.
+    if [[ -f "${RSYSLOG_DST}/${RSYSLOG_DST_NAME}" ]]; then
+        if rm -f "${RSYSLOG_DST}/${RSYSLOG_DST_NAME}"; then
+            print_success "removed ${RSYSLOG_DST}/${RSYSLOG_DST_NAME}"
+            systemctl restart rsyslog 2>/dev/null \
+                || print_warning "rsyslog restart failed; it holds the old rule until restarted"
+        fi
+    fi
+    if [[ -f "$WG_LOG_FILE" ]]; then
+        print_info "Audit trail left in place: ${WG_LOG_FILE} (${LOGROTATE_DST}/${LOGROTATE_DST_NAME} still rotates it)"
+        print_info "Delete both by hand if you really mean to discard the trail."
+    fi
+
     # Deliberately NOT removed: shrinking retention here would discard existing
     # audit history, which is the opposite of what an uninstall should risk.
     if [[ -f "${JOURNALD_DST}/${JOURNALD_DROPIN}" ]]; then
@@ -419,7 +488,7 @@ show_status() {
     systemctl list-timers "${BASE}.timer" --all --no-pager
     echo
     local n
-    n=$(journalctl -t wireguard-connections --no-pager 2>/dev/null | grep -c . || true)
+    n=$(journalctl -t wireguard --no-pager 2>/dev/null | grep -c . || true)
     print_info "audit records currently in the journal: ${n:-0}"
     check_retention
 }
@@ -445,6 +514,10 @@ main() {
         uninstall) uninstall_units ;;
         install)
             install_units
+            # The dedicated log file is the trail itself, so it is always
+            # installed -- unlike the journald drop-in below, it changes nothing
+            # for any other service on the host.
+            echo; install_log_routing
             # Retention defaults to "keep everything the disk allows", but only
             # when the host has no SystemMaxUse of its own. An explicit setting
             # is somebody's decision about their disk, so it is never

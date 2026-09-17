@@ -195,6 +195,7 @@ setup_server() {
           "$address" "$port" "$(< "$priv")" > "$conf" ) || die "Failed to write ${conf}"
     chmod 600 "$conf"
     print_success "Configuration file created: ${conf}"
+    log_audit "SERVER_SETUP" "interface=${iface} address=${address} listen_port=${port}"
     print_info "Server public key (give this to peers): $(< "$pub")"
 
     echo ""
@@ -250,6 +251,7 @@ add_peer() {
         "$PEER_BEGIN_PREFIX" "$name" "$name" "$(< "$pub")" "$ip" "$PEER_END_PREFIX" "$name" \
         >> "$conf" || die "Failed to add the peer to ${conf}"
     print_success "Added peer '${name}' (${ip}/32) to ${conf}"
+    log_audit "PEER_ADDED" "interface=${iface} peer=${name} allowed_ip=${ip}/32"
 
     local rc=0
     sync_live "$iface" "$conf" || rc=1
@@ -286,6 +288,7 @@ remove_peer() {
     backup_config "$conf" >/dev/null
     peer_remove "$conf" "$name"
     print_success "Removed peer '${name}' from ${conf}"
+    log_audit "PEER_REMOVED" "interface=${iface} peer=${name}"
 
     # Its keys, plus its client config if one was made.
     rm -f "${keys_dir}/${name}-privatekey" "${keys_dir}/${name}-publickey" "${keys_dir}/${name}.conf"
@@ -327,6 +330,7 @@ toggle_peer() {
     backup_config "$conf" >/dev/null
     peer_set_paused "$conf" "$name" "$action"
     print_success "${action^}d '${name}' in ${conf}"
+    log_audit "PEER_$(printf '%s' "${action}" | tr '[:lower:]' '[:upper:]')D" "interface=${iface} peer=${name}"
 
     local rc=0
     sync_live "$iface" "$conf" || rc=1
@@ -407,6 +411,7 @@ rotate_keys() {
     cat "$tmp" > "$conf"
     rm -f "$tmp"
     print_success "Put the new ${who} key in ${conf}"
+    log_audit "KEYS_ROTATED" "interface=${iface} subject=${who}"
 
     # Client configs kept as <iface>/<name>.conf: the peer's own gets its new
     # PrivateKey; on a server rotation each one gets the new server PublicKey.

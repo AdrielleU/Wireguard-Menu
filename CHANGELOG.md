@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`menu.sh` now writes an audit record for every change it makes** —
+  `SERVER_SETUP`, `PEER_ADDED`, `PEER_REMOVED`, `PEER_PAUSED`, `PEER_RESUMED`,
+  `KEYS_ROTATED`. It previously logged **nothing at all**: the tag named
+  `wireguard-audit` contained only `HEALTHCHECK_*` records, and the peer
+  lifecycle changes an audit trail exists to record were invisible. That was the
+  real gap behind §164.312(b), not the tag naming.
+- **One log file: `/var/log/wireguard.log`.** `syslog/rsyslog-wireguard.conf`
+  routes the tag there and `syslog/logrotate-wireguard` sets how long it is
+  kept — one file to read, one number to set, and no host-wide side effects.
+  `install-logging.sh` installs both on a normal install and says so; an
+  uninstall removes the routing rule but deliberately leaves the file and its
+  rotation policy, because discarding an audit trail is not something an
+  uninstall should decide.
 - **`healthcheck.sh -v` now itemizes each check** instead of collapsing them
   into one verdict per interface: `1/3` service active, `2/3` kernel interface
   exists, `3/3` every declared address actually assigned, and `4/4` reachability
@@ -133,6 +146,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since shrinking retention would discard existing history.
 
 ### Changed
+- **Two log tags merged into one: `wireguard`, on facility `local0`.** The split
+  (`wireguard-audit`/`auth` and `wireguard-connections`/`authpriv`) was
+  documented as separating admin actions from peer activity, but every caller of
+  the "audit" tag was `healthcheck.sh` — so it actually separated health events
+  from connection events, while scattering related records across
+  `/var/log/messages` and `/var/log/secure` interleaved with sshd and sudo. The
+  `action=` field already distinguishes them. `local0` replaces `auth`/
+  `authpriv` because `local0`-`local7` is the range syslog reserves for custom
+  applications, and it is what lets rsyslog route the toolkit to its own file.
+  `log_audit()` and `log_conn_event()` both remain — the difference that matters
+  is that one records who ran it and the other does not.
 - **`--check-retention` output rewritten.** It printed six differently-shaped
   labels with warnings spliced between the numbers, and showed
   `SystemMaxUse 100.0TB` as a headline figure immediately before contradicting
@@ -266,6 +290,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous plain tagged line rather than losing the record.
 
 ### Fixed
+- `local0`-`local7` were missing from the syslog facility map in `utils.sh`, so
+  any record emitted on them would have silently been filed as `user` (1).
 - **`Storage=persistent` was installed but never made to take effect.** The
   drop-in sets it, but journald only writes persistently once
   `/var/log/journal` exists. systemd documents the directory as "created if

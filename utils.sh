@@ -159,7 +159,11 @@ _audit_emit() {
     local facility severity
     case "${priority%%.*}" in
         kern) facility=0 ;;  user)     facility=1  ;;  daemon) facility=3  ;;
-        auth) facility=4 ;;  authpriv) facility=10 ;;  *)      facility=1  ;;
+        auth) facility=4 ;;  authpriv) facility=10 ;;
+        local0) facility=16 ;; local1) facility=17 ;; local2) facility=18 ;;
+        local3) facility=19 ;; local4) facility=20 ;; local5) facility=21 ;;
+        local6) facility=22 ;; local7) facility=23 ;;
+        *)      facility=1  ;;
     esac
     case "${priority##*.}" in
         emerg) severity=0 ;;  alert)   severity=1 ;;  crit)   severity=2 ;;
@@ -204,7 +208,23 @@ _audit_have_journald() {
     [[ "$_WG_HAVE_JOURNALD" == yes ]]
 }
 
-# Admin/operational actions (tag: wireguard-audit, auth.notice).
+# One tag and one facility for everything this toolkit emits.
+#
+# It was two (wireguard-audit/auth and wireguard-connections/authpriv). That
+# split claimed to separate admin actions from peer activity, but every caller
+# of the "audit" tag was healthcheck.sh, so what it really separated was health
+# events from connection events -- while scattering related records across
+# /var/log/messages and /var/log/secure, mixed in with sshd and sudo. The
+# action= field already distinguishes them, which is what it is for.
+#
+# local0 rather than auth/authpriv: those belong to the OS's own authentication
+# services, while local0-local7 are the range reserved for custom applications.
+# Using local0 is what lets rsyslog route this toolkit to its own file instead
+# of interleaving it with the system's auth logs.
+WG_LOG_TAG="wireguard"
+WG_LOG_FACILITY="local0.notice"
+
+# Operator actions and health events (carries who ran it).
 # notice, not info: the units set LogLevelMax=notice to keep systemd's per-run
 # "Starting/Finished" lines (info) out of the journal, and an info-level record
 # is dropped by that filter — unreliably, which is worse than never.
@@ -215,17 +235,17 @@ log_audit() {
     local source_ip
     user=$(whoami)
     source_ip=$(who am i 2>/dev/null | awk '{print $5}' | tr -d '()')
-    _audit_emit wireguard-audit auth.notice "$action" \
+    _audit_emit "$WG_LOG_TAG" "$WG_LOG_FACILITY" "$action" \
         "user=$user source_ip=${source_ip:-local} $details"
 }
 
-# Peer connect/disconnect events (tag: wireguard-connections, authpriv.notice).
-# Separate tag because retention and access rules for peer activity usually
-# differ from admin actions, but the schema is identical.
+# Peer connect/disconnect events. Same tag and facility as log_audit; kept as a
+# separate function because these are observations of the system rather than
+# actions by a person, so they carry no user= or source_ip=.
 log_conn_event() {
     local action="$1"
     local details="$2"
-    _audit_emit wireguard-connections authpriv.notice "$action" "$details"
+    _audit_emit "$WG_LOG_TAG" "$WG_LOG_FACILITY" "$action" "$details"
 }
 
 # ---------- validation ----------
