@@ -504,12 +504,12 @@ peer_remove() {
 }
 
 # ---------- systemd unit installation ----------
-# Shared by install-healthcheck.sh and install-logging.sh so the two installers
-# stay one implementation. Units are identified by filename, so re-installing
-# overwrites in place and can never produce a duplicate.
+# Shared by both controls in install.sh, so unit installation stays one
+# implementation. Units are identified by filename, so re-installing overwrites
+# in place and can never produce a duplicate.
 #
-# With DRY_RUN=true (the installers' --dry-run) every helper below still makes
-# its checks, but only prints what it would write or run.
+# With DRY_RUN=true (install.sh --dry-run) every helper below still makes its
+# checks, but only prints what it would write or run.
 
 UNIT_DST="${UNIT_DST:-/etc/systemd/system}"
 

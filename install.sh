@@ -1,40 +1,46 @@
 #!/bin/bash
 ################################################################################
-# WireGuard connection-audit logger installer
-# Description: Install (or refresh) the connection audit-log timer, pointed at
-#              wherever THIS repo actually lives. The unit's ExecStart/
+# WireGuard timer installer — availability and audit
+# Description: Install (or refresh) both background controls, pointed at
+#              wherever THIS repo actually lives. Each unit's ExecStart and
 #              Documentation paths are rewritten at install time from this
-#              script's own location, so nothing is locked to a hardcoded path.
+#              script's own location, so nothing is locked to a hardcoded path
+#              — move the repo and re-run to re-point the units.
 #
-# This installs the AUDIT control — the connect/disconnect trail that
-# §164.312(b) asks for. It is deliberately separate from install-healthcheck.sh
-# (the availability control) so a compliance install can be enabled, verified
-# and reported on without dragging in auto-restart behaviour, and vice versa.
+# Two controls, installed together because in practice every deployment wants
+# both:
+#
+#   availability  healthcheck.sh       is the tunnel up; restart it if not
+#   audit         log-connections.sh   the connect/disconnect trail, plus the
+#                                      rsyslog rule and logrotate policy that
+#                                      give it one file and one retention window
+#
+# They remain separable — --healthcheck-only and --logging-only install one
+# without the other, so a compliance install and an availability install can
+# still be reasoned about apart. This was two scripts; they shared their whole
+# skeleton and every documented procedure ran them back to back.
 #
 # The trail lands in ONE file, /var/log/wireguard.log, via an rsyslog rule that
 # routes this toolkit's single "wireguard" tag there. Its retention is decided
-# in ONE place, the logrotate policy installed alongside it, and --check-retention
+# in ONE place, the logrotate policy written alongside it, and --check-retention
 # reports what that policy actually holds.
 #
-# This replaced a model built on journald's host-wide SystemMaxUse, which meant
-# reasoning about a free-disk ceiling, SystemKeepFree, volatile-vs-persistent
-# storage and rsyslog's own separate copy -- all to answer a question logrotate
-# answers exactly, for this file alone, without touching any other service on
-# the box.
-#
 # Idempotent: systemd identifies units by filename, so re-running overwrites
-# them in place and re-enabling is a no-op.
+# them in place and re-enabling is a no-op. Re-running is also how you push an
+# update after copying newer scripts.
 #
-# --dry-run makes every check the install would (the units exist, the unit's
+# --dry-run makes every check the install would (the units exist, each unit's
 # script is executable, no cron entry double-runs it) but writes nothing and
-# runs no systemctl. It combines with --uninstall.
+# runs no systemctl. It combines with every other flag.
 #
 # Usage:
-#   sudo ./install-logging.sh                   # install/refresh + enable
-#   sudo ./install-logging.sh --dry-run         # show what an install would do; change nothing
-#   sudo ./install-logging.sh --check-retention # what the trail actually holds
-#   sudo ./install-logging.sh --status          # timer state + retention check
-#   sudo ./install-logging.sh --uninstall       # stop, disable, remove units
+#   sudo ./install.sh                     # install/refresh + enable both
+#   sudo ./install.sh --dry-run           # show what that would do; change nothing
+#   sudo ./install.sh --healthcheck-only  # availability control only
+#   sudo ./install.sh --logging-only      # audit control only
+#   sudo ./install.sh --check-retention   # what the trail actually holds
+#   sudo ./install.sh --status            # timer state + retention
+#   sudo ./install.sh --uninstall         # stop, disable, remove units
 ################################################################################
 
 set -uo pipefail
@@ -42,11 +48,17 @@ set -uo pipefail
 REPO_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "${REPO_DIR}/utils.sh"
 
-BASE="wireguard-log-connections"
+# base name -> the script its unit runs, for the cron double-run warning
+HEALTHCHECK_BASE="wireguard-healthcheck"
+LOGGING_BASE="wireguard-log-connections"
+
 DRY_RUN=false
+DO_HEALTHCHECK=true
+DO_LOGGING=true
+
 # The dedicated log file, its rsyslog rule and its logrotate policy: where the
-# trail lives and where its retention is set. All three are overridable so the
-# install can be exercised against throwaway directories.
+# trail lives and where its retention is set. All overridable so the install can
+# be exercised against throwaway directories.
 RSYSLOG_DST="${RSYSLOG_DST:-/etc/rsyslog.d}"
 RSYSLOG_DST_NAME="49-wireguard.conf"
 LOGROTATE_DST="${LOGROTATE_DST:-/etc/logrotate.d}"
@@ -58,7 +70,7 @@ WG_LOG_FILE="${WG_LOG_FILE:-/var/log/wireguard.log}"
 RETENTION_TARGET_DAYS="${RETENTION_TARGET_DAYS:-2192}"
 
 ################################################################################
-# RETENTION
+# THE TRAIL: ROUTING AND RETENTION
 ################################################################################
 
 # The rsyslog rule and the logrotate policy are GENERATED, not shipped as files.
@@ -79,7 +91,7 @@ rotate_count() { echo $(( (RETENTION_TARGET_DAYS + 6) / 7 )); }
 rsyslog_rule_text() {
     cat <<EOF
 # Route everything the WireGuard toolkit logs to one file.
-# Generated by install-logging.sh -- edit there, not here; a re-run overwrites this.
+# Generated by install.sh -- edit there, not here; a re-run overwrites this.
 #
 # The scripts emit a single tag ("wireguard") on facility local0, the range
 # syslog reserves for custom applications. Without this rule those records land
@@ -98,13 +110,13 @@ EOF
 logrotate_policy_text() {
     cat <<EOF
 # Retention for the WireGuard audit trail.
-# Generated by install-logging.sh -- edit there, not here; a re-run overwrites this.
+# Generated by install.sh -- edit there, not here; a re-run overwrites this.
 #
 # This is the one place retention is decided. Rotation is weekly, so the number
 # of copies is the window in weeks: $(rotate_count) copies ~ ${RETENTION_TARGET_DAYS} days,
 # which is where RETENTION_TARGET_DAYS points (HIPAA 164.316(b)(2)(i) is 6 years).
 #
-# Check what the host actually holds:  install-logging.sh --check-retention
+# Check what the host actually holds:  install.sh --check-retention
 #
 # Six years on a single box is optimistic whatever the number says -- disks fail
 # and hosts get rebuilt. Treat this as the local buffer and ship the file to a
@@ -280,24 +292,58 @@ check_retention() {
 # UNITS
 ################################################################################
 
-install_units() {
-    unit_warn_on_cron "log-connections.sh"
-    unit_install_service "$REPO_DIR" "$BASE"
-    unit_install_timer   "$REPO_DIR" "$BASE"
-    unit_enable_timer    "$BASE"
-    $DRY_RUN && return
-    print_success "Audit-log timer enabled — unit points at ${REPO_DIR}"
-    echo
-    systemctl list-timers "${BASE}.timer" --all --no-pager
+################################################################################
+# UNITS
+################################################################################
+
+# One control's units. The two differ only in their base name and which script
+# the cron warning names, which is why this is one function and not two scripts.
+install_control() {
+    local base="$1" script="$2" label="$3"
+    unit_warn_on_cron "$script"
+    unit_install_service "$REPO_DIR" "$base"
+    unit_install_timer   "$REPO_DIR" "$base"
+    unit_enable_timer    "$base"
+    $DRY_RUN && return 0
+    print_success "${label} timer enabled — unit points at ${REPO_DIR}"
 }
 
-uninstall_units() {
-    unit_remove "$BASE"
+install_all() {
+    if $DO_HEALTHCHECK; then
+        echo -e "${CYAN}== availability (healthcheck) ==${NC}"
+        install_control "$HEALTHCHECK_BASE" healthcheck.sh "Healthcheck"
+        echo
+    fi
+
+    if $DO_LOGGING; then
+        echo -e "${CYAN}== audit (connection trail) ==${NC}"
+        install_control "$LOGGING_BASE" log-connections.sh "Audit-log"
+        # The routing rule and its rotation policy ARE the trail, so they go in
+        # with the timer. Neither touches any other service on the host.
+        install_log_routing
+        echo
+    fi
+
+    if $DRY_RUN; then
+        print_info "Dry run: checks passed, nothing was changed. (--check-retention reports what the trail holds.)"
+        return 0
+    fi
+
+    systemctl list-timers 'wireguard-*' --all --no-pager
+    $DO_LOGGING && check_retention
+    return 0
+}
+
+uninstall_all() {
+    $DO_HEALTHCHECK && unit_remove "$HEALTHCHECK_BASE"
+    $DO_LOGGING     && unit_remove "$LOGGING_BASE"
+
     if $DRY_RUN; then
         print_info "Dry run: nothing was changed."
-        return
+        return 0
     fi
     print_success "Uninstalled. (Scripts in ${REPO_DIR} are left untouched.)"
+    $DO_LOGGING || return 0
 
     # The routing rule goes: with it gone nothing new is written to the file and
     # records fall back to the journal. The FILE and its rotated copies stay --
@@ -315,17 +361,15 @@ uninstall_units() {
         print_info "Audit trail left in place: ${WG_LOG_FILE} (${LOGROTATE_DST}/${LOGROTATE_DST_NAME} still rotates it)"
         print_info "Delete both by hand if you really mean to discard the trail."
     fi
-
-    # Deliberately NOT removed: shrinking retention here would discard existing
-    # audit history, which is the opposite of what an uninstall should risk.
 }
 
 show_status() {
-    systemctl list-timers "${BASE}.timer" --all --no-pager
+    systemctl list-timers 'wireguard-*' --all --no-pager
     echo
     local n
     n=$(journalctl -t wireguard --no-pager 2>/dev/null | grep -c . || true)
     print_info "audit records currently in the journal: ${n:-0}"
+    [[ -f "$WG_LOG_FILE" ]] && print_info "trail file: ${WG_LOG_FILE} ($(wc -l < "$WG_LOG_FILE") lines)"
     check_retention
 }
 
@@ -335,29 +379,21 @@ main() {
     local action="install" arg
     for arg in "$@"; do
         case "$arg" in
-            --dry-run)         DRY_RUN=true ;;
-            --check-retention) action="check" ;;
-            --status)          action="status" ;;
-            --uninstall)       action="uninstall" ;;
-            *)                 die "Unknown option: $arg (use --check-retention, --status, --uninstall, --dry-run, or no args)" ;;
+            --dry-run)          DRY_RUN=true ;;
+            --healthcheck-only) DO_LOGGING=false ;;
+            --logging-only)     DO_HEALTHCHECK=false ;;
+            --check-retention)  action="check" ;;
+            --status)           action="status" ;;
+            --uninstall)        action="uninstall" ;;
+            *)                  die "Unknown option: $arg (use --dry-run, --healthcheck-only, --logging-only, --check-retention, --status, --uninstall, or no args)" ;;
         esac
     done
 
     case "$action" in
         check)     check_retention ;;
         status)    show_status ;;
-        uninstall) uninstall_units ;;
-        install)
-            install_units
-            # The routing rule and its rotation policy ARE the trail, so they go
-            # in on every install. Neither touches any other service on the host.
-            echo; install_log_routing
-            if $DRY_RUN; then
-                print_info "Dry run: checks passed, nothing was changed. (--check-retention reports what the trail holds.)"
-            else
-                check_retention
-            fi
-            ;;
+        uninstall) uninstall_all ;;
+        install)   install_all ;;
     esac
 }
 

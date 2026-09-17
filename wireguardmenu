@@ -126,8 +126,7 @@ uninstall_link() {
 # this is safe on a live server at any time.
 # Each entry is a script in this repo followed by its arguments.
 TEST_RUNS=(
-    "install-healthcheck.sh --dry-run"
-    "install-logging.sh --dry-run"
+    "install.sh --dry-run"
     "log-connections.sh --dry-run"
 )
 

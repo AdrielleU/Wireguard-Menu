@@ -158,8 +158,7 @@ when it was never used to hand out client configs. **Errors** are the bar.
 sudo wg-quick up wg0
 sudo systemctl enable wg-quick@wg0
 
-sudo ./install-healthcheck.sh
-sudo ./install-logging.sh
+sudo ./install.sh
 ```
 
 Then confirm the timers are actually scheduled — `enabled` and `active` are not
@@ -753,8 +752,7 @@ when running setup.
 ├── healthcheck.sh                   # One-shot runtime health check (cron / systemd timer)
 ├── verify-config.sh                 # Config conformance check (does it match our format?)
 ├── log-connections.sh                # Connection logger for systemd journal
-├── install-healthcheck.sh           # Install/enable the healthcheck timer (availability)
-├── install-logging.sh               # Install/enable the audit-log timer + retention (compliance)
+├── install.sh                          # Install/enable both timers, the trail's routing and its retention
 ├── systemd/
 │   ├── wireguard-healthcheck.service       # Oneshot service for the healthcheck
 │   ├── wireguard-healthcheck.timer         # Fires the service every 60s
@@ -779,8 +777,7 @@ prints what it would do, but writes nothing.
 
 | Dry run | Checks | Touches |
 | ------- | ------ | ------- |
-| `install-healthcheck.sh --dry-run` | the unit's script exists and is executable; no cron entry double-runs it | nothing |
-| `install-logging.sh --dry-run` | the same, plus which retention branch it would take | nothing |
+| `install.sh --dry-run` | both units' scripts exist and are executable, no cron entry double-runs them, plus the exact rsyslog and logrotate files it would write | nothing |
 | `log-connections.sh --dry-run` | reads `wg show dump` and the state file, prints the connect/disconnect records it would write | nothing — no journal entries, no state file |
 
 Two more need no flag, because they only read:
@@ -1060,28 +1057,28 @@ stack to get — control over a WireGuard instance with minimal ongoing effort.
 
 ### Install as a systemd timer (recommended)
 
-There are **two installers**, because these are two different controls and you
-should be able to enable, verify and report on them independently:
+**One installer, two controls.** `install.sh` puts in both, because every real
+deployment wants both — but they stay separable, since they answer to different
+questions and you may want to enable, verify or report on them apart:
 
-| Installer | Control | Installs |
-| --------- | ------- | -------- |
-| `install-healthcheck.sh` | Availability — is the tunnel up, restart it if not | `wireguard-healthcheck.{service,timer}` |
-| `install-logging.sh` | Audit — the connect/disconnect trail | `wireguard-log-connections.{service,timer}`, the rsyslog rule that routes the trail to `/var/log/wireguard.log`, and its logrotate policy |
+| Control | Answers | Installs | On its own |
+| ------- | ------- | -------- | ---------- |
+| Availability | is the tunnel up; restart it if not | `wireguard-healthcheck.{service,timer}` | `--healthcheck-only` |
+| Audit | the connect/disconnect trail | `wireguard-log-connections.{service,timer}`, the rsyslog rule routing the trail to `/var/log/wireguard.log`, and its logrotate policy | `--logging-only` |
 
-Both rewrite the unit's `ExecStart`/`Documentation` to wherever this repo
-actually lives, so you are not locked to a hardcoded path, and both are
-idempotent — re-run after moving the repo or pulling changes:
+It rewrites each unit's `ExecStart`/`Documentation` to wherever this repo
+actually lives, so you are not locked to a hardcoded path, and it is idempotent
+— re-run after moving the repo or pulling changes:
 
 ```bash
-sudo ./install-healthcheck.sh              # install/refresh + enable + start
-sudo ./install-healthcheck.sh --dry-run    # show what that would do; change nothing
-sudo ./install-healthcheck.sh --status     # timer state
-sudo ./install-healthcheck.sh --uninstall  # stop, disable, remove units
+sudo ./install.sh                     # install/refresh + enable both
+sudo ./install.sh --dry-run           # show what that would do; change nothing
+sudo ./install.sh --healthcheck-only  # availability control only
+sudo ./install.sh --logging-only      # audit control only
 
-sudo ./install-logging.sh                  # install/refresh + enable + start
-sudo ./install-logging.sh --dry-run        # show what an install would do; change nothing
-sudo ./install-logging.sh --check-retention # project the achievable window
-sudo ./install-logging.sh --status         # timer state + record count + retention
+sudo ./install.sh --check-retention   # what the trail actually holds
+sudo ./install.sh --status            # timer state + record count + retention
+sudo ./install.sh --uninstall         # stop, disable, remove units
 ```
 
 > Don't `cp` the units by hand — the copies in `systemd/` carry a placeholder
@@ -1160,7 +1157,7 @@ done
 ```
 
 (The `.service` files legitimately differ in their rewritten paths — re-running
-`install-healthcheck.sh` is the fix either way.)
+`install.sh` is the fix either way.)
 
 ### Or cron (if you prefer)
 
@@ -1435,7 +1432,7 @@ journalctl -t wireguard -f         # the same records, structured
 journalctl WG_ACTION=PEER_REMOVED  # query by indexed field
 ```
 
-`install-logging.sh` writes the rsyslog rule that routes the tag to that file,
+`install.sh` writes the rsyslog rule that routes the tag to that file,
 and the logrotate policy that decides how long it is kept. Both are generated
 rather than shipped, so the log path and the retention window each have exactly
 one source; `--dry-run` prints them in full before anything is written. The rule ends with
@@ -1452,7 +1449,7 @@ OS's own authentication services.
 
 ### Retention (HIPAA: 6 years)
 
-**Retention is one number, in one file.** `install-logging.sh` installs
+**Retention is one number, in one file.** `install.sh` installs
 `/etc/logrotate.d/wireguard`, and `rotate` decides the window:
 
 ```
@@ -1471,7 +1468,7 @@ Weeks are the unit, so `rotate 52` is a year and `rotate 320` is six. Check what
 the host actually holds:
 
 ```bash
-sudo ./install-logging.sh --check-retention
+sudo ./install.sh --check-retention
 ```
 
 ```
@@ -1534,8 +1531,9 @@ config check:
 
 | Files | For |
 | ----- | --- |
-| `healthcheck.sh`, `install-healthcheck.sh` | Availability — restart the tunnel when it dies |
-| `log-connections.sh`, `install-logging.sh` | Audit — the connect/disconnect trail |
+| `healthcheck.sh` | Availability — restart the tunnel when it dies |
+| `log-connections.sh` | Audit — the connect/disconnect trail |
+| `install.sh` | Installs both, plus the trail's routing and retention |
 | `verify-config.sh` | Is this box's config shaped right? |
 | `utils.sh` | Sourced by all of the above |
 | `systemd/` | The timer and service units |
@@ -1560,17 +1558,16 @@ or, copying from your workstation:
 
 ```bash
 rsync -a healthcheck.sh log-connections.sh verify-config.sh \
-         install-healthcheck.sh install-logging.sh utils.sh systemd \
+         install.sh utils.sh systemd \
          root@site-b:/etc/wireguard/scripts/
 ```
 
 **2. Re-run both installers.** They overwrite the units in place, and
-`install-logging.sh` adds the rsyslog rule and logrotate policy that the earlier
+`install.sh` adds the rsyslog rule and logrotate policy that the earlier
 version did not have.
 
 ```bash
-sudo /etc/wireguard/scripts/install-healthcheck.sh
-sudo /etc/wireguard/scripts/install-logging.sh
+sudo /etc/wireguard/scripts/install.sh
 ```
 
 **3. Remove the journald drop-in the old version installed.** Nothing manages it
@@ -1584,7 +1581,7 @@ sudo systemctl restart systemd-journald
 **4. Check it took.**
 
 ```bash
-sudo /etc/wireguard/scripts/install-logging.sh --check-retention
+sudo /etc/wireguard/scripts/install.sh --check-retention
 systemctl list-timers 'wireguard-*'
 sudo /etc/wireguard/scripts/verify-config.sh --all
 tail /var/log/wireguard.log
@@ -1619,7 +1616,7 @@ sudo systemctl restart systemd-journald && sudo journalctl --flush
 
 ```bash
 rsync -a healthcheck.sh log-connections.sh verify-config.sh \
-         install-healthcheck.sh install-logging.sh utils.sh systemd \
+         install.sh utils.sh systemd \
          root@site-b:/etc/wireguard/scripts/
 ```
 
@@ -1636,8 +1633,7 @@ ssh root@site-b 'chown -R root:root /etc/wireguard/scripts &&
 
 ```bash
 ssh root@site-b '
-  /etc/wireguard/scripts/install-healthcheck.sh
-  /etc/wireguard/scripts/install-logging.sh
+  /etc/wireguard/scripts/install.sh
 '
 ```
 
@@ -1647,7 +1643,7 @@ reloads systemd, and enables and starts the timer. They stop straight away if
 the host isn't running systemd, refuse to install a unit whose script is missing
 or not executable, and warn if a timer ends up with nothing scheduled.
 
-`install-logging.sh` also installs the rsyslog rule that routes the trail to
+`install.sh` also installs the rsyslog rule that routes the trail to
 `/var/log/wireguard.log` and the logrotate policy that decides how long it is
 kept. Add `--dry-run` to either installer to see what it would do first.
 
