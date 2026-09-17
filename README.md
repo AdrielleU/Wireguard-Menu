@@ -1502,13 +1502,24 @@ sudo ./install-logging.sh --check-retention
 ```
 
 ```
-  journal on disk    1.8GB over 652 days (~2.8MB/day)
-  target window      2192 days
-  needs about        6.1GB to hold that window
-  SystemMaxUse       2.0GB
-  achievable window  ~724 days
-[✗] Retention cap is too small: it holds ~724 days, not 2192.
+  writing   ~2.8MB/day    (1.8GB over 652 days)
+  ceiling   2.0GB         SystemMaxUse
+  holds     ~724 days     at that rate
+  target    2192 days     would need ~6.1GB
+
+[✗] Falls short: holds ~724 days, target is 2192.
+    Size wins over age, so entries are evicted silently well before
+    MaxRetentionSec elapses. Raise SystemMaxUse to at least 6.1GB
+    (and confirm the filesystem has room) in:
+      /etc/systemd/journald.conf.d/journald-wireguard-audit.conf
+    or ship the audit trail off-box to a log store sized for the window.
 ```
+
+Four facts, then the verdict: how fast this host writes, what stops it, how
+long that lasts, and what you asked for. The `ceiling` line names its own
+source — `SystemMaxUse` when a cap binds, `free disk` when the cap is above the
+filesystem and `SystemKeepFree` is what actually binds, or `journald default`
+when nothing is configured.
 
 That is a real reading from a modest server — a 2 GB cap held under two years,
 not six. It exits non-zero when the cap is short, so it can gate a compliance

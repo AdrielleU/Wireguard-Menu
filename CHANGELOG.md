@@ -133,6 +133,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since shrinking retention would discard existing history.
 
 ### Changed
+- **`--check-retention` output rewritten.** It printed six differently-shaped
+  labels with warnings spliced between the numbers, and showed
+  `SystemMaxUse 100.0TB` as a headline figure immediately before contradicting
+  it with a much smaller effective cap — which read as a error rather than as
+  "the cap is deliberately above the disk". It is now four aligned facts
+  (`writing` / `ceiling` / `holds` / `target`), with the ceiling naming its own
+  source and the sentinel demoted to a parenthetical, and every warning and the
+  verdict after the block rather than inside it. The "nothing configured" case
+  now reports the real window from journald's own default instead of returning
+  early without one.
 - **The restart cooldown now covers both rungs that can restart an interface.**
   `RESTART_COOLDOWN_SECS` (15 min) gated only the reachability rung; a
   structural failure — `service-inactive`, `interface-missing`,
