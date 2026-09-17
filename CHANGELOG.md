@@ -146,6 +146,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since shrinking retention would discard existing history.
 
 ### Changed
+- **`--check-retention` now reports the file, not the journal.** Five facts from
+  the installed logrotate policy — the file and its size, the window (`weekly x
+  320 = ~2240 days`), the measured write rate, the disk that window needs, and
+  the target — instead of a projection built on journald internals. It still
+  exits non-zero when the window is short, and names the `rotate` value that
+  would fix it. The rate is reported only once something has rotated; before
+  that it says so rather than extrapolating from one partial file.
 - **Two log tags merged into one: `wireguard`, on facility `local0`.** The split
   (`wireguard-audit`/`auth` and `wireguard-connections`/`authpriv`) was
   documented as separating admin actions from peer activity, but every caller of
@@ -427,6 +434,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated menu.sh to reflect single key rotation option
 
 ### Removed
+- **The journald retention drop-in is gone**, along with `--with-retention` and
+  the machinery behind it: `install_retention()`, `effective_max_use()`,
+  `journald_reported_max()`, `journal_fs_free()`, `journal_is_persistent()` and
+  `journal_predates_log_filter()`. Setting `SystemMaxUse=100T` worked, but it
+  changed retention **for every service on the box** to solve a WireGuard
+  problem, and answering "how long is the trail kept" then meant reconciling a
+  host-wide cap, a free-disk ceiling, `SystemKeepFree`, persistent-vs-volatile
+  storage and rsyslog's separate copy. logrotate answers it exactly, for one
+  file, without touching anything else. `install-logging.sh` drops from 545 to
+  301 lines. Hosts that installed the earlier version keep the orphaned
+  drop-in until it is removed by hand:
+  `rm /etc/systemd/journald.conf.d/journald-wireguard-audit.conf && systemctl restart systemd-journald`
 - **`setup.sh`.** Server setup is now *Setup WireGuard Server* in
   `menu.sh`, which only writes the config and keys. The rest of what
   `setup.sh` did is not done anywhere now: installing packages, IP forwarding,

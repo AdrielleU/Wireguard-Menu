@@ -756,7 +756,6 @@ when running setup.
 ├── install-healthcheck.sh           # Install/enable the healthcheck timer (availability)
 ├── install-logging.sh               # Install/enable the audit-log timer + retention (compliance)
 ├── systemd/
-│   ├── journald-wireguard-audit.conf       # Journal retention drop-in (opt-in)
 │   ├── wireguard-healthcheck.service       # Oneshot service for the healthcheck
 │   ├── wireguard-healthcheck.timer         # Fires the service every 60s
 │   ├── wireguard-log-connections.service   # Oneshot service for the connection logger
@@ -1070,7 +1069,7 @@ should be able to enable, verify and report on them independently:
 | Installer | Control | Installs |
 | --------- | ------- | -------- |
 | `install-healthcheck.sh` | Availability — is the tunnel up, restart it if not | `wireguard-healthcheck.{service,timer}` |
-| `install-logging.sh` | Audit — the connect/disconnect trail | `wireguard-log-connections.{service,timer}`, and the journal retention drop-in when the host sets no `SystemMaxUse` |
+| `install-logging.sh` | Audit — the connect/disconnect trail | `wireguard-log-connections.{service,timer}`, the rsyslog rule that routes the trail to `/var/log/wireguard.log`, and its logrotate policy |
 
 Both rewrite the unit's `ExecStart`/`Documentation` to wherever this repo
 actually lives, so you are not locked to a hardcoded path, and both are
@@ -1084,7 +1083,6 @@ sudo ./install-healthcheck.sh --uninstall  # stop, disable, remove units
 
 sudo ./install-logging.sh                  # install/refresh + enable + start
 sudo ./install-logging.sh --dry-run        # show what an install would do; change nothing
-sudo ./install-logging.sh --with-retention # ... and force our retention over an existing setting
 sudo ./install-logging.sh --check-retention # project the achievable window
 sudo ./install-logging.sh --status         # timer state + record count + retention
 ```
@@ -1455,121 +1453,66 @@ OS's own authentication services.
 
 ### Retention (HIPAA: 6 years)
 
-**The default is now to keep everything the disk allows.** A stock journal
-caps itself at 10% of the filesystem or 4G, whichever is smaller — on a 70G
-root that is 4G, which can be weeks on a busy host and silently ages the audit
-trail out long before a 6-year requirement.
-
-So `install-logging.sh` installs `systemd/journald-wireguard-audit.conf` to
-`/etc/systemd/journald.conf.d/` and restarts journald **when the host has no
-`SystemMaxUse` of its own**. An existing setting is somebody's decision about
-their disk and is never overridden — the installer says which case it took.
-Force ours over an existing value with `--with-retention`. Doing it by hand is
-the same thing:
-
-```ini
-[Journal]
-Storage=persistent
-SystemMaxUse=100T
-MaxRetentionSec=0
-```
-
-Those two numbers mean "remove both limits and let the disk be the limit":
-
-- `SystemMaxUse=100T` is above any realistic single filesystem, so it never
-  binds. It reserves and preallocates nothing — it only declines to cap below
-  the disk.
-- `MaxRetentionSec=0` turns **off** age-based deletion (0 means disabled, not
-  zero seconds), so entries are never dropped for being old.
-- `SystemKeepFree` is deliberately left alone. journald "will respect both
-  limits and use the smaller of the two values", so with `SystemMaxUse`
-  effectively unbounded, that free reserve is what now bounds the journal —
-  and what stops it filling the disk.
-
-**There is no true "forever" on a finite disk.** Eviction still happens; it
-happens at the disk limit instead of at 4G. Verify the real ceiling — journald
-states it at every start:
+**Retention is one number, in one file.** `install-logging.sh` installs
+`/etc/logrotate.d/wireguard`, and `rotate` decides the window:
 
 ```
-System Journal (/var/log/journal/<id>) is 1.8G, max 48.7G, 46.8G free.
+/var/log/wireguard.log {
+    weekly
+    rotate 320        # 320 weeks = ~6.1 years
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+}
 ```
 
-On the host above that moved the ceiling from 4G to 48.7G. If the trail must
-outlive the disk, ship it off-box; retention on a single host is always bounded
-by that host.
-
-```bash
-sudo mkdir -p /var/log/journal
-sudo systemctl restart systemd-journald
-```
-
-Two caveats worth knowing before you rely on the number:
-
-- **Retention is host-wide, not per-tag.** These limits govern the entire
-  journal, so a chatty neighbour (a container runtime, a web server) competes
-  for the same budget and can evict WireGuard history early. Check what you
-  actually have with `journalctl --disk-usage` and by looking at the oldest
-  retained entry.
-- **Size wins over age.** Entries are dropped once the size ceiling is reached,
-  however far short of `MaxRetentionSec` they are. That is why the drop-in sets
-  `MaxRetentionSec=0` and lifts the size ceiling instead: an age limit cannot
-  hold a window the disk has no room for, and configuring one invites the
-  belief that it can.
-
-`Storage=persistent` ensures logs survive reboots (`/var/log/journal/` instead
-of `/run/log/journal/`). `SystemMaxUse` caps disk usage; `MaxRetentionSec`
-caps age.
-
-**Do not trust the shipped number — measure.** The two caveats above combine
-into the failure that actually bites: a `MaxRetentionSec=6year` sitting behind
-a `SystemMaxUse` that evicts after a few months, with nothing to tell you. The
-achievable window is `SystemMaxUse ÷ the host's real journal growth rate`, and
-that rate is entirely host-specific. So measure it:
+Weeks are the unit, so `rotate 52` is a year and `rotate 320` is six. Check what
+the host actually holds:
 
 ```bash
 sudo ./install-logging.sh --check-retention
 ```
 
 ```
-  writing   ~2.8MB/day    (1.8GB over 652 days)
-  ceiling   2.0GB         SystemMaxUse
-  holds     ~724 days     at that rate
-  target    2192 days     would need ~6.1GB
+== audit trail retention ==
+  file      /var/log/wireguard.log 4.1MB including rotated copies
+  keeping   weekly x 320           = ~2240 days
+  writing   ~0.2MB/day             (measured over 21 days)
+  needs     ~448MB                 to hold the full window
+  target    2192 days
 
-[✗] Falls short: holds ~724 days, target is 2192.
-    Size wins over age, so entries are evicted silently well before
-    MaxRetentionSec elapses. Raise SystemMaxUse to at least 6.1GB
-    (and confirm the filesystem has room) in:
-      /etc/systemd/journald.conf.d/journald-wireguard-audit.conf
-    or ship the audit trail off-box to a log store sized for the window.
+[✓] Rotation holds ~2240 days, past the 2192-day target.
 ```
 
-Four facts, then the verdict: how fast this host writes, what stops it, how
-long that lasts, and what you asked for. The `ceiling` line names its own
-source — `SystemMaxUse` when a cap binds, `free disk` when the cap is above the
-filesystem and `SystemKeepFree` is what actually binds, or `journald default`
-when nothing is configured.
+It exits non-zero when the window is short of the target, so it can gate a
+compliance check, and it names the `rotate` value that would fix it. The
+`writing` and `needs` lines appear once something has rotated — before that
+there is no honest way to measure a rate, and it says so rather than
+extrapolating from one partial file.
 
-That is a real reading from a modest server — a 2 GB cap held under two years,
-not six. It exits non-zero when the cap is short, so it can gate a compliance
-check. Set `RETENTION_TARGET_DAYS` for a window other than HIPAA's 6 years.
+**This used to be done with journald.** The drop-in set `SystemMaxUse=100T` and
+`MaxRetentionSec=0` to stop journald evicting at its 4G default. It worked, but
+it meant changing retention **for every service on the box** to solve a
+WireGuard problem, and then reasoning about a free-disk ceiling, `SystemKeepFree`,
+whether storage was persistent or volatile, and rsyslog's own separate copy —
+four moving parts to answer a question logrotate answers exactly, for one file.
+That drop-in is gone. If you installed an earlier version, remove the leftover:
 
-**On a host upgraded from units without `LogLevelMax=notice`, this rate reads
-high and the check says so.** It measures backwards over journal that already
-exists, and on such a host most of that history is the timers' own per-run
-lines — on the box this was developed against, 91% of all journal entries
-(59,344 of 65,107 over ten days) came from these two units before the filter.
-Silencing them took the whole host from ~6,500 entries/day to ~340. So the
-projection over-sizes the disk until that history rotates away:
-
-```
-[!] This rate includes pre-filter timer chatter and over-estimates future
-    growth; re-check after the journal rotates past 2026-09-15.
+```bash
+rm /etc/systemd/journald.conf.d/journald-wireguard-audit.conf
+systemctl restart systemd-journald
 ```
 
-A large cap is safe to set: journald also honours `SystemKeepFree` (15% of the
-filesystem by default) and stops before filling the disk, so the effective
-limit is whichever binds first.
+journald keeps its own copy of these records under whatever policy the host
+already had, which is what `journalctl -t wireguard` reads. That copy is a
+convenience; **the file is the trail.**
+
+**Six years on a single box is optimistic whatever the number says.** Disks fail
+and hosts get rebuilt. Treat the file as the local buffer and ship it to a
+central log store if the trail genuinely has to outlive the machine — one path
+to point a shipper at is exactly why the trail is one file.
 
 ### Config-change audit (separate tag)
 
@@ -1634,10 +1577,9 @@ reloads systemd, and enables and starts the timer. They stop straight away if
 the host isn't running systemd, refuse to install a unit whose script is missing
 or not executable, and warn if a timer ends up with nothing scheduled.
 
-`install-logging.sh` also widens journal retention to whatever the disk allows
-when the host has no `SystemMaxUse` of its own; `--with-retention` forces that
-over an existing setting. Add `--dry-run` to either installer to see what it
-would do first.
+`install-logging.sh` also installs the rsyslog rule that routes the trail to
+`/var/log/wireguard.log` and the logrotate policy that decides how long it is
+kept. Add `--dry-run` to either installer to see what it would do first.
 
 Re-running them is also how you push an update after copying newer files: they
 overwrite the units in place.

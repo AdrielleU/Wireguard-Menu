@@ -11,27 +11,28 @@
 # (the availability control) so a compliance install can be enabled, verified
 # and reported on without dragging in auto-restart behaviour, and vice versa.
 #
-# Retention is the part that actually decides whether the trail survives long
-# enough to be worth anything. journald retention is host-wide and SIZE WINS
-# OVER AGE: once SystemMaxUse is reached the oldest entries are dropped however
-# short of MaxRetentionSec they are. So --check-retention measures this host's
-# real journal growth and projects whether the configured cap can hold the
-# window you are aiming for. Run it after install, and again whenever the
-# host's logging volume changes.
+# The trail lands in ONE file, /var/log/wireguard.log, via an rsyslog rule that
+# routes this toolkit's single "wireguard" tag there. Its retention is decided
+# in ONE place, the logrotate policy installed alongside it, and --check-retention
+# reports what that policy actually holds.
+#
+# This replaced a model built on journald's host-wide SystemMaxUse, which meant
+# reasoning about a free-disk ceiling, SystemKeepFree, volatile-vs-persistent
+# storage and rsyslog's own separate copy -- all to answer a question logrotate
+# answers exactly, for this file alone, without touching any other service on
+# the box.
 #
 # Idempotent: systemd identifies units by filename, so re-running overwrites
 # them in place and re-enabling is a no-op.
 #
 # --dry-run makes every check the install would (the units exist, the unit's
-# script is executable, no cron entry double-runs it) but writes nothing, runs
-# no systemctl and skips the retention projection. It combines with
-# --with-retention and --uninstall.
+# script is executable, no cron entry double-runs it) but writes nothing and
+# runs no systemctl. It combines with --uninstall.
 #
 # Usage:
 #   sudo ./install-logging.sh                   # install/refresh + enable
-#   sudo ./install-logging.sh --with-retention  # ... and widen journal retention
 #   sudo ./install-logging.sh --dry-run         # show what an install would do; change nothing
-#   sudo ./install-logging.sh --check-retention # project the achievable window
+#   sudo ./install-logging.sh --check-retention # what the trail actually holds
 #   sudo ./install-logging.sh --status          # timer state + retention check
 #   sudo ./install-logging.sh --uninstall       # stop, disable, remove units
 ################################################################################
@@ -43,14 +44,9 @@ source "${REPO_DIR}/utils.sh"
 
 BASE="wireguard-log-connections"
 DRY_RUN=false
-JOURNALD_DROPIN="journald-wireguard-audit.conf"
-# Overridable like UNIT_DST, so the retention install can be exercised against
-# a throwaway directory instead of the host's journald config.
-JOURNALD_DST="${JOURNALD_DST:-/etc/systemd/journald.conf.d}"
-
-# The dedicated log file, its rsyslog rule and its logrotate policy. This is
-# where the trail actually lives and where its retention is decided; the journald
-# drop-in above only governs how long `journalctl` can still answer for it.
+# The dedicated log file, its rsyslog rule and its logrotate policy: where the
+# trail lives and where its retention is set. All three are overridable so the
+# install can be exercised against throwaway directories.
 RSYSLOG_RULE="rsyslog-wireguard.conf"
 RSYSLOG_DST="${RSYSLOG_DST:-/etc/rsyslog.d}"
 RSYSLOG_DST_NAME="49-wireguard.conf"
@@ -67,11 +63,9 @@ RETENTION_TARGET_DAYS="${RETENTION_TARGET_DAYS:-2192}"
 # RETENTION
 ################################################################################
 
-# Opt-in: this widens retention for the WHOLE journal (it is not per-tag) and
-# restarts systemd-journald, so it is never applied by a bare install.
 # Install the rsyslog rule and the logrotate policy that give this toolkit its
-# own log file. Unlike the journald drop-in, this changes nothing host-wide: it
-# adds one routing rule for one tag and one rotation policy for one file.
+# own log file. This changes nothing host-wide: one routing rule for one tag,
+# one rotation policy for one file.
 install_log_routing() {
     [[ -f "${REPO_DIR}/syslog/${RSYSLOG_RULE}" ]]    || die "Missing ${REPO_DIR}/syslog/${RSYSLOG_RULE}"
     [[ -f "${REPO_DIR}/syslog/${LOGROTATE_RULE}" ]]  || die "Missing ${REPO_DIR}/syslog/${LOGROTATE_RULE}"
@@ -109,81 +103,6 @@ install_log_routing() {
     fi
 }
 
-install_retention() {
-    [[ -f "${REPO_DIR}/systemd/${JOURNALD_DROPIN}" ]] || die "Missing ${REPO_DIR}/systemd/${JOURNALD_DROPIN}"
-    if $DRY_RUN; then
-        echo "  would install ${JOURNALD_DST}/${JOURNALD_DROPIN} and restart systemd-journald"
-        return 0
-    fi
-    mkdir -p "$JOURNALD_DST"
-    install -m 0644 "${REPO_DIR}/systemd/${JOURNALD_DROPIN}" "${JOURNALD_DST}/${JOURNALD_DROPIN}" \
-        || die "Failed to install ${JOURNALD_DROPIN}"
-    print_success "installed ${JOURNALD_DST}/${JOURNALD_DROPIN}"
-
-    # Storage=persistent is inert until /var/log/journal exists. systemd docs say
-    # the directory is "created if needed", but on RHEL 9 / CentOS Stream 9 that
-    # does not reliably happen on a mere restart -- the drop-in then looks
-    # installed while journald is still writing to /run (RAM) and losing
-    # everything at reboot, which is exactly the failure this control exists to
-    # prevent. So create it here, with systemd-tmpfiles for the ownership and
-    # mode journald expects (root:systemd-journal, 2755), rather than a bare
-    # mkdir.
-    local persist="${JOURNAL_PERSIST_DIR:-/var/log/journal}"
-    if [[ ! -d "$persist" ]]; then
-        if mkdir -p "$persist"; then
-            print_success "created ${persist} (Storage=persistent has nothing to write to without it)"
-            systemd-tmpfiles --create --prefix "$persist" 2>/dev/null \
-                || print_warning "systemd-tmpfiles could not set ownership on ${persist}; check it is root:systemd-journal mode 2755"
-        else
-            print_warning "could not create ${persist} — journald will stay volatile and lose the trail at every reboot"
-        fi
-    fi
-
-    if systemctl restart systemd-journald; then
-        print_success "journald restarted"
-        # RHEL 9 and 10 need an explicit flush to move what is already in /run
-        # over to /var/log/journal; without it the persistent directory stays
-        # empty until the next boot.
-        if journalctl --flush 2>/dev/null; then
-            print_success "journal flushed to ${persist}"
-        else
-            print_warning "journalctl --flush failed; run it by hand to move the runtime journal onto disk"
-        fi
-    else
-        print_warning "journald restart failed — the drop-in applies at next boot"
-    fi
-}
-
-# Echo the effective SystemMaxUse in bytes, or nothing if it cannot be read.
-# JOURNALD_CONF_ROOT is env-overridable so the test suite can point this at a
-# fixture instead of the host's real journald config.
-effective_max_use() {
-    local root="${JOURNALD_CONF_ROOT:-}"
-    local v=""
-    # Later drop-ins win; read them in the order systemd would.
-    local f
-    for f in "${root}/etc/systemd/journald.conf" "${root}"/etc/systemd/journald.conf.d/*.conf \
-             "${root}"/run/systemd/journald.conf.d/*.conf; do
-        [[ -f "$f" ]] || continue
-        local hit
-        hit=$(grep -iE '^[[:space:]]*SystemMaxUse[[:space:]]*=' "$f" | tail -n1 | cut -d= -f2- | tr -d '[:space:]')
-        [[ -n "$hit" ]] && v="$hit"
-    done
-    [[ -n "$v" ]] || return 0
-
-    # systemd suffixes: K M G T (powers of 1024), bare = bytes.
-    local num unit
-    num="${v%[KMGTkmgt]}"; unit="${v#"$num"}"
-    [[ "$num" =~ ^[0-9]+$ ]] || return 0
-    case "${unit^^}" in
-        K) echo $(( num * 1024 )) ;;
-        M) echo $(( num * 1024 * 1024 )) ;;
-        G) echo $(( num * 1024 * 1024 * 1024 )) ;;
-        T) echo $(( num * 1024 * 1024 * 1024 * 1024 )) ;;
-        *) echo "$num" ;;
-    esac
-}
-
 human() {   # bytes -> human, one decimal
     awk -v b="$1" 'BEGIN{
         split("B KB MB GB TB", u, " "); i=1
@@ -192,247 +111,105 @@ human() {   # bytes -> human, one decimal
     }'
 }
 
-# On RHEL-family hosts rsyslog is active by default, reads from journald, and
-# writes a SECOND copy of these records to flat files under its own logrotate
-# policy -- which journald retention has no bearing on whatsoever. Stock RHEL is
-# "weekly" + "rotate 4": about a month. So a host can pass the journald
-# projection above by years and still hold only a month of the trail in
-# /var/log/secure, which is the file an auditor is most likely to be handed.
+# Read the rotation window out of the installed logrotate policy: how many
+# copies it keeps, and how often it rotates. Echoes "<days> <description>", or
+# nothing if the policy is not installed or cannot be read.
 #
-# Measured from the oldest rotated file rather than by parsing logrotate config,
-# for the same reason the journal rate is measured rather than assumed.
-# Echoes aligned rows for the block above; returns 1 if any window is short.
-# Returns 0 only when a SHORT window was actually found, so a host with no
-# rsyslog at all (or no records in its files yet) reports nothing rather than a
-# spurious warning.
-report_syslog_copy() {
-    systemctl is-active --quiet rsyslog 2>/dev/null || return 1
+# This is deliberately the whole retention model now. It used to be derived from
+# journald's SystemMaxUse against measured journal growth, which meant reasoning
+# about a host-wide setting, a free-disk ceiling, SystemKeepFree, and a
+# volatile/persistent distinction -- to answer a question logrotate already
+# answers exactly, for this file alone.
+logrotate_window() {
+    local conf="${LOGROTATE_DST}/${LOGROTATE_DST_NAME}"
+    [[ -f "$conf" ]] || return 1
 
-    local f oldest days short=1
-    for f in "$WG_LOG_FILE" /var/log/secure /var/log/messages /var/log/auth.log /var/log/syslog; do
+    local count freq per
+    count=$(awk '/^[[:space:]]*rotate[[:space:]]+[0-9]+/ { print $2; exit }' "$conf")
+    [[ "$count" =~ ^[0-9]+$ ]] || return 1
+
+    freq=$(awk '/^[[:space:]]*(hourly|daily|weekly|monthly|yearly)[[:space:]]*$/ { gsub(/[[:space:]]/,""); print; exit }' "$conf")
+    case "$freq" in
+        hourly)  per=1;   freq="hourly (counted as daily)" ;;
+        daily)   per=1    ;;
+        weekly)  per=7    ;;
+        monthly) per=30   ;;
+        yearly)  per=365  ;;
+        *)       return 1 ;;
+    esac
+    echo "$(( count * per )) ${freq} x ${count}"
+}
+
+# Total bytes the trail occupies, current file plus rotated copies.
+trail_bytes() {
+    local total=0 f sz
+    for f in "$WG_LOG_FILE" "$WG_LOG_FILE"-* "$WG_LOG_FILE".*; do
         [[ -f "$f" ]] || continue
-        grep -qE 'wireguard(-(audit|connections))?\[' "$f" 2>/dev/null || continue
-        oldest=$(ls -1t "${f}"* 2>/dev/null | tail -n1)
-        if [[ -n "$oldest" && "$oldest" != "$f" ]]; then
-            days=$(( ( $(date +%s) - $(stat -c %Y "$oldest" 2>/dev/null || echo 0) ) / 86400 ))
-            printf '  %-9s %-13s %s\n' "also in" "$(basename "$f")" "~${days} days kept by rsyslog/logrotate"
-            (( days < RETENTION_TARGET_DAYS )) && short=0
-        else
-            printf '  %-9s %-13s %s\n' "also in" "$(basename "$f")" "no rotated copies yet (rsyslog/logrotate)"
-        fi
+        sz=$(stat -c %s "$f" 2>/dev/null) || continue
+        total=$(( total + sz ))
     done
-    return $short
+    echo "$total"
 }
 
-# journald states its own effective ceiling at every start. It logs TWO kinds of
-# line and only one of them is ours:
-#
-#   Runtime Journal (/run/log/journal/<id>) is 8.0M, max 70.5M, 62.5M free.
-#   System  Journal (/var/log/journal/<id>) is 1.8G, max 48.7G, 46.8G free.
-#
-# The Runtime journal is the volatile one in /run -- a RAM-backed tmpfs, sized by
-# RuntimeMaxUse, typically tens of megabytes. SystemMaxUse does not govern it and
-# nothing survives a reboot there. Matching it produced a ~32MB "ceiling" on a
-# box whose real one was far larger. So anchor on "System Journal" explicitly.
-#
-# The System figure is authoritative -- SystemMaxUse and SystemKeepFree already
-# reconciled -- so prefer it over estimating from df, which cannot know what
-# SystemKeepFree reserves. Echoes bytes, or nothing if journald has not said.
-journald_reported_max() {
-    local line v num unit
-    line=$(journalctl -u systemd-journald --no-pager -o cat 2>/dev/null \
-           | grep -E '^System Journal ' \
-           | grep -oE 'max [0-9]+(\.[0-9]+)?[KMGT]?,' | tail -n1) || return 1
-    [[ -n "$line" ]] || return 1
-    v=${line#max }; v=${v%,}
-    num="${v%[KMGT]}"; unit="${v#"$num"}"
-    [[ "$num" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
-    awk -v n="$num" -v u="$unit" 'BEGIN{
-        m = (u=="K")?1024 : (u=="M")?1048576 : (u=="G")?1073741824 :
-            (u=="T")?1099511627776 : 1
-        printf "%d", n * m
-    }'
+# Days between the oldest rotated copy and now. Echoes nothing when nothing has
+# rotated yet, which is the honest answer rather than extrapolating from one
+# partial file.
+trail_span_days() {
+    local oldest ts
+    oldest=$(ls -1t "$WG_LOG_FILE"-* "$WG_LOG_FILE".* 2>/dev/null | tail -n1)
+    [[ -n "$oldest" ]] || return 1
+    ts=$(stat -c %Y "$oldest" 2>/dev/null) || return 1
+    echo $(( ( $(date +%s) - ts ) / 86400 ))
 }
 
-# Is the journal actually persistent? Storage=persistent only takes effect once
-# /var/log/journal exists and is writable; until then journald stays volatile and
-# the whole retention question is moot, because a reboot discards everything.
-# Worth stating plainly rather than reporting a window that will not survive.
-journal_is_persistent() {
-    # Overridable only so the volatile branch can be exercised without deleting
-    # a real journal; the default is the path journald actually keys off.
-    [[ -d "${JOURNAL_PERSIST_DIR:-/var/log/journal}" ]]
-}
-
-
-# Bytes of free space on the filesystem holding the journal. journald stops
-# short of consuming all of it by SystemKeepFree, so current usage plus this is
-# an upper bound on how large the journal can get, not a promise.
-journal_fs_free() {
-    local dir=/var/log/journal
-    [[ -d "$dir" ]] || dir=/var/log
-    local avail
-    avail=$(df -B1 --output=avail "$dir" 2>/dev/null | tail -n1 | tr -d '[:space:]')
-    [[ "$avail" =~ ^[0-9]+$ ]] || return 1
-    echo "$avail"
-}
-
-# True when the journal still holds entries written before this host's units
-# gained LogLevelMax=notice — i.e. when the measured growth rate is inflated by
-# per-run timer chatter that is no longer written at all. The unit file's mtime
-# is the upgrade point, since that is when install-logging.sh last wrote it.
-journal_predates_log_filter() {
-    local unit="${UNIT_DST}/${BASE}.service"
-    [[ -f "$unit" ]] || return 1
-    grep -q '^LogLevelMax=' "$unit" 2>/dev/null || return 1
-    _WG_FILTER_SINCE=$(stat -c %Y "$unit" 2>/dev/null) || return 1
-    local oldest
-    oldest=$(journalctl --no-pager -o short-unix 2>/dev/null | head -1 | cut -d. -f1)
-    [[ "$oldest" =~ ^[0-9]+$ ]] || return 1
-    (( oldest < _WG_FILTER_SINCE ))
-}
-
-# Measure real journal growth and project the achievable retention window.
-# This is the check that catches the common failure: a 6-year MaxRetentionSec
-# sitting behind a SystemMaxUse that evicts after a few months.
+# What the trail actually holds, and whether that meets the target. One file, one
+# rotation policy, no host-wide settings involved.
 check_retention() {
     echo
-    echo -e "${CYAN}== journal retention ==${NC}"
+    echo -e "${CYAN}== audit trail retention ==${NC}"
 
-    command -v journalctl &>/dev/null || { print_warning "journalctl not found"; return 1; }
-
-    local usage_raw usage_bytes
-    usage_raw=$(journalctl --disk-usage 2>/dev/null)
-    usage_bytes=$(grep -oE '[0-9.]+[KMGT]?B?' <<<"$usage_raw" | tail -n1)
-    # Reuse the suffix parser by normalising "1.8G" style output.
-    usage_bytes=$(awk -v s="$usage_raw" 'BEGIN{
-        if (match(s, /[0-9.]+[KMGT]/)) {
-            v = substr(s, RSTART, RLENGTH)
-            n = v + 0; u = substr(v, length(v), 1)
-            m = (u=="K")?1024:(u=="M")?1048576:(u=="G")?1073741824:(u=="T")?1099511627776:1
-            printf "%d", n * m
-        }
-    }')
-    [[ -n "$usage_bytes" && "$usage_bytes" -gt 0 ]] || { print_warning "could not read journal disk usage"; return 1; }
-
-    # journalctl streams oldest-first, so head -1 stops early on a big journal.
-    local oldest_epoch now_epoch span_days
-    oldest_epoch=$(journalctl -o short-unix --no-pager 2>/dev/null | head -n1 | cut -d. -f1)
-    [[ "$oldest_epoch" =~ ^[0-9]+$ ]] || { print_warning "could not read the oldest journal entry"; return 1; }
-    now_epoch=$(date +%s)
-    span_days=$(( (now_epoch - oldest_epoch) / 86400 ))
-    (( span_days > 0 )) || { print_info "journal spans under a day — too little history to project"; return 0; }
-
-    local per_day required max_use
-    per_day=$(( usage_bytes / span_days ))
-    required=$(( per_day * RETENTION_TARGET_DAYS ))
-    max_use=$(effective_max_use)
-
-    # Work out the ceiling and where it comes from BEFORE printing anything, so
-    # the block below reads as four plain facts instead of a running commentary
-    # with warnings spliced between the numbers.
-    local effective ceiling_note unbounded=false unconfigured=false free reported
-
-    if [[ -z "$max_use" ]]; then
-        # Nothing configured: journald's own default applies (10% of the
-        # filesystem, capped at 4G). Report the real window anyway -- "not set"
-        # on its own tells the operator nothing about how long they actually get.
-        unconfigured=true
-        if reported=$(journald_reported_max) && [[ -n "$reported" ]]; then
-            effective="$reported"
-            ceiling_note="journald default, nothing configured"
-        elif free=$(journal_fs_free); then
-            effective=$(( free + usage_bytes ))
-            ceiling_note="estimated; nothing configured"
+    local bytes; bytes=$(trail_bytes)
+    if [[ ! -f "$WG_LOG_FILE" ]]; then
+        printf '  %-9s %s\n' "file" "${WG_LOG_FILE} — not created yet"
+        if ! systemctl is-active --quiet rsyslog 2>/dev/null; then
+            print_warning "rsyslog is not running, so nothing writes ${WG_LOG_FILE}. Records still reach the journal — query them with: journalctl -t wireguard"
         else
-            effective=0
-            ceiling_note="unknown; nothing configured"
+            print_info "Nothing has been logged yet. The file appears on the first record; rsyslog polls the journal, so allow a few seconds."
         fi
-    elif free=$(journal_fs_free) && (( max_use > free + usage_bytes )); then
-        # A cap above the filesystem is the "keep everything" setting: the real
-        # limit is free disk minus SystemKeepFree. Printing the configured
-        # number as the ceiling would promise a window the disk cannot deliver,
-        # so it is demoted to a parenthetical and named for what it is.
-        unbounded=true
-        if reported=$(journald_reported_max) && [[ -n "$reported" ]]; then
-            effective="$reported"
-            ceiling_note="free disk (SystemMaxUse uncapped at $(human "$max_use"))"
-        else
-            effective=$(( free + usage_bytes ))
-            ceiling_note="free disk, estimated (SystemMaxUse uncapped at $(human "$max_use"))"
-        fi
+        return 0
+    fi
+    printf '  %-9s %-22s %s\n' "file" "$WG_LOG_FILE" "$(human "$bytes") including rotated copies"
+
+    local window days desc
+    if window=$(logrotate_window); then
+        days=${window%% *}; desc=${window#* }
+        printf '  %-9s %-22s %s\n' "keeping" "$desc" "= ~${days} days"
     else
-        effective="$max_use"
-        ceiling_note="SystemMaxUse"
+        print_warning "No readable rotate/frequency in ${LOGROTATE_DST}/${LOGROTATE_DST_NAME}, so the window cannot be confirmed. Re-run this installer to reinstall the policy."
+        return 1
     fi
 
-    local achievable=0
-    (( per_day > 0 )) && achievable=$(( effective / per_day ))
+    local span rate
+    if span=$(trail_span_days) && (( span > 0 )); then
+        rate=$(( bytes / span ))
+        printf '  %-9s %-22s %s\n' "writing" "~$(human "$rate")/day" "(measured over ${span} days)"
+        printf '  %-9s %-22s %s\n' "needs" "~$(human $(( rate * days )))" "to hold the full window"
+    else
+        printf '  %-9s %-22s %s\n' "writing" "not measurable yet" "(nothing has rotated)"
+    fi
 
-    printf '  %-9s %-13s %s\n' "writing"  "~$(human "$per_day")/day"          "($(human "$usage_bytes") over ${span_days} days)"
-    printf '  %-9s %-13s %s\n' "ceiling"  "$(human "$effective")"            "$ceiling_note"
-    printf '  %-9s %-13s %s\n' "holds"    "~${achievable} days"              "at that rate"
-    printf '  %-9s %-13s %s\n' "target"   "${RETENTION_TARGET_DAYS} days"    "would need ~$(human "$required")"
-
-    local syslog_short=false
-    report_syslog_copy && syslog_short=true
+    printf '  %-9s %s\n' "target" "${RETENTION_TARGET_DAYS} days"
     echo
 
-    # Caveats go after the numbers, never between them.
-    local volatile=false
-    if ! journal_is_persistent; then
-        volatile=true
-        print_warning "journald is running VOLATILE — /var/log/journal does not exist, so the journal lives in /run (RAM) and every reboot discards it."
-    fi
-    if $syslog_short; then
-        print_warning "rsyslog keeps its own copy of these records on a separate logrotate schedule that journald settings do not govern (stock RHEL is weekly/rotate 4 — about a month). The window above applies to 'journalctl' queries; the flat files roll off far sooner. Raise 'rotate' in /etc/logrotate.d/rsyslog, or ship the trail off-box."
-    fi
-    if journal_predates_log_filter; then
-        print_warning "The rate above includes pre-filter timer chatter, so it over-estimates growth. Re-check after the journal rotates past $(date -d "@${_WG_FILTER_SINCE}" '+%Y-%m-%d' 2>/dev/null || echo 'the upgrade')."
-    fi
-
-    # A volatile journal fails on its own terms, whatever the arithmetic says: the
-    # window above is discarded at the next boot, so reporting it as sufficient
-    # would hand someone a passing compliance check for logs that do not survive
-    # a reboot. This is checked before every other verdict for that reason.
-    if $volatile; then
-        print_error "Retention is NOT in effect: the journal is volatile, so the ~${achievable}-day window above is discarded at the next reboot."
-        echo "    Storage=persistent only takes effect once the directory exists."
-        echo "    Create it and restart journald:"
-        echo "      mkdir -p /var/log/journal"
-        echo "      systemctl restart systemd-journald"
-        echo "    Then re-run this check. Anything already logged is in RAM and is"
-        echo "    lost when you restart journald, so do it now rather than later."
-        return 1
-    fi
-
-    if $unconfigured; then
-        print_warning "No SystemMaxUse is set, so journald caps the journal well below the disk. Run this installer (or --with-retention) to keep everything the disk allows."
+    if (( days >= RETENTION_TARGET_DAYS )); then
+        print_success "Rotation holds ~${days} days, past the ${RETENTION_TARGET_DAYS}-day target."
         return 0
     fi
-
-    if (( effective >= required )); then
-        if $unbounded; then
-            print_success "Keeping everything the disk allows: ~${achievable} days against a ${RETENTION_TARGET_DAYS}-day target."
-        else
-            print_success "Retention cap is sufficient for the ${RETENTION_TARGET_DAYS}-day window."
-        fi
-        return 0
-    fi
-
-    if $unbounded; then
-        print_error "Falls short: holds ~${achievable} days, target is ${RETENTION_TARGET_DAYS}."
-        echo "    SystemMaxUse is already above the filesystem, so there is nothing"
-        echo "    left to raise. Add disk to /var/log, or ship the audit trail"
-        echo "    off-box to a log store sized for the window."
-        return 1
-    fi
-    print_error "Falls short: holds ~${achievable} days, target is ${RETENTION_TARGET_DAYS}."
-    echo "    Size wins over age, so entries are evicted silently well before"
-    echo "    MaxRetentionSec elapses. Raise SystemMaxUse to at least $(human "$required")"
-    echo "    (and confirm the filesystem has room) in:"
-    echo "      ${JOURNALD_DST}/${JOURNALD_DROPIN}"
-    echo "    or ship the audit trail off-box to a log store sized for the window."
+    print_error "Rotation holds ~${days} days, short of the ${RETENTION_TARGET_DAYS}-day target."
+    echo "    Raise 'rotate' in ${LOGROTATE_DST}/${LOGROTATE_DST_NAME} — at the current"
+    echo "    frequency you need about $(( (RETENTION_TARGET_DAYS + 6) / 7 )) weekly copies."
+    echo "    Six years on one host is optimistic whatever the number says: ship the"
+    echo "    file to a central log store if the trail has to outlive the machine."
     return 1
 }
 
@@ -478,10 +255,6 @@ uninstall_units() {
 
     # Deliberately NOT removed: shrinking retention here would discard existing
     # audit history, which is the opposite of what an uninstall should risk.
-    if [[ -f "${JOURNALD_DST}/${JOURNALD_DROPIN}" ]]; then
-        print_info "Journal retention drop-in left in place: ${JOURNALD_DST}/${JOURNALD_DROPIN}"
-        print_info "Remove it manually (then restart systemd-journald) to revert retention."
-    fi
 }
 
 show_status() {
@@ -496,15 +269,14 @@ show_status() {
 main() {
     check_root
     check_systemd
-    local action="install" retention=false arg
+    local action="install" arg
     for arg in "$@"; do
         case "$arg" in
             --dry-run)         DRY_RUN=true ;;
-            --with-retention)  retention=true ;;
             --check-retention) action="check" ;;
             --status)          action="status" ;;
             --uninstall)       action="uninstall" ;;
-            *)                 die "Unknown option: $arg (use --with-retention, --check-retention, --status, --uninstall, --dry-run, or no args)" ;;
+            *)                 die "Unknown option: $arg (use --check-retention, --status, --uninstall, --dry-run, or no args)" ;;
         esac
     done
 
@@ -514,27 +286,11 @@ main() {
         uninstall) uninstall_units ;;
         install)
             install_units
-            # The dedicated log file is the trail itself, so it is always
-            # installed -- unlike the journald drop-in below, it changes nothing
-            # for any other service on the host.
+            # The routing rule and its rotation policy ARE the trail, so they go
+            # in on every install. Neither touches any other service on the host.
             echo; install_log_routing
-            # Retention defaults to "keep everything the disk allows", but only
-            # when the host has no SystemMaxUse of its own. An explicit setting
-            # is somebody's decision about their disk, so it is never
-            # overridden -- --with-retention forces ours on top when that is
-            # actually what is wanted.
-            if $retention; then
-                echo; install_retention
-            elif [[ -z "$(effective_max_use)" ]]; then
-                echo
-                print_info "No SystemMaxUse is set, so journald would cap the journal at 4G. Installing the keep-everything drop-in."
-                install_retention
-            else
-                echo
-                print_info "SystemMaxUse is already set to $(human "$(effective_max_use)") — leaving retention alone. Use --with-retention to replace it with the keep-everything drop-in."
-            fi
             if $DRY_RUN; then
-                print_info "Dry run: checks passed, nothing was changed. (--check-retention projects the retention window.)"
+                print_info "Dry run: checks passed, nothing was changed. (--check-retention reports what the trail holds.)"
             else
                 check_retention
             fi
