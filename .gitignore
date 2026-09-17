@@ -44,12 +44,13 @@ build/
 # Sensitive data - NEVER commit these!
 *.key
 *.pem
+# Keeps peer configs (which carry private keys) out of the repo. Note this is
+# broad: it silently swallowed a shipped rsyslog rule once, which committed and
+# pushed cleanly while being absent from every fresh clone. Nothing the repo
+# ships is a .conf any more -- the rsyslog rule and logrotate policy are written
+# by install-logging.sh rather than shipped -- so if you ever add one, check
+# `git check-ignore -v <file>` before assuming it is tracked.
 *.conf
-# Exception: a shipped unit drop-in, not a WireGuard config. The rule above
-# exists to keep peer configs (which carry private keys) out of the repo; this
-# file has no secrets and install-logging.sh --with-retention needs it
-# present in a fresh clone.
-!systemd/journald-wireguard-audit.conf
 privatekey*
 publickey*
 *.qr

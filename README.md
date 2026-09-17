@@ -760,9 +760,6 @@ when running setup.
 │   ├── wireguard-healthcheck.timer         # Fires the service every 60s
 │   ├── wireguard-log-connections.service   # Oneshot service for the connection logger
 │   └── wireguard-log-connections.timer     # Fires the service every 2 min
-├── syslog/
-│   ├── rsyslog-wireguard.conf              # Routes the `wireguard` tag to /var/log/wireguard.log
-│   └── logrotate-wireguard                 # Retention for that file (the one place it is set)
 ├── utils.sh                         # Shared helpers (sourced by other scripts)
 ├── README.md                        # All user documentation (you are here)
 ├── CHANGELOG.md                     # Version history
@@ -1438,8 +1435,10 @@ journalctl -t wireguard -f         # the same records, structured
 journalctl WG_ACTION=PEER_REMOVED  # query by indexed field
 ```
 
-`install-logging.sh` installs the rsyslog rule that routes the tag to that file,
-and the logrotate policy that decides how long it is kept. The rule ends with
+`install-logging.sh` writes the rsyslog rule that routes the tag to that file,
+and the logrotate policy that decides how long it is kept. Both are generated
+rather than shipped, so the log path and the retention window each have exactly
+one source; `--dry-run` prints them in full before anything is written. The rule ends with
 `stop`, so these records stay out of `/var/log/messages` — the file is the whole
 trail, and the shared logs stay readable. journald keeps its own copy either
 way, so `journalctl -t wireguard` works even if rsyslog is not installed.
@@ -1540,7 +1539,6 @@ config check:
 | `verify-config.sh` | Is this box's config shaped right? |
 | `utils.sh` | Sourced by all of the above |
 | `systemd/` | The timer and service units |
-| `syslog/` | The rsyslog rule that routes the trail to one file, and its logrotate policy |
 
 The site box needs Linux with systemd and `wireguard-tools`, with the tunnel
 running as `wg-quick@<iface>` — that is the service the healthcheck checks and
@@ -1551,9 +1549,8 @@ restarts.
 Do these in order. Step 3 is the one that is easy to forget, because nothing
 fails without it — the old setting simply sits there unmanaged.
 
-**1. Replace the scripts.** Note `syslog/` is a new directory; an upgrade that
-copies only the old file list will install the units but never create the log
-file.
+**1. Replace the scripts.** The file list is unchanged — the rsyslog rule and
+logrotate policy are written by the installer, not shipped.
 
 ```bash
 cd /etc/wireguard/scripts && git pull
@@ -1563,7 +1560,7 @@ or, copying from your workstation:
 
 ```bash
 rsync -a healthcheck.sh log-connections.sh verify-config.sh \
-         install-healthcheck.sh install-logging.sh utils.sh systemd syslog \
+         install-healthcheck.sh install-logging.sh utils.sh systemd \
          root@site-b:/etc/wireguard/scripts/
 ```
 
@@ -1622,7 +1619,7 @@ sudo systemctl restart systemd-journald && sudo journalctl --flush
 
 ```bash
 rsync -a healthcheck.sh log-connections.sh verify-config.sh \
-         install-healthcheck.sh install-logging.sh utils.sh systemd syslog \
+         install-healthcheck.sh install-logging.sh utils.sh systemd \
          root@site-b:/etc/wireguard/scripts/
 ```
 
