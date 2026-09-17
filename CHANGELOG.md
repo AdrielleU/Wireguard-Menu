@@ -266,6 +266,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous plain tagged line rather than losing the record.
 
 ### Fixed
+- **`--check-retention` reported success on a volatile journal.** On a host
+  where `/var/log/journal` does not exist, journald keeps the journal in `/run`
+  (RAM) and discards it at every reboot — but the check still printed
+  `[✓] Keeping everything the disk allows: ~5384 days`, directly under its own
+  warning that the journal was volatile. That would hand someone a passing
+  compliance check for logs that do not survive a reboot. A volatile journal is
+  now checked before every other verdict and fails with exit 1, naming the two
+  commands that fix it.
 - **`--check-retention` could report a ceiling tens of gigabytes too small.**
   journald logs two ceiling lines — `Runtime Journal (/run/log/journal/...)` for
   the volatile RAM-backed journal and `System Journal (/var/log/journal/...)`

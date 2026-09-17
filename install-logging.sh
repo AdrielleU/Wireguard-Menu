@@ -148,7 +148,9 @@ journald_reported_max() {
 # the whole retention question is moot, because a reboot discards everything.
 # Worth stating plainly rather than reporting a window that will not survive.
 journal_is_persistent() {
-    [[ -d /var/log/journal ]]
+    # Overridable only so the volatile branch can be exercised without deleting
+    # a real journal; the default is the path journald actually keys off.
+    [[ -d "${JOURNAL_PERSIST_DIR:-/var/log/journal}" ]]
 }
 
 
@@ -263,11 +265,28 @@ check_retention() {
     echo
 
     # Caveats go after the numbers, never between them.
+    local volatile=false
     if ! journal_is_persistent; then
-        print_warning "journald is running VOLATILE — /var/log/journal does not exist, so the journal lives in /run (RAM) and every reboot discards it. Fix: mkdir -p /var/log/journal && systemctl restart systemd-journald"
+        volatile=true
+        print_warning "journald is running VOLATILE — /var/log/journal does not exist, so the journal lives in /run (RAM) and every reboot discards it."
     fi
     if journal_predates_log_filter; then
         print_warning "The rate above includes pre-filter timer chatter, so it over-estimates growth. Re-check after the journal rotates past $(date -d "@${_WG_FILTER_SINCE}" '+%Y-%m-%d' 2>/dev/null || echo 'the upgrade')."
+    fi
+
+    # A volatile journal fails on its own terms, whatever the arithmetic says: the
+    # window above is discarded at the next boot, so reporting it as sufficient
+    # would hand someone a passing compliance check for logs that do not survive
+    # a reboot. This is checked before every other verdict for that reason.
+    if $volatile; then
+        print_error "Retention is NOT in effect: the journal is volatile, so the ~${achievable}-day window above is discarded at the next reboot."
+        echo "    Storage=persistent only takes effect once the directory exists."
+        echo "    Create it and restart journald:"
+        echo "      mkdir -p /var/log/journal"
+        echo "      systemctl restart systemd-journald"
+        echo "    Then re-run this check. Anything already logged is in RAM and is"
+        echo "    lost when you restart journald, so do it now rather than later."
+        return 1
     fi
 
     if $unconfigured; then
