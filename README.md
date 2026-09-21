@@ -777,7 +777,7 @@ prints what it would do, but writes nothing.
 
 | Dry run | Checks | Touches |
 | ------- | ------ | ------- |
-| `install.sh --dry-run` | both units' scripts exist and are executable, no cron entry double-runs them, plus the exact rsyslog and logrotate files it would write | nothing |
+| `install.sh --dry-run` | the preflight (a WireGuard instance exists, its tunnels run under `wg-quick@`, the configs pass `verify-config.sh`), both units' scripts exist and are executable, no cron entry double-runs them, plus the exact rsyslog and logrotate files it would write | nothing |
 | `log-connections.sh --dry-run` | reads `wg show dump` and the state file, prints the connect/disconnect records it would write | nothing — no journal entries, no state file |
 
 Two more need no flag, because they only read:
@@ -1075,11 +1075,37 @@ sudo ./install.sh                     # install/refresh + enable both
 sudo ./install.sh --dry-run           # show what that would do; change nothing
 sudo ./install.sh --healthcheck-only  # availability control only
 sudo ./install.sh --logging-only      # audit control only
+sudo ./install.sh --force             # install even if the preflight fails
 
 sudo ./install.sh --check-retention   # what the trail actually holds
 sudo ./install.sh --status            # timer state + record count + retention
 sudo ./install.sh --uninstall         # stop, disable, remove units
 ```
+
+**It checks the host before writing anything.** Any error stops the install
+with nothing changed:
+
+```
+== preflight ==
+[✓] wg, wg-quick, ip and logger are installed
+[✓] scripts are root-owned and not writable by others
+[✓] wg0: running under wg-quick@wg0, enabled at boot
+[✓] verify-config.sh: no errors
+```
+
+| Stops the install | Why |
+| ----------------- | --- |
+| `wg`, `wg-quick`, `ip` or `logger` missing | nothing can be checked, and without `logger` every record is silently dropped |
+| no WireGuard instance (no `/etc/wireguard/*.conf`, nothing running) | the timers would run every minute and check nothing |
+| an interface running with no `.conf`, or started by hand with `wg-quick up` instead of `wg-quick@<iface>` | the healthcheck only watches `wg-quick@<iface>`, so it would report the tunnel dead every minute, and its restart fails because the interface already exists |
+| scripts not root-owned, or writable by group/others | the timers run them as root |
+| `verify-config.sh` errors (only a warning with `--logging-only`) | the healthcheck's restart policy comes from those declarations, so an undeclared server would be auto-restarted |
+
+Warnings, which never stop it: a tunnel that is down (once installed, the
+healthcheck starts it on a site/client box, or reports it failed every minute
+on a server), `wg-quick@<iface>` not enabled at boot, `ping` missing (no
+reachability checks), and `logrotate` missing (the trail never rotates).
+`--force` installs despite errors, and still prints them.
 
 > Don't `cp` the units by hand — the copies in `systemd/` carry a placeholder
 > path (`/etc/wireguard/scripts/…`). Installing them verbatim gives you a timer
@@ -1654,7 +1680,10 @@ Each installer copies its own unit files out of `systemd/` into
 `/etc/systemd/system/`, rewrites `ExecStart` to wherever you put the scripts,
 reloads systemd, and enables and starts the timer. They stop straight away if
 the host isn't running systemd, refuse to install a unit whose script is missing
-or not executable, and warn if a timer ends up with nothing scheduled.
+or not executable, and warn if a timer ends up with nothing scheduled. They also
+stop, with nothing written, when the box has no WireGuard instance, a tunnel
+running outside `wg-quick@<iface>`, or `verify-config.sh` errors. See the
+[preflight](#install-as-a-systemd-timer-recommended).
 
 `install.sh` also installs the rsyslog rule that routes the trail to
 `/var/log/wireguard.log` and the logrotate policy that decides how long it is

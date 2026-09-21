@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`install.sh` runs a preflight before writing anything**, and stops on:
+  - `wg`, `wg-quick`, `ip` or `logger` missing
+  - no WireGuard instance on the host
+  - an interface running with no `.conf`, or started by hand outside
+    `wg-quick@<iface>`, which the healthcheck would report dead every minute
+    and fail to restart
+  - scripts the timers run as root that are not root-owned, or that
+    group/others can write to
+  - `verify-config.sh` errors (only a warning with `--logging-only`)
+
+  It warns without stopping on a tunnel that is down, `wg-quick@` not enabled
+  at boot, `ping` missing, or `logrotate` missing. `--force` installs anyway.
+  `--dry-run` runs the preflight too. Before this, the installer put timers on
+  a host with no WireGuard at all, and they ran every minute checking nothing.
 - **`healthcheck.sh` logs a heartbeat.** Each healthy interface now writes one
   `HEALTHCHECK_OK` record (`reach=`, `peers=connected/total`) every
   `HEARTBEAT_SECS`, 50 min by default. Before this, a healthy box wrote nothing,

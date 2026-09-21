@@ -29,13 +29,21 @@
 # them in place and re-enabling is a no-op. Re-running is also how you push an
 # update after copying newer scripts.
 #
-# --dry-run makes every check the install would (the units exist, each unit's
-# script is executable, no cron entry double-runs it) but writes nothing and
-# runs no systemctl. It combines with every other flag.
+# A preflight runs first and stops the install on any error: wireguard-tools
+# missing, no WireGuard instance on the host, a tunnel running outside
+# wg-quick@<iface> (the healthcheck would read it as dead every minute),
+# scripts others can write to (the timers run them as root), or
+# verify-config.sh errors. Warnings (tunnel down, not enabled at boot, no ping
+# or logrotate) never stop it. --force installs despite errors.
+#
+# --dry-run makes every check the install would (the preflight, the units
+# exist, each unit's script is executable, no cron entry double-runs it) but
+# writes nothing and runs no systemctl. It combines with every other flag.
 #
 # Usage:
 #   sudo ./install.sh                     # install/refresh + enable both
 #   sudo ./install.sh --dry-run           # show what that would do; change nothing
+#   sudo ./install.sh --force             # install even if the preflight fails
 #   sudo ./install.sh --healthcheck-only  # availability control only
 #   sudo ./install.sh --logging-only      # audit control only
 #   sudo ./install.sh --check-retention   # what the trail actually holds
@@ -53,6 +61,7 @@ HEALTHCHECK_BASE="wireguard-healthcheck"
 LOGGING_BASE="wireguard-log-connections"
 
 DRY_RUN=false
+FORCE=false
 DO_HEALTHCHECK=true
 DO_LOGGING=true
 
@@ -297,6 +306,102 @@ check_retention() {
 }
 
 ################################################################################
+# PREFLIGHT
+################################################################################
+
+# Is this a host the timers can do anything useful on? Runs before anything is
+# written. The case it exists for: timers installed on a box with no WireGuard
+# run every minute forever, check nothing, and look just like a healthy
+# install.
+#
+# pf_fail stops the install (--force installs anyway); a warning never does.
+PREFLIGHT_ERRORS=0
+pf_fail() { PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1)); print_error "$1"; }
+
+preflight() {
+    echo -e "${CYAN}== preflight ==${NC}"
+
+    # logger is here because _audit_emit skips silently without it: every
+    # record, heartbeat included, would vanish with no error anywhere.
+    local c missing=()
+    for c in wg wg-quick ip logger; do
+        command -v "$c" &>/dev/null || missing+=("$c")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        pf_fail "missing command(s): ${missing[*]} — install wireguard-tools, iproute2 and util-linux first"
+        return
+    fi
+    print_success "wg, wg-quick, ip and logger are installed"
+    if $DO_HEALTHCHECK && ! command -v ping &>/dev/null; then
+        print_warning "ping is not installed, so Healthcheck-Reachability is skipped and a tunnel that is up but passing no traffic goes unnoticed"
+    fi
+    if $DO_LOGGING && ! command -v logrotate &>/dev/null; then
+        print_warning "logrotate is not installed, so ${WG_LOG_FILE} will never rotate"
+    fi
+
+    # The timers run these as root, so anyone who can write to them is root.
+    local f bad=()
+    for f in "$REPO_DIR" "${REPO_DIR}/healthcheck.sh" "${REPO_DIR}/log-connections.sh" "${REPO_DIR}/utils.sh"; do
+        [[ -e "$f" ]] || continue
+        [[ "$(stat -c %u "$f")" == 0 ]] && (( ( 8#$(stat -c %a "$f") & 8#022 ) == 0 )) || bad+=("$f")
+    done
+    if (( ${#bad[@]} > 0 )); then
+        pf_fail "not root-owned, or writable by group/others: ${bad[*]}. The timers run these as root. Fix: chown root:root and chmod go-w"
+    else
+        print_success "scripts are root-owned and not writable by others"
+    fi
+
+    local -a instances
+    mapfile -t instances < <(detect_servers)
+    if (( ${#instances[@]} == 0 )); then
+        pf_fail "no WireGuard instance on this host: no ${WG_CONFIG_DIR}/*.conf and no interface running. Set up the tunnel first (README: Start Here), then re-run"
+        return
+    fi
+
+    # The healthcheck judges a tunnel by its wg-quick@<iface> service alone, so
+    # anything running outside that service reads to it as dead.
+    local iface up svc
+    for iface in "${instances[@]}"; do
+        up=false;  ip link show "$iface" &>/dev/null && up=true
+        svc=false; systemctl is-active --quiet "wg-quick@${iface}" && svc=true
+
+        if [[ ! -f "${WG_CONFIG_DIR}/${iface}.conf" ]]; then
+            pf_fail "${iface}: running, but there is no ${WG_CONFIG_DIR}/${iface}.conf, so wg-quick does not manage it. The healthcheck would report it dead every minute and every restart would fail"
+        elif $up && ! $svc; then
+            pf_fail "${iface}: up, but not through wg-quick@${iface} (started by hand with 'wg-quick up'?). The healthcheck would report it dead every minute, and its restart fails because ${iface} already exists. Fix: wg-quick down ${iface} && systemctl enable --now wg-quick@${iface}"
+        elif ! $up; then
+            print_warning "${iface}: tunnel is down. Once installed, the healthcheck starts it within a minute on a site/client box, or reports it failed every minute on a server. Bring it up: systemctl enable wg-quick@${iface} && systemctl restart wg-quick@${iface}"
+        elif ! systemctl is-enabled --quiet "wg-quick@${iface}" 2>/dev/null; then
+            print_warning "${iface}: running, but wg-quick@${iface} is not enabled, so it will not come back after a reboot. Fix: systemctl enable wg-quick@${iface}"
+        else
+            print_success "${iface}: running under wg-quick@${iface}, enabled at boot"
+        fi
+    done
+
+    # The healthcheck's restart policy comes from the declarations this checks:
+    # an error here can be a server with no Role line, which --restart treats as
+    # restartable.
+    local vc="${REPO_DIR}/verify-config.sh" report nwarn
+    if [[ ! -x "$vc" ]]; then
+        print_warning "no executable ${vc}, so the configs were not checked"
+    elif report=$("$vc" --all --quiet 2>&1); then
+        nwarn=$(grep -c '^ *warn ' <<<"$report")
+        if (( nwarn > 0 )); then
+            print_success "verify-config.sh: no errors, ${nwarn} warning(s) (run verify-config.sh --all to see them)"
+        else
+            print_success "verify-config.sh: no errors"
+        fi
+    else
+        sed 's/^/    /' <<<"$report" >&2
+        if $DO_HEALTHCHECK; then
+            pf_fail "verify-config.sh found errors (above). Fix them before installing the healthcheck: its restart policy comes from these declarations"
+        else
+            print_warning "verify-config.sh found errors (above)"
+        fi
+    fi
+}
+
+################################################################################
 # PATHS
 ################################################################################
 
@@ -354,6 +459,13 @@ install_control() {
 }
 
 install_all() {
+    preflight
+    if (( PREFLIGHT_ERRORS > 0 )); then
+        $FORCE || die "Preflight found ${PREFLIGHT_ERRORS} error(s); nothing was installed. Fix them, or re-run with --force to install anyway"
+        print_warning "--force: installing despite ${PREFLIGHT_ERRORS} preflight error(s)"
+    fi
+    echo
+
     # Before any unit is enabled: the logger's unit will not start at all if its
     # state directory is missing.
     ensure_paths
@@ -430,12 +542,13 @@ main() {
     for arg in "$@"; do
         case "$arg" in
             --dry-run)          DRY_RUN=true ;;
+            --force)            FORCE=true ;;
             --healthcheck-only) DO_LOGGING=false ;;
             --logging-only)     DO_HEALTHCHECK=false ;;
             --check-retention)  action="check" ;;
             --status)           action="status" ;;
             --uninstall)        action="uninstall" ;;
-            *)                  die "Unknown option: $arg (use --dry-run, --healthcheck-only, --logging-only, --check-retention, --status, --uninstall, or no args)" ;;
+            *)                  die "Unknown option: $arg (use --dry-run, --force, --healthcheck-only, --logging-only, --check-retention, --status, --uninstall, or no args)" ;;
         esac
     done
 
