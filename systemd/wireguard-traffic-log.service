@@ -15,7 +15,8 @@ RemainAfterExit=yes
 ExecStart=/etc/wireguard/scripts/traffic-log.sh start
 ExecStop=/etc/wireguard/scripts/traffic-log.sh stop
 # Ports whose connections are not logged (DNS by default, see traffic-log.sh).
-# Override with `systemctl edit`, then restart this unit.
+# To add ports, prefer "# TrafficLog-SkipPort = ..." in the tunnel's conf; this
+# default is only replaced with `systemctl edit`, then restart this unit.
 Environment=WG_TRAFFIC_SKIP_PORTS=53
 
 # No NoNewPrivileges=, unlike the connection logger. Under SELinux, running nft

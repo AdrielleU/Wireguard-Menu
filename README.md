@@ -1671,7 +1671,8 @@ kernel directly (Debian, Ubuntu), from that input alone.
   and duration need conntrack event logging, a heavier setup than this.
 * **DNS lookups.** Port 53 is skipped by default: lookups are usually most of the
   new connections on a LAN, and record a name query rather than access to
-  anything. To log them too, clear the list and restart:
+  anything. `TrafficLog-SkipPort` lines add to this list; to log DNS too, clear
+  the default and restart:
 
   ```bash
   sudo systemctl edit wireguard-traffic-log.service   # add: [Service] / Environment=WG_TRAFFIC_SKIP_PORTS=
@@ -1680,15 +1681,18 @@ kernel directly (Debian, Ubuntu), from that input alone.
 
 **Skipping addresses.** Routers, switches and printers talk constantly — SNMP
 polls, pings from monitoring, syslog — and none of it is anyone reaching
-anything. List them in `/etc/wireguard/traffic-log.skip` (`install.sh` creates it
-empty, with instructions) and connections where **either end** is listed are not
-recorded:
+anything. List them on a `# TrafficLog-Skip` line in the tunnel's config, under
+its `Healthcheck-*` lines, and connections where **either end** is listed are
+not recorded. Entries are single addresses, `first-last` ranges or CIDR blocks,
+separated by commas or spaces; several lines are allowed, and none are required:
 
-```
-# /etc/wireguard/traffic-log.skip — one entry per line, # comments
-10.150.121.2                    # core switch: one address
-10.150.121.20-10.150.121.29     # access points: a range, first-last
-10.150.121.16/28                # printers: a CIDR block (.16 to .31)
+```ini
+[Interface]
+# Healthcheck-Role = site
+# Healthcheck-Reachability = 10.10.0.1
+# TrafficLog-Skip = 10.150.121.2                  # core switch
+# TrafficLog-Skip = 10.150.121.20-10.150.121.29   # access points
+# TrafficLog-SkipPort = 10050-10051               # Zabbix agents
 ```
 
 ```bash
@@ -1696,19 +1700,15 @@ sudo systemctl restart wireguard-traffic-log.service   # apply
 sudo ./traffic-log.sh status                           # shows what is in force
 ```
 
-The same entries can go in the tunnel's config instead, under its
-`Healthcheck-*` lines — handy when everything about the box should live in one
-file. Several lines are allowed, and both places are merged:
+**Skipping ports.** `TrafficLog-SkipPort` does the same for destination ports —
+single ports or `first-last` ranges — for protocols that are all machine and no
+person: monitoring agents (Zabbix `10050-10051`), SNMP (`161`). It adds to the
+DNS default rather than replacing it. Unlike an address, a port is skipped
+whoever is on either end, so list a port only if nothing but that monitoring
+uses it.
 
-```ini
-[Interface]
-# Healthcheck-Role = site
-# Healthcheck-Reachability = 10.10.0.1
-# TrafficLog-Skip = 10.150.121.2, 10.150.121.20-10.150.121.29
-```
-
-Wherever it is written, the list covers every tunnel on the box, since one table
-logs them all. A bad entry is reported and ignored rather than stopping the log, and each
+Whichever tunnel's config holds them, the lists cover every tunnel on the box,
+since one table logs them all. A bad entry is reported and ignored rather than stopping the log, and each
 restart records the list in force in its `TRAFFIC_LOG_START` line, so the trail
 shows what was excluded and since when. **Never list an address that stands in
 for a whole site** — a router translating its LAN into the tunnel. Every

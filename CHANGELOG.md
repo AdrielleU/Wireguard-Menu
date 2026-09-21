@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`# TrafficLog-SkipPort = ...` in a tunnel's conf** skips destination ports
+  or `first-last` port ranges, beside `TrafficLog-Skip` for addresses —
+  monitoring agents (Zabbix `10050-10051`) and SNMP, which were several lines a
+  second of machine-only traffic on a live site. The lines add to
+  `WG_TRAFFIC_SKIP_PORTS` (DNS by default) instead of replacing it, merge in an
+  auto-merged set, and a bad entry — the env's included, which previously went
+  straight to nft and failed the whole load — is reported with its file:line
+  and ignored. The ports in force go into `TRAFFIC_LOG_START` and `status`.
+- **The skip list lives only in the tunnel's conf.** It was first also read
+  from `/etc/wireguard/traffic-log.skip`, which `install.sh` created as a
+  template; ports could only ever go in the conf, so the file was a second place
+  to look for half the settings. It is no longer created or read. `install.sh`
+  removes it while it is still just the template's comments; if it holds
+  entries it is left alone, and `traffic-log.sh start` (and the install
+  preflight) warn to move them into a `# TrafficLog-Skip` line.
+- **`traffic-log.sh status` shows a long skip list whole.** nft wraps a long
+  set across several lines, and the status read it line by line, printing only
+  part of it.
 - **`install.sh` ends with the command to check the traffic log** —
   `grep 'action=TRAFFIC ' /var/log/wireguard.log | tail -n 5` — after a
   successful install that includes it (not on `--dry-run` or
@@ -25,16 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     matches every packet of a flow until it is answered — measured at 20 lines
     for one 20-packet UDP stream, 5 for an unanswered ping run, 3 for a retried
     SYN; all three are now 1.
-  - A skip list, `/etc/wireguard/traffic-log.skip`: connections where either end
-    is a listed address, `first-last` range or CIDR (IPv4 or IPv6) are not
-    recorded — routers',
-    switches' and printers' management traffic. nft validates each entry; a bad
-    one is reported with its line number and ignored, never stopping the log.
-    Overlapping entries merge. The list in force goes into `TRAFFIC_LOG_START`,
-    and `traffic-log.sh status` shows it. `install.sh` creates the file once as a
-    commented template and never overwrites it. Entries can also go in a
-    tunnel's conf as `# TrafficLog-Skip = ...` beside its `Healthcheck-*` lines;
-    both sources merge into one host-wide list.
+  - A skip list, `# TrafficLog-Skip = ...` beside a conf's `Healthcheck-*`
+    lines: connections where either end is a listed address, `first-last` range
+    or CIDR (IPv4 or IPv6) are not recorded — routers', switches' and printers'
+    management traffic. nft validates each entry; a bad one is reported with its
+    file:line and ignored, never stopping the log. Overlapping entries merge.
+    The list in force goes into `TRAFFIC_LOG_START`, and `traffic-log.sh status`
+    shows it. Optional: no line means nothing is skipped.
   - It only logs: policy accept, no drop or reject, a separate table. It cannot
     block anything, and firewalld's rules and the tunnel are untouched. Its
     chains run after firewalld's, so it records what was let through.

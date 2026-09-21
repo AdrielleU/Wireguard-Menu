@@ -34,21 +34,21 @@
 # this runs (re-run install.sh after adding one).
 #
 # Not logged: connections to the ports in WG_TRAFFIC_SKIP_PORTS, DNS (53) by
-# default. Lookups are usually most of the new connections on a LAN and record
+# default, plus any in a "# TrafficLog-SkipPort = <ports>" line in a tunnel's
+# conf (single ports or first-last ranges, e.g. monitoring agents' 10050-10051). Lookups are usually most of the new connections on a LAN and record
 # a name query, not access to anything -- and rsyslog's default intake limit
 # (20000 messages per 10 min, shared by the whole host) would drop them and
 # every other service's lines alike once exceeded. Set it empty to log DNS too.
 #
 # Not logged either: connections where EITHER end is on the skip list --
 # routers', switches' and printers' own management traffic, and the monitoring
-# that polls them. The list is read from two places and merged:
+# that polls them. The list lives beside the Healthcheck-* lines, in any
+# <iface>.conf, as one or more lines of:
 #
-#   /etc/wireguard/traffic-log.skip        one entry per line, # comments
-#   # TrafficLog-Skip = <entries>          in any <iface>.conf, beside the
-#                                          Healthcheck-* lines
+#   # TrafficLog-Skip = <entries>
 #
 # An entry is an IPv4/IPv6 address, a first-last range or a CIDR. The list is
-# host-wide wherever it is written, since the table covers every tunnel at once.
+# host-wide whichever conf it is in, since the table covers every tunnel at once.
 # Restart the unit to apply a change; the list in force is recorded in each
 # TRAFFIC_LOG_START. Never list an address that stands in for a whole site (a
 # router translating its LAN into the tunnel): that removes the site from the log.
@@ -67,9 +67,12 @@ source "$(dirname "$0")/utils.sh"
 
 TABLE="wireguard_traffic"
 SKIP_PORTS="${WG_TRAFFIC_SKIP_PORTS-53}"   # space-separated; "" logs everything
-SKIP_FILE="${WG_TRAFFIC_SKIP_FILE:-${WG_CONFIG_DIR}/traffic-log.skip}"
-SKIP_V4=()   # filled from SKIP_FILE by read_skip_hosts
+# A separate skip file was the first home of the address list. It is no longer
+# read; it is named only so leftover entries are reported rather than dropped.
+LEGACY_SKIP_FILE="${WG_CONFIG_DIR}/traffic-log.skip"
+SKIP_V4=()          # filled by read_skip_lists
 SKIP_V6=()
+SKIP_PORT_LIST=()
 
 # Every nft call takes its ruleset as an ARGUMENT, never on stdin. Under SELinux
 # (RHEL, enforcing) nft does not run in this script's domain: executing it
@@ -119,27 +122,50 @@ add_skip_list() {
     for addr in "${toks[@]}"; do add_skip_entry "$addr" "$where"; done
 }
 
-# Fill SKIP_V4 / SKIP_V6 from both sources: the skip file, and every
-# "# TrafficLog-Skip = ..." line in a tunnel's conf. Read the way healthcheck.sh
-# reads its Healthcheck-* lines -- everything after the first =, several lines
-# allowed -- so the two sit side by side and behave alike.
-read_skip_hosts() {
-    SKIP_V4=(); SKIP_V6=()
+# Add one port or first-last port range to SKIP_PORT_LIST, or report <where>
+# and drop it -- ignored, like a bad address, so a typo never stops the log.
+add_skip_port() {
+    local p="$1" where="$2" a b
+    if [[ "$p" =~ ^([0-9]{1,5})-([0-9]{1,5})$ ]]; then
+        a=$((10#${BASH_REMATCH[1]})); b=$((10#${BASH_REMATCH[2]}))
+        if (( a >= 1 && b <= 65535 && a <= b )); then SKIP_PORT_LIST+=("${a}-${b}"); return; fi
+    elif [[ "$p" =~ ^[0-9]{1,5}$ ]] && (( 10#$p >= 1 && 10#$p <= 65535 )); then
+        SKIP_PORT_LIST+=("$((10#$p))"); return
+    fi
+    print_warning "${where}: '${p}' is not a port or port range (1-65535), so it is ignored"
+}
+
+# Ports in <text>, separated by spaces or commas; `#` starts a comment.
+add_skip_ports() {
+    local text="$1" where="$2" p
+    local -a toks
+    IFS=$', \t' read -r -a toks <<<"${text%%#*}"
+    for p in "${toks[@]}"; do add_skip_port "$p" "$where"; done
+}
+
+# Fill the skip lists. Addresses come from every "# TrafficLog-Skip = ..." line
+# in a tunnel's conf; ports from
+# WG_TRAFFIC_SKIP_PORTS (DNS by default) plus every "# TrafficLog-SkipPort = ..."
+# line. Conf lines are read the way healthcheck.sh reads its Healthcheck-* lines
+# -- everything after the first =, several lines allowed -- so they sit side by
+# side and behave alike. Every source is optional.
+read_skip_lists() {
+    SKIP_V4=(); SKIP_V6=(); SKIP_PORT_LIST=()
+    add_skip_ports "$SKIP_PORTS" "WG_TRAFFIC_SKIP_PORTS"
     local line n conf
-    if [[ -f "$SKIP_FILE" ]]; then
-        n=0
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            n=$((n + 1))
-            add_skip_list "$line" "${SKIP_FILE}:${n}"
-        done < "$SKIP_FILE"
+    if [[ -f "$LEGACY_SKIP_FILE" ]] && grep -qvE '^[[:space:]]*(#|$)' "$LEGACY_SKIP_FILE"; then
+        print_warning "${LEGACY_SKIP_FILE} is no longer read, and it still lists addresses: move them into a '# TrafficLog-Skip = ...' line in your wg0.conf, then delete the file"
     fi
     shopt -s nullglob
     for conf in "${WG_CONFIG_DIR}"/*.conf; do
         n=0
         while IFS= read -r line || [[ -n "$line" ]]; do
             n=$((n + 1))
-            [[ "$line" =~ ^[[:space:]]*#[[:space:]]*TrafficLog-Skip[[:space:]]*=(.*)$ ]] || continue
-            add_skip_list "${BASH_REMATCH[1]}" "${conf}:${n}"
+            if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*TrafficLog-Skip[[:space:]]*=(.*)$ ]]; then
+                add_skip_list "${BASH_REMATCH[1]}" "${conf}:${n}"
+            elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*TrafficLog-SkipPort[[:space:]]*=(.*)$ ]]; then
+                add_skip_ports "${BASH_REMATCH[1]}" "${conf}:${n}"
+            fi
         done < "$conf"
     done
     shopt -u nullglob
@@ -159,16 +185,15 @@ ruleset() {
         oif="oifname { ${names} }"
         not_iif="iifname != { ${names} }"
     fi
-    local -a skip_ports
-    read -r -a skip_ports <<<"$SKIP_PORTS"
-    if (( ${#skip_ports[@]} > 0 )); then
-        local ports; ports=$(IFS=,; echo "${skip_ports[*]}")
-        # accept only ends THIS chain; the packet still meets every other table.
-        skip="meta l4proto { tcp, udp } th dport { ${ports} } accept"
-    fi
-    # Skipped hosts: named sets so overlapping entries (an address inside a
-    # listed range) merge instead of failing the load. Either end matches.
+    # Skip lists are named sets with auto-merge, so overlapping entries (an
+    # address inside a listed range, a port twice) merge instead of failing the
+    # load. accept only ends THIS chain; the packet still meets every other table.
     local sets="" skip_hosts=""
+    if (( ${#SKIP_PORT_LIST[@]} > 0 )); then
+        sets+="set skip_ports { type inet_service; flags interval; auto-merge; elements = { $(IFS=,; echo "${SKIP_PORT_LIST[*]}") } }"$'\n'
+        skip="meta l4proto { tcp, udp } th dport @skip_ports accept"
+    fi
+    # Skipped hosts: either end matches.
     if (( ${#SKIP_V4[@]} > 0 )); then
         sets+="set skip_v4 { type ipv4_addr; flags interval; auto-merge; elements = { $(IFS=,; echo "${SKIP_V4[*]}") } }"$'\n'
         skip_hosts+="ip saddr @skip_v4 accept"$'\n'"ip daddr @skip_v4 accept"$'\n'
@@ -208,10 +233,11 @@ delete table inet ${TABLE}
 ${rules}" || die "nft refused the ruleset; see: $0 --dry-run"
     match=$(kind_supported && echo kind || echo names)
     local skipped=("${SKIP_V4[@]}" "${SKIP_V6[@]}")
-    print_success "traffic logging on (match=${match}${SKIP_PORTS:+, not logging ports ${SKIP_PORTS}}, skipping ${#skipped[@]} address(es))"
+    local ports; ports=$(IFS=,; echo "${SKIP_PORT_LIST[*]}")
+    print_success "traffic logging on (match=${match}, not logging ports ${ports:-none}, skipping ${#skipped[@]} address(es))"
     # The exclusions in force belong in the trail: an auditor asking why a
     # connection is missing needs to see that it was excluded, and since when.
-    log_audit "TRAFFIC_LOG_START" "table=${TABLE} match=${match} skip_ports=${SKIP_PORTS// /,} skip_hosts=$(IFS=,; echo "${skipped[*]:-none}")"
+    log_audit "TRAFFIC_LOG_START" "table=${TABLE} match=${match} skip_ports=${ports:-none} skip_hosts=$(IFS=,; echo "${skipped[*]:-none}")"
 }
 
 cmd_stop() {
@@ -231,17 +257,26 @@ cmd_status() {
     fi
     total=$(grep -o 'counter packets [0-9]*' <<<"$listing" | awk '{ s += $3 } END { print s + 0 }')
     print_success "traffic logging is on: ${total} connection(s) logged since the table was loaded"
-    local listed
-    listed=$(grep -oE 'elements = \{[^}]*\}' <<<"$listing" | sed -E 's/elements = \{ *//; s/ *\}//' | paste -sd, -)
-    print_info "not logging connections to or from: ${listed:-nothing (no addresses in ${SKIP_FILE} or any TrafficLog-Skip line)}"
+    local hosts ports
+    hosts=$( { set_elements skip_v4; set_elements skip_v6; } | paste -sd, -)
+    ports=$(set_elements skip_ports)
+    print_info "not logging connections to or from: ${hosts:-nothing (no TrafficLog-Skip line in any conf)}"
+    print_info "not logging connections to ports: ${ports:-none}"
+}
+
+# A loaded set's elements, comma-joined; nothing if the set does not exist.
+# Read whole, not line by line: nft wraps a long list across several lines.
+set_elements() {
+    nft list set inet "$TABLE" "$1" 2>/dev/null | tr -s ' \t\n' ' ' \
+        | sed -nE 's/.*elements = \{ *([^}]*[^ }]) *\}.*/\1/p' | sed 's/, */,/g'
 }
 
 case "${1:-}" in
-    start)      check_root; read_skip_hosts; cmd_start ;;
+    start)      check_root; read_skip_lists; cmd_start ;;
     stop)       check_root; cmd_stop ;;
     status)     check_root; cmd_status ;;
-    --check)    check_root; read_skip_hosts; rules=$(ruleset) || exit 1; nft -c "$rules" ;;
-    --dry-run)  check_root; read_skip_hosts; ruleset ;;
+    --check)    check_root; read_skip_lists; rules=$(ruleset) || exit 1; nft -c "$rules" ;;
+    --dry-run)  check_root; read_skip_lists; ruleset ;;
     -h|--help)  sed -n '3,61p' "$0" | sed 's/^# \?//' ;;
     *)          die "Usage: $0 start|stop|status|--check|--dry-run" ;;
 esac

@@ -84,10 +84,9 @@ WG_LOG_FILE="${WG_LOG_FILE:-/var/log/wireguard.log}"
 # missing -> Result=exit-code, present -> Result=success.
 CONN_STATE_DIR="${WIREGUARD_CONN_STATE_DIR:-/var/lib/wireguard-connections}"
 
-# The traffic log's skip list: addresses it does not record. Created once as a
-# commented template so it can be found; never overwritten, since what is in it
-# is the admin's. Not *.conf: detect_servers would take it for an interface.
-TRAFFIC_SKIP_FILE="${WG_TRAFFIC_SKIP_FILE:-${WG_CONFIG_DIR}/traffic-log.skip}"
+# The traffic log's skip list lives in the tunnel's conf ("# TrafficLog-Skip").
+# An earlier version also created this file as a template; it is no longer read.
+LEGACY_SKIP_FILE="${WG_CONFIG_DIR}/traffic-log.skip"
 
 # The window the audit trail is expected to cover. HIPAA §164.316(b)(2)(i) is
 # 6 years; override for a different regime.
@@ -501,54 +500,21 @@ ensure_paths() {
         made=true
     fi
 
-    if $DO_LOGGING && [[ ! -e "$TRAFFIC_SKIP_FILE" ]]; then
+    # Clear away the template an earlier version created, but only while it is
+    # still nothing but comments: entries in it are the admin's, and
+    # traffic-log.sh warns about those instead.
+    if [[ -f "$LEGACY_SKIP_FILE" ]] && ! grep -qvE '^[[:space:]]*(#|$)' "$LEGACY_SKIP_FILE"; then
         if $DRY_RUN; then
-            echo "  would create ${TRAFFIC_SKIP_FILE} (mode 600) — the traffic log's skip list, empty"
+            echo "  would remove ${LEGACY_SKIP_FILE} — an unused template; the skip list is '# TrafficLog-Skip' in wg0.conf"
         else
-            skip_file_template > "$TRAFFIC_SKIP_FILE" || die "Failed to create ${TRAFFIC_SKIP_FILE}"
-            chmod 600 "$TRAFFIC_SKIP_FILE"
-            print_success "created ${TRAFFIC_SKIP_FILE} (mode 600) — the traffic log's skip list, empty"
+            rm -f "$LEGACY_SKIP_FILE"
+            print_success "removed ${LEGACY_SKIP_FILE} — an unused template; the skip list is '# TrafficLog-Skip' in wg0.conf"
         fi
-        made=true
     fi
 
     $made || print_info "Paths already present — nothing created, nothing touched."
 }
 
-skip_file_template() {
-    cat <<'EOF'
-# Addresses the WireGuard traffic log does NOT record (traffic-log.sh).
-# A connection is skipped when EITHER end is listed here.
-#
-# The same entries can also go in a tunnel's conf, beside its Healthcheck-*
-# lines; both places are merged, and the list covers every tunnel on this box:
-#
-#   [Interface]
-#   # Healthcheck-Role = site
-#   # TrafficLog-Skip = 10.150.121.2, 10.150.121.20-10.150.121.29
-#
-# One entry per line (spaces and commas also separate); anything after # is a
-# comment. A bad entry is reported and ignored. An entry is any of:
-#
-#   10.150.121.2                    one address
-#   10.150.121.20-10.150.121.29     a range, first-last (both included)
-#   10.150.121.16/28                a CIDR block (.16 to .31)
-#
-# IPv6 works the same way.
-# Apply a change with:   systemctl restart wireguard-traffic-log.service
-# Check what is in force: traffic-log.sh status
-#
-# Good candidates: routers', switches' and printers' own management traffic,
-# and the monitoring that polls them.
-#
-# Do NOT list an address that stands in for a whole site. If the other site
-# translates its machines into the tunnel (NAT), every connection from it
-# carries its router's address, and listing it removes that site from the log.
-#
-# 192.0.2.1                       # core switch (example)
-# 192.0.2.20-192.0.2.29           # access points (example)
-EOF
-}
 
 ################################################################################
 # UNITS
