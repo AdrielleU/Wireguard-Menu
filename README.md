@@ -1480,6 +1480,26 @@ kernel, labeled `action=TRAFFIC`, and the same rule puts them in the same file
 carries a full timestamp with the year (`2026-09-21T11:50:22.436716-07:00`);
 lines written before this version keep the old `Sep 21 11:50:22` form.
 
+**Only root can write to the trail.** Every script here runs as root, and
+anyone else who runs `logger -t wireguard "action=PEER_REMOVED …"` is kept out of
+the file. On RHEL, rsyslog reads the journal, which stamps each message with the
+sender's uid in a field no client can set (`_UID`); the rule takes a record only
+when it is `0`. The journal itself keeps whatever was sent, so filter the same
+way when you query it:
+
+```bash
+journalctl -t wireguard _UID=0 -o short-iso     # genuine records only
+```
+
+On Debian and Ubuntu, rsyslog reads a socket instead, which carries the sender's
+uid only if rsyslog is told to annotate it. Without that, a record is taken on
+its name alone. To get the same check there, load the socket input with
+annotation in `/etc/rsyslog.conf` and restart rsyslog:
+
+```
+module(load="imuxsock" SysSock.Annotate="on" SysSock.ParseTrusted="on")
+```
+
 `install.sh` writes the rsyslog rule that routes the tag to that file,
 and the logrotate policy that decides how long it is kept. Both are generated
 rather than shipped, so the log path and the retention window each have exactly

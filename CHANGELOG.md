@@ -55,6 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warns if IP forwarding is off or connection tracking wasn't already in use.
   `unit_install_service` now also rewrites `ExecStop`, and `unit_remove` stops
   and disables the service as well as the timer.
+- **Only root can write to the trail.** Any local user could add a record with
+  `logger -t wireguard "action=PEER_REMOVED ..."`. The rsyslog rule now takes a
+  `wireguard` record only when the journal's `_UID` is `0` (every script here
+  runs as root; journald will not let a client set the field), or, where rsyslog
+  reads a socket (Debian/Ubuntu), when imuxsock's annotated uid is `0`. With
+  annotation off there is no uid to check, and the record is taken on its name
+  as before; the README shows the one line that turns it on. Verified on all
+  three inputs, including a native-protocol spoof carrying a forged `_UID=0`.
+  `install.sh --status` counts `_UID=0` records only.
 - **`/var/log/wireguard.log` timestamps now include the year**
   (`RSYSLOG_FileFormat`, e.g. `2026-09-21T11:50:22.436716-07:00`). The host's
   default format (`Sep 21 11:50:22`) left it out, which a 6-year trail cannot do

@@ -127,17 +127,21 @@ rsyslog_rule_text() {
 # RSYSLOG_FileFormat puts the year in every timestamp, which a multi-year trail
 # cannot do without; the host's default format leaves it out.
 #
-# A traffic line is taken only from the kernel itself, never on its name: any
-# local user can \`logger -t kernel "${WG_TRAFFIC_LOG_PREFIX% } ..."\`. Where rsyslog reads
-# the journal (RHEL), _TRANSPORT marks real kernel lines, and journald will not
-# let a client set it. Where it reads the kernel directly through imklog
-# (Debian, Ubuntu), that input carries nothing else.
+# Neither kind of line is taken on its name alone, since any local user can
+# \`logger -t wireguard ...\` or \`logger -t kernel ...\`. Where rsyslog reads the
+# journal (RHEL), journald stamps every entry with trusted fields a client cannot
+# set: a record must carry _UID=0 (every script here runs as root), and a traffic
+# line _TRANSPORT=kernel. Where it reads a socket instead (Debian, Ubuntu), a
+# traffic line must come through imklog, which carries nothing but the kernel;
+# a record is checked against the sender's uid if imuxsock annotates it
+# (Annotate/ParseTrusted), and otherwise can only be taken on its name.
 #
 # The trailing "stop" keeps them OUT of the shared logs, so this file is the
 # whole trail. Drop it if you would rather have a copy in both. journald keeps
 # its own copy either way: \`journalctl -t wireguard\` for the records, and
 # \`journalctl -k --grep "${WG_TRAFFIC_LOG_PREFIX% }"\` for the traffic.
-if (\$programname == "wireguard") or
+if (\$programname == "wireguard" and
+    (\$!_UID == "0" or (\$inputname == "imuxsock" and (\$!uid == "0" or \$!uid == "")))) or
    (\$msg contains "${WG_TRAFFIC_LOG_PREFIX% }" and (\$!_TRANSPORT == "kernel" or \$inputname == "imklog")) then {
     action(type="omfile" file="${WG_LOG_FILE}" fileCreateMode="0600" template="RSYSLOG_FileFormat")
     stop
@@ -651,7 +655,7 @@ show_status() {
     systemctl list-timers 'wireguard-*' --all --no-pager
     echo
     local n
-    n=$(journalctl -t wireguard --no-pager 2>/dev/null | grep -c . || true)
+    n=$(journalctl -t wireguard _UID=0 --no-pager 2>/dev/null | grep -c . || true)
     print_info "audit records currently in the journal: ${n:-0}"
     [[ -f "$WG_LOG_FILE" ]] && print_info "trail file: ${WG_LOG_FILE} ($(wc -l < "$WG_LOG_FILE") lines)"
     "${REPO_DIR}/traffic-log.sh" status
