@@ -1124,7 +1124,7 @@ sudo ./healthcheck.sh -v                  # every check, changes nothing
 sudo ./log-connections.sh --dry-run       # the records it would write
 ```
 
-Three things that look like problems but aren't, and two that look fine but aren't:
+Two things that look like problems but aren't, and three that look fine but aren't:
 
 * The service is `Type=oneshot`, so its healthy steady state is
   **`inactive (dead)` with `status=0/SUCCESS`**. That is correct, not a failure.
@@ -1133,8 +1133,21 @@ Three things that look like problems but aren't, and two that look fine but aren
   filters systemd's per-run chatter (see above). Failures, the scripts' own
   output, and every audit record still land — check
   `journalctl -t wireguard`.
-* **Silence under `wireguard` is healthy** — it only logs failures and
-  actions, never routine success.
+* **Silence under `wireguard` is NOT healthy.** Each interface logs a
+  `HEALTHCHECK_OK` heartbeat every ~50 min, so the last hour always holds at
+  least one record per interface:
+
+  ```
+  action=HEALTHCHECK_OK user=root source_ip=local interface=wg0 reach=ok peers=1/1
+  ```
+
+  `reach=skipped` means no `Healthcheck-Reachability` line, so only the
+  structural checks ran. `journalctl -t wireguard --since -1h` coming back
+  `-- No entries --` means the timer is not running, or it is running as a user
+  who cannot read the system journal (use `sudo`). A box with no configs in
+  `/etc/wireguard` logs `HEALTHCHECK_NO_INTERFACES` at the same rate.
+  Set `HEARTBEAT_SECS` in the unit's environment to change the interval, or to
+  `0` to turn it off.
 * **A timer can be `enabled` and `active` and still never fire.** Check the
   `NEXT` column of `systemctl list-timers`: `-` means nothing is scheduled.
   Timers that start from `OnBootSec` are skipped for good when a slow boot
@@ -1691,6 +1704,10 @@ If a remote box is itself a **server** that other peers dial into, mark it
 ssh root@site-b 'systemctl list-timers "wireguard-*"; /etc/wireguard/scripts/verify-config.sh --all'
 ssh root@site-b 'journalctl -t wireguard --since -1h -o short-iso'
 ```
+
+The logs live on each box, not on the machine you run `ssh` from. Expect at
+least one `HEALTHCHECK_OK` per interface in that hour. If it prints
+`-- No entries --`, the healthcheck timer on that box is not running.
 
 ## Contributing
 

@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`healthcheck.sh` logs a heartbeat.** Each healthy interface now writes one
+  `HEALTHCHECK_OK` record (`reach=`, `peers=connected/total`) every
+  `HEARTBEAT_SECS`, 50 min by default. Before this, a healthy box wrote nothing,
+  so `-- No entries --` looked the same whether the tunnel was fine, the timer
+  had stopped, or the configs were gone. A box with no configs now logs
+  `HEALTHCHECK_NO_INTERFACES` at the same rate instead of exiting silently.
+  Rate-limited by a stamp file, `/etc/wireguard/.healthcheck-<iface>.lastok`.
+  If the stamp can't be written, nothing is logged, rather than logging on
+  every tick. The 50 min default is under an hour so that
+  `journalctl --since -1h` always holds at least one record. `HEARTBEAT_SECS=0`
+  turns it off.
 - **`menu.sh` now writes an audit record for every change it makes** —
   `SERVER_SETUP`, `PEER_ADDED`, `PEER_REMOVED`, `PEER_PAUSED`, `PEER_RESUMED`,
   `KEYS_ROTATED`. It previously logged **nothing at all**: the tag named

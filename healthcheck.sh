@@ -235,6 +235,15 @@ RESTART_COOLDOWN_SECS="${RESTART_COOLDOWN_SECS:-900}"   # 15 min
 # --fail-threshold if you want an even more conservative box.
 PING_FAIL_THRESHOLD=1
 
+# Heartbeat. Everything else this script logs is a failure or a recovery, so a
+# healthy box used to write nothing at all -- and an empty log then read exactly
+# like a box whose timer had stopped or whose configs were gone. One
+# HEALTHCHECK_OK per interface per HEARTBEAT_SECS makes silence mean something:
+# no recent heartbeat is itself the alarm. The default sits under an hour so
+# `journalctl -t wireguard --since -1h` always holds one despite timer jitter.
+# 0 turns it off.
+HEARTBEAT_SECS="${HEARTBEAT_SECS:-3000}"   # 50 min
+
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -349,6 +358,27 @@ restart_cooldown_left() {
     else
         echo $(( RESTART_COOLDOWN_SECS - elapsed ))
     fi
+}
+
+# When this interface last logged a heartbeat, persisted the same way. <key> is
+# an interface name, or "no-interfaces" for the heartbeat of a box with none.
+heartbeat_state_file() { echo "${WG_CONFIG_DIR}/.healthcheck-${1}.lastok"; }
+
+# Succeeds, and stamps the time, when <key>'s last heartbeat is HEARTBEAT_SECS
+# old. Fails when the stamp cannot be written: without it the rate limit is
+# gone, and a heartbeat on every tick is worse than none. No mkdir, unlike the
+# helpers above -- a missing config dir is not this script's to create.
+heartbeat_due() {
+    (( HEARTBEAT_SECS > 0 )) || return 1
+    local f last now
+    f=$(heartbeat_state_file "$1")
+    last=$(cat "$f" 2>/dev/null)
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    now=$(date +%s)
+    # now < last: the clock went backwards, so the stamp proves nothing.
+    (( now - last >= HEARTBEAT_SECS || now < last )) || return 1
+    { echo "$now" > "$f"; } 2>/dev/null || return 1
+    chmod 600 "$f" 2>/dev/null || true
 }
 
 # Resolve this interface's reachability targets, one per line: the --ping-target
@@ -583,13 +613,13 @@ reresolve_endpoints() {
     return $did
 }
 
-# Print the peer reachability summary for one interface (informational).
-report_peers() {
+# "<connected> <total> <stale>" for one interface, judged by handshake age.
+peer_counts() {
     local iface="$1"
-    command -v wg &>/dev/null || return 0
     local now total stale connected
     now=$(date +%s)
     total=0; stale=0; connected=0
+    command -v wg &>/dev/null || { echo "0 0 0"; return; }
 
     while IFS=$'\t' read -r pubkey _ _ _ handshake _ _ _; do
         [[ -z "$pubkey" ]] && continue
@@ -602,6 +632,14 @@ report_peers() {
             ((connected++)) || true
         fi
     done < <(wg show "$iface" dump 2>/dev/null | tail -n +2)
+    echo "$connected $total $stale"
+}
+
+# Print the peer reachability summary for one interface (informational).
+report_peers() {
+    local iface="$1" connected total stale
+    command -v wg &>/dev/null || return 0
+    read -r connected total stale < <(peer_counts "$iface")
 
     if (( total == 0 )); then
         echo "  peers: 0 configured"
@@ -842,6 +880,15 @@ process_interface() {
         print_success "${iface}: healthy"
         report_peers "$iface"
     fi
+
+    # Only a clean verdict is a heartbeat. The other paths that end here (target
+    # down, a streak below threshold, a bad reachability comment) have already
+    # logged a record of their own.
+    if [[ "$reach" == ok || "$reach" == skipped ]] && heartbeat_due "$iface"; then
+        local connected total
+        read -r connected total _ < <(peer_counts "$iface")
+        log_audit "HEALTHCHECK_OK" "interface=${iface} reach=${reach} peers=${connected}/${total}"
+    fi
     return 0
 }
 
@@ -858,6 +905,10 @@ main() {
     fi
     if [[ ${#interfaces[@]} -eq 0 ]]; then
         $VERBOSE && print_info "No WireGuard interfaces configured — nothing to check"
+        # At the heartbeat rate, not every tick. Without it a box whose configs
+        # were removed logs nothing, which reads exactly like a healthy one.
+        heartbeat_due "no-interfaces" \
+            && log_audit "HEALTHCHECK_NO_INTERFACES" "config_dir=${WG_CONFIG_DIR}"
         exit 0
     fi
 
