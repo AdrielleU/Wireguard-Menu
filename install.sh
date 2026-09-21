@@ -618,6 +618,13 @@ install_all() {
 
     systemctl list-timers 'wireguard-*' --all --no-pager
     $DO_LOGGING && check_retention
+
+    # Reached only on success: every failure above exits through die.
+    if $DO_LOGGING; then
+        echo
+        print_success "Installed. To check the traffic log (lines appear once something crosses the tunnel):"
+        echo "    grep '${WG_TRAFFIC_LOG_PREFIX}' ${WG_LOG_FILE} | tail -n 5"
+    fi
     return 0
 }
 

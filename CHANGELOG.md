@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`install.sh` ends with the command to check the traffic log** —
+  `grep 'action=TRAFFIC ' /var/log/wireguard.log | tail -n 5` — after a
+  successful install that includes it (not on `--dry-run` or
+  `--healthcheck-only`).
 - **Traffic log: every connection through a tunnel, in the same trail.**
   WireGuard logs no traffic, and the documented setup puts `wg0` in firewalld's
   `trusted` zone, so nothing recorded which machine on one LAN reached which
