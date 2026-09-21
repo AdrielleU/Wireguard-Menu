@@ -224,6 +224,12 @@ _audit_have_journald() {
 WG_LOG_TAG="wireguard"
 WG_LOG_FACILITY="local0.notice"
 
+# The traffic log (traffic-log.sh) is the exception: its lines come from the
+# kernel's nftables `log` statement, not from logger, so they arrive tagged
+# "kernel". This prefix labels them the way every other record is labeled, and
+# install.sh's rsyslog rule matches on it to put them in the same file.
+WG_TRAFFIC_LOG_PREFIX="action=TRAFFIC "
+
 # Operator actions and health events (carries who ran it).
 # notice, not info: the units set LogLevelMax=notice to keep systemd's per-run
 # "Starting/Finished" lines (info) out of the journal, and an info-level record
@@ -527,7 +533,7 @@ unit_install_service() {
 
     local unit
     unit=$(sed -E \
-        -e "s#^ExecStart=[^ ]*/([A-Za-z0-9_.-]+\.sh)#ExecStart=${repo_dir}/\1#" \
+        -e "s#^(ExecStart|ExecStop)=[^ ]*/([A-Za-z0-9_.-]+\.sh)#\1=${repo_dir}/\2#" \
         -e "s#^Documentation=file://[^ ]*/([A-Za-z0-9_.-]+\.sh)#Documentation=file://${repo_dir}/\1#" \
         "$src") || die "Failed to read ${src}"
 
@@ -583,17 +589,23 @@ unit_enable_timer() {
     return 0
 }
 
+# Stops and disables whichever of <base>.timer and <base>.service exist, timer
+# first. Stopping the service matters for a unit with no timer (the traffic
+# log): its ExecStop is what unloads what it set up.
 unit_remove() {
     local base="$1" f
     if ${DRY_RUN:-false}; then
-        echo "  would run: systemctl disable --now ${base}.timer"
         for f in "${base}.timer" "${base}.service"; do
-            [[ -e "${UNIT_DST}/${f}" ]] && echo "  would remove ${UNIT_DST}/${f}"
+            [[ -e "${UNIT_DST}/${f}" ]] || continue
+            echo "  would run: systemctl disable --now ${f}"
+            echo "  would remove ${UNIT_DST}/${f}"
         done
         echo "  would run: systemctl daemon-reload"
         return 0
     fi
-    systemctl disable --now "${base}.timer" 2>/dev/null || true
+    for f in "${base}.timer" "${base}.service"; do
+        [[ -e "${UNIT_DST}/${f}" ]] && { systemctl disable --now "$f" 2>/dev/null || true; }
+    done
     for f in "${base}.timer" "${base}.service"; do
         [[ -e "${UNIT_DST}/${f}" ]] || continue
         rm -f "${UNIT_DST}/${f}" && print_success "removed ${f}"

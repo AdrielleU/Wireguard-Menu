@@ -8,6 +8,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Traffic log: every connection through a tunnel, in the same trail.**
+  WireGuard logs no traffic, and the documented setup puts `wg0` in firewalld's
+  `trusted` zone, so nothing recorded which machine on one LAN reached which
+  machine and port on another. `traffic-log.sh` loads its own nftables table,
+  `inet wireguard_traffic`, that logs one line per new connection
+  (`ct state new`) crossing a tunnel or arriving at the box over one. Lines are
+  labeled `action=TRAFFIC` and go to `/var/log/wireguard.log` with every other
+  record, so an audit reads one timeline.
+  - Exactly one line per connection: `ct state new` plus
+    `ct status & confirmed == 0`, the first packet only. `ct state new` alone
+    matches every packet of a flow until it is answered — measured at 20 lines
+    for one 20-packet UDP stream, 5 for an unanswered ping run, 3 for a retried
+    SYN; all three are now 1.
+  - A skip list, `/etc/wireguard/traffic-log.skip`: connections where either end
+    is a listed address, `first-last` range or CIDR (IPv4 or IPv6) are not
+    recorded — routers',
+    switches' and printers' management traffic. nft validates each entry; a bad
+    one is reported with its line number and ignored, never stopping the log.
+    Overlapping entries merge. The list in force goes into `TRAFFIC_LOG_START`,
+    and `traffic-log.sh status` shows it. `install.sh` creates the file once as a
+    commented template and never overwrites it. Entries can also go in a
+    tunnel's conf as `# TrafficLog-Skip = ...` beside its `Healthcheck-*` lines;
+    both sources merge into one host-wide list.
+  - It only logs: policy accept, no drop or reject, a separate table. It cannot
+    block anything, and firewalld's rules and the tunnel are untouched. Its
+    chains run after firewalld's, so it records what was let through.
+  - Only the kernel can write a traffic line. The rsyslog rule requires the
+    journal's `_TRANSPORT=kernel` (which no client can set), or the imklog input
+    on Debian/Ubuntu. Matching the name `kernel` alone let any local user add
+    one with `logger -t kernel`; verified against syslog, native-protocol and
+    socket spoofs.
+  - Tunnels are matched by interface kind, so one added later is covered with no
+    reload, falling back to the configured names on kernels without it.
+  - DNS (port 53) is skipped by default (`WG_TRAFFIC_SKIP_PORTS`), since lookups
+    would dominate the volume and could push rsyslog past its intake limit.
+  - Start and stop are recorded as `TRAFFIC_LOG_START` / `TRAFFIC_LOG_STOP`, so a
+    gap is explained.
+  - Runs under SELinux enforcing. Its unit omits `NoNewPrivileges=`, which
+    forbids the `init_t` -> `iptables_t` transition nft makes (`nnp_transition
+    denied` on RHEL 9), and nft gets its ruleset as an argument rather than on
+    stdin, so it inherits nothing but its output, as under `nftables.service`.
+
+  `wireguard-traffic-log.service` holds the table and is installed with the audit
+  control. The preflight fails if `nft` is missing or the ruleset won't load, and
+  warns if IP forwarding is off or connection tracking wasn't already in use.
+  `unit_install_service` now also rewrites `ExecStop`, and `unit_remove` stops
+  and disables the service as well as the timer.
+- **`/var/log/wireguard.log` timestamps now include the year**
+  (`RSYSLOG_FileFormat`, e.g. `2026-09-21T11:50:22.436716-07:00`). The host's
+  default format (`Sep 21 11:50:22`) left it out, which a 6-year trail cannot do
+  without. Existing lines keep the old form.
+- **`install.sh --check-retention` warns when rsyslog has dropped messages** to
+  its intake rate limit in the last 30 days, since the trail then has holes.
 - **`install.sh` runs a preflight before writing anything**, and stops on:
   - `wg`, `wg-quick`, `ip` or `logger` missing
   - no WireGuard instance on the host

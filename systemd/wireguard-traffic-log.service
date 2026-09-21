@@ -1,0 +1,32 @@
+[Unit]
+Description=WireGuard traffic log (one kernel log line per new connection through a tunnel)
+Documentation=file:///etc/wireguard/scripts/traffic-log.sh
+# After the firewall, so a firewall that flushes the whole ruleset on start
+# (nftables.service loading an nftables.conf that begins "flush ruleset") runs
+# first. PartOf re-loads the table when nftables.service restarts, for the same
+# reason. firewalld manages only its own tables, so it needs neither.
+After=nftables.service firewalld.service
+PartOf=nftables.service
+
+[Service]
+# Not a daemon: the kernel does the logging. The unit only holds the table.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/wireguard/scripts/traffic-log.sh start
+ExecStop=/etc/wireguard/scripts/traffic-log.sh stop
+# Ports whose connections are not logged (DNS by default, see traffic-log.sh).
+# Override with `systemctl edit`, then restart this unit.
+Environment=WG_TRAFFIC_SKIP_PORTS=53
+
+# No NoNewPrivileges=, unlike the connection logger. Under SELinux, running nft
+# transitions this unit's init_t into iptables_t, and NoNewPrivileges forbids
+# exactly that transition: nft is then refused outright ("nnp_transition
+# denied"). RHEL's own nftables.service runs nft the same way, without it.
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictRealtime=yes
+
+[Install]
+WantedBy=multi-user.target

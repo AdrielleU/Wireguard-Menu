@@ -752,12 +752,14 @@ when running setup.
 ├── healthcheck.sh                   # One-shot runtime health check (cron / systemd timer)
 ├── verify-config.sh                 # Config conformance check (does it match our format?)
 ├── log-connections.sh                # Connection logger for systemd journal
+├── traffic-log.sh                    # Traffic log: every connection through a tunnel, as action=TRAFFIC
 ├── install.sh                          # Install/enable both timers, the trail's routing and its retention
 ├── systemd/
 │   ├── wireguard-healthcheck.service       # Oneshot service for the healthcheck
 │   ├── wireguard-healthcheck.timer         # Fires the service every 60s
 │   ├── wireguard-log-connections.service   # Oneshot service for the connection logger
-│   └── wireguard-log-connections.timer     # Fires the service every 2 min
+│   ├── wireguard-log-connections.timer     # Fires the service every 2 min
+│   └── wireguard-traffic-log.service       # Holds the traffic log's nftables table
 ├── utils.sh                         # Shared helpers (sourced by other scripts)
 ├── README.md                        # All user documentation (you are here)
 ├── CHANGELOG.md                     # Version history
@@ -778,6 +780,7 @@ prints what it would do, but writes nothing.
 | Dry run | Checks | Touches |
 | ------- | ------ | ------- |
 | `install.sh --dry-run` | the preflight (a WireGuard instance exists, its tunnels run under `wg-quick@`, the configs pass `verify-config.sh`), both units' scripts exist and are executable, no cron entry double-runs them, plus the exact rsyslog and logrotate files it would write | nothing |
+| `traffic-log.sh --dry-run` | builds the nftables ruleset and checks this kernel can match WireGuard interfaces, prints the ruleset | nothing — no table loaded |
 | `log-connections.sh --dry-run` | reads `wg show dump` and the state file, prints the connect/disconnect records it would write | nothing — no journal entries, no state file |
 
 Two more need no flag, because they only read:
@@ -1064,7 +1067,7 @@ questions and you may want to enable, verify or report on them apart:
 | Control | Answers | Installs | On its own |
 | ------- | ------- | -------- | ---------- |
 | Availability | is the tunnel up; restart it if not | `wireguard-healthcheck.{service,timer}` | `--healthcheck-only` |
-| Audit | the connect/disconnect trail | `wireguard-log-connections.{service,timer}`, the rsyslog rule routing the trail to `/var/log/wireguard.log`, and its logrotate policy | `--logging-only` |
+| Audit | the connect/disconnect trail, and every connection through a tunnel | `wireguard-log-connections.{service,timer}`, `wireguard-traffic-log.service`, the rsyslog rule routing both to `/var/log/wireguard.log`, and its logrotate policy | `--logging-only` |
 
 It rewrites each unit's `ExecStart`/`Documentation` to wherever this repo
 actually lives, so you are not locked to a hardcoded path, and it is idempotent
@@ -1471,6 +1474,12 @@ journalctl -t wireguard -f         # the same records, structured
 journalctl WG_ACTION=PEER_REMOVED  # query by indexed field
 ```
 
+The traffic log's lines are the one exception to the tag: they come from the
+kernel, labeled `action=TRAFFIC`, and the same rule puts them in the same file
+(see [Traffic Logging](#traffic-logging-lan-to-lan)). Every line in the file
+carries a full timestamp with the year (`2026-09-21T11:50:22.436716-07:00`);
+lines written before this version keep the old `Sep 21 11:50:22` form.
+
 `install.sh` writes the rsyslog rule that routes the tag to that file,
 and the logrotate policy that decides how long it is kept. Both are generated
 rather than shipped, so the log path and the retention window each have exactly
@@ -1561,6 +1570,146 @@ journalctl -t wireguard                                  # admin actions
 journalctl -t wireguard                                 # the whole timeline
 ```
 
+## Traffic Logging (LAN to LAN)
+
+The connection trail above records the **link**: when a site came up and went
+down. It says nothing about what went **through** it — WireGuard logs no
+traffic, and a tunnel in firewalld's `trusted` zone passes everything without a
+word. `traffic-log.sh` is that record: one line for every new connection that
+crosses a tunnel, naming the machine that opened it and the machine and port it
+reached, labeled `action=TRAFFIC` in the same file as everything else:
+
+```
+2026-09-21T11:48:02.113204-07:00 hub wireguard[2231]: action=CONNECT peer=site-b interface=wg0 endpoint=203.0.113.45:51820 ...
+2026-09-21T11:50:22.436716-07:00 hub kernel: action=TRAFFIC IN=wg0 OUT=eth1 MAC= SRC=192.168.50.23 DST=192.168.10.5 LEN=60 TOS=0x00 PREC=0x00 TTL=63 ID=36813 DF PROTO=TCP SPT=50438 DPT=443 WINDOW=64860 RES=0x00 SYN URGP=0
+2026-09-21T12:00:03.201553-07:00 hub wireguard[2398]: action=HEALTHCHECK_OK interface=wg0 reach=ok peers=1/1
+```
+
+One timeline, so an audit reads straight down it: the site link came up, this
+machine reached that server, the link went down.
+
+```bash
+sudo grep 'action=TRAFFIC' /var/log/wireguard.log               # only traffic
+sudo grep -v 'action=TRAFFIC' /var/log/wireguard.log            # everything but traffic
+sudo grep 'action=TRAFFIC.* SRC=192.168.50.23 ' /var/log/wireguard.log   # one machine
+sudo zgrep 'action=TRAFFIC.* DPT=3389 ' /var/log/wireguard.log*  # every RDP session, rotated files too
+sudo journalctl -k --grep 'action=TRAFFIC' -o short-iso          # the journal's copy
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `IN=wg0 OUT=eth1` | arrived from the tunnel, went to the local LAN: a remote site reaching in. The reverse (`IN=eth1 OUT=wg0`) is this LAN reaching out. An empty `OUT=` means the connection was to this box itself. |
+| `SRC=` / `DST=` | the machines at each end — the real ones, as long as nothing translates addresses (NAT) on the way. See the note below. |
+| `PROTO=` `DPT=` | protocol and destination port: what was reached (`443` web, `445` file share, `3389` remote desktop, …). |
+
+**If every line from the other site shows the same `SRC=`,** that site is
+translating its machines' addresses (NAT, masquerade) into the tunnel, usually
+to its router's or tunnel address. Everything from there then carries that one
+address, and no log on this side can tell its machines apart — the real address
+was replaced before the packet left. Don't filter that address out: it is all of
+that site's traffic. Either stop the NAT into the tunnel on that side (this
+side's `AllowedIPs` for the peer must then include that site's LAN), or run the
+traffic log on that site's WireGuard box too, which sees its machines before the
+translation. To check which it is, connect from one machine there and see which
+address this log records.
+
+The fields are the kernel's own, so they are upper case (`SRC=`, `DPT=`) where
+the toolkit's records are lower case; the `action=` label is the same. In the
+journal these lines sit under `kernel`, not `wireguard`, so
+`journalctl -t wireguard` does not show them — the file does.
+
+**How.** An nftables table of its own, `inet wireguard_traffic`, whose chains
+only log. It has policy `accept` and no drop or reject, so it cannot block
+anything, and it is a separate table, so firewalld's rules and the tunnel are
+untouched. Its chains run after firewalld's, so what it logs is what the firewall
+actually let through. It logs the first packet of each connection only, so a
+voice stream or an unanswered ping is one line, not one per packet. `wireguard-traffic-log.service` loads the table at boot and removes it
+on stop; `install.sh` installs it with the rest of the audit control. It runs
+under SELinux enforcing the way RHEL's own `nftables.service` does — without
+`NoNewPrivileges=`, which would forbid nft's switch into its `iptables_t` domain.
+
+```bash
+sudo ./traffic-log.sh status      # on, and connections logged since it loaded
+sudo ./traffic-log.sh --dry-run   # the exact ruleset it loads
+```
+
+Every start and stop is itself recorded (`TRAFFIC_LOG_START` /
+`TRAFFIC_LOG_STOP`), so a gap in the traffic is explained by the trail rather
+than left to guesswork.
+
+**Only the kernel can write a traffic line.** The rsyslog rule does not trust
+the name `kernel` — any local user can run `logger -t kernel "action=TRAFFIC …"`.
+It takes a traffic line only when the journal marks it as coming from the kernel
+(`_TRANSPORT=kernel`, which no client can set), or, where rsyslog reads the
+kernel directly (Debian, Ubuntu), from that input alone.
+
+**What it does not tell you.**
+
+* **Which person.** It names machines. Who was signed in comes from the EHR's or
+  the application's own access log; together they answer "who reached what".
+* **What was inside,** how long it lasted, or how much data moved. Byte counts
+  and duration need conntrack event logging, a heavier setup than this.
+* **DNS lookups.** Port 53 is skipped by default: lookups are usually most of the
+  new connections on a LAN, and record a name query rather than access to
+  anything. To log them too, clear the list and restart:
+
+  ```bash
+  sudo systemctl edit wireguard-traffic-log.service   # add: [Service] / Environment=WG_TRAFFIC_SKIP_PORTS=
+  sudo systemctl restart wireguard-traffic-log.service
+  ```
+
+**Skipping addresses.** Routers, switches and printers talk constantly — SNMP
+polls, pings from monitoring, syslog — and none of it is anyone reaching
+anything. List them in `/etc/wireguard/traffic-log.skip` (`install.sh` creates it
+empty, with instructions) and connections where **either end** is listed are not
+recorded:
+
+```
+# /etc/wireguard/traffic-log.skip — one entry per line, # comments
+10.150.121.2                    # core switch: one address
+10.150.121.20-10.150.121.29     # access points: a range, first-last
+10.150.121.16/28                # printers: a CIDR block (.16 to .31)
+```
+
+```bash
+sudo systemctl restart wireguard-traffic-log.service   # apply
+sudo ./traffic-log.sh status                           # shows what is in force
+```
+
+The same entries can go in the tunnel's config instead, under its
+`Healthcheck-*` lines — handy when everything about the box should live in one
+file. Several lines are allowed, and both places are merged:
+
+```ini
+[Interface]
+# Healthcheck-Role = site
+# Healthcheck-Reachability = 10.10.0.1
+# TrafficLog-Skip = 10.150.121.2, 10.150.121.20-10.150.121.29
+```
+
+Wherever it is written, the list covers every tunnel on the box, since one table
+logs them all. A bad entry is reported and ignored rather than stopping the log, and each
+restart records the list in force in its `TRAFFIC_LOG_START` line, so the trail
+shows what was excluded and since when. **Never list an address that stands in
+for a whole site** — a router translating its LAN into the tunnel. Every
+connection from that site carries it, and listing it removes the site from the
+log.
+
+**Two limits to know.** Both come from the host's logging, not from this table.
+
+* **rsyslog's intake limit.** By default rsyslog accepts 20,000 journal messages
+  per 10 minutes for the whole host and silently drops the rest — including other
+  services' lines. That is about 33 new connections a second, sustained. When it
+  happens rsyslog says so afterwards, and `install.sh --check-retention` reports
+  it. The table's counter (`traffic-log.sh status`) is the kernel's own count to
+  compare against.
+* **Journal space.** The kernel's lines also land in the journal, which evicts its
+  oldest entries sooner under the extra volume. The file is the trail; the
+  journal copy is a convenience.
+
+Traffic will be most of the file, so it decides the disk the retention window
+needs. Measure it for a week, then check with `install.sh --check-retention`.
+
 ## Remote Site Boxes (monitoring only)
 
 A remote site-to-site box — a spoke in the
@@ -1572,6 +1721,7 @@ config check:
 | ----- | --- |
 | `healthcheck.sh` | Availability — restart the tunnel when it dies |
 | `log-connections.sh` | Audit — the connect/disconnect trail |
+| `traffic-log.sh` | Audit — every connection through the tunnel |
 | `install.sh` | Installs both, plus the trail's routing and retention |
 | `verify-config.sh` | Is this box's config shaped right? |
 | `utils.sh` | Sourced by all of the above |
@@ -1596,7 +1746,7 @@ cd /etc/wireguard/scripts && git pull
 or, copying from your workstation:
 
 ```bash
-rsync -a healthcheck.sh log-connections.sh verify-config.sh \
+rsync -a healthcheck.sh log-connections.sh traffic-log.sh verify-config.sh \
          install.sh utils.sh systemd \
          root@site-b:/etc/wireguard/scripts/
 ```
@@ -1654,7 +1804,7 @@ sudo systemctl restart systemd-journald && sudo journalctl --flush
 ### 1. Copy the files over
 
 ```bash
-rsync -a healthcheck.sh log-connections.sh verify-config.sh \
+rsync -a healthcheck.sh log-connections.sh traffic-log.sh verify-config.sh \
          install.sh utils.sh systemd \
          root@site-b:/etc/wireguard/scripts/
 ```

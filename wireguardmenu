@@ -48,12 +48,13 @@ declare -A COMMANDS=(
     [healthcheck]="healthcheck.sh|Run health checks (is the tunnel working now?)"
     [verify]="verify-config.sh|Verify the config matches the expected format"
     [log-connections]="log-connections.sh|Connection logging / audit"
+    [traffic-log]="traffic-log.sh|Traffic log: start, stop, status (LAN-to-LAN audit)"
     [menu]="menu.sh|Launch the interactive menu"
 )
 
 # Display order for help (assoc arrays are unordered in bash).
 ORDER=(setup add-peer remove-peer list-peers toggle-peer \
-       rotate-keys healthcheck verify log-connections menu)
+       rotate-keys healthcheck verify log-connections traffic-log menu)
 
 # Convenience aliases
 declare -A ALIASES=(
@@ -128,6 +129,7 @@ uninstall_link() {
 TEST_RUNS=(
     "install.sh --dry-run"
     "log-connections.sh --dry-run"
+    "traffic-log.sh --dry-run"
 )
 
 run_tests() {
